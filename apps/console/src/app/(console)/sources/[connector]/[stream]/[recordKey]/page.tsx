@@ -46,6 +46,8 @@ import {
   reverseChildListDedupKey,
   reverseChildListLinksFromManifest,
 } from "../../../lib/relationships.ts";
+import { manifestFieldLabels } from "../../../../lib/record-field-words.ts";
+import { sourceRecordLabel } from "../../../../lib/source-record-label.ts";
 import { recordCrumbLabel, recordTitlePreview } from "./record-title.ts";
 
 export const dynamic = "force-dynamic";
@@ -267,6 +269,8 @@ export default async function RecordDetailPage({
       ) : null}
 
       <RecordInspector
+        fieldLabels={manifestFieldLabels(childManifestStream as Parameters<typeof manifestFieldLabels>[0])}
+        streamLabel={sourceRecordLabel(streamName, connectorStreams as never)}
         fieldSchemaTypes={deriveFieldSchemaTypes(recordMetadata)}
         hiddenBodyFields={semanticTs ? [semanticTs.field] : undefined}
         record={inspectorRecord}

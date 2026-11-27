@@ -15,7 +15,7 @@ import { DetailLoadingSkeleton } from "../../../../components/route-loading.tsx"
 export default function RecordDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="this record" />
+      <DetailLoadingSkeleton label="the record" />
     </RecordroomShellWithPalette>
   );
 }

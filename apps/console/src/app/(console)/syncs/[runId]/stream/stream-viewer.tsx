@@ -5704,7 +5704,7 @@ function StatusDot({ status }: { status: ConnectionStatus }) {
   return (
     <span className="pointer-events-none inline-flex h-10 items-center justify-center gap-1.5 px-1">
       <span aria-hidden className={`inline-block h-2 w-2 rounded-full ring-2 ring-background/85 ${tone}`} />
-      <span aria-hidden className="pdpp-caption font-medium text-foreground">{visibleStatusLabel(status.display)}</span>
+      <span aria-hidden className="pdpp-caption rounded-full bg-background px-2 font-medium text-foreground">{visibleStatusLabel(status.display)}</span>
       <span className="sr-only" role="status">
         {label}
       </span>

@@ -15,7 +15,7 @@ import { DetailLoadingSkeleton } from "../../components/route-loading.tsx";
 export default function TraceDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="this trace" />
+      <DetailLoadingSkeleton label="the activity detail" />
     </RecordroomShellWithPalette>
   );
 }

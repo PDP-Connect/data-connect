@@ -15,7 +15,7 @@ import { TitledDetailLoadingSkeleton } from "../../components/titled-detail-load
 export default function RunDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <TitledDetailLoadingSkeleton breadcrumbs={[{ href: "/syncs", label: "Sync history" }]} label="this run" mark />
+      <TitledDetailLoadingSkeleton breadcrumbs={[{ href: "/syncs", label: "Sync history" }]} label="the sync" mark />
     </RecordroomShellWithPalette>
   );
 }

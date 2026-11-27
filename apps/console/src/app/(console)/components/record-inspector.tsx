@@ -18,6 +18,7 @@ import type {
 } from "@pdpp/operator-ui/components/views/records-explorer-view";
 import { formatStorageBytes } from "@pdpp/operator-ui/lib/storage-footprint";
 import { formatRecordFieldValue, humanizeFieldLabel } from "@pdpp/display";
+import { browseKindLinkText } from "../lib/record-field-words.ts";
 import type { ParentBackLink, RelatedLink, ReverseChildListLink } from "../sources/lib/relationships.ts";
 
 const IMAGE_MIME_RE = /^image\//i;
@@ -31,6 +32,10 @@ export interface RecordInspectorRelationships {
 }
 
 export interface RecordInspectorProps {
+  /** Labels the source's manifest declares, by field name. */
+  fieldLabels?: Readonly<Record<string, string>>;
+  /** What the stream is called ("Your owned games"); names the kind the link opens. */
+  streamLabel?: string | null;
   /** Field name → JSON-Schema `type`, so large whole-number quantities show grouping separators. */
   fieldSchemaTypes?: Readonly<Record<string, string>>;
   hiddenBodyFields?: readonly string[];
@@ -153,7 +158,7 @@ function BlobAffordanceView({
   );
 }
 
-export function RecordInspector({ fieldSchemaTypes = {}, hiddenBodyFields = [], record, relationships, streamRecordsHref, recordHref }: RecordInspectorProps) {
+export function RecordInspector({ fieldLabels = {}, streamLabel = null, fieldSchemaTypes = {}, hiddenBodyFields = [], record, relationships, streamRecordsHref, recordHref }: RecordInspectorProps) {
   if (!record) {
     return null;
   }
@@ -201,7 +206,7 @@ export function RecordInspector({ fieldSchemaTypes = {}, hiddenBodyFields = [], 
         {record.error ? (
           <p className="rr-x-warn__msg">This could not be loaded. Try again.</p>
         ) : (
-          <RecordBody blobAffordance={blob ?? undefined} data={readableBody} declaredTypes={declaredTypes} stream={record.stream} />
+          <RecordBody blobAffordance={blob ?? undefined} data={readableBody} declaredTypes={declaredTypes} fieldLabels={{ ...fieldLabels }} stream={record.stream} />
         )}
         {blob ? <BlobAffordanceView affordance={blob} mimeType={blobMime} /> : null}
         {relationGroups.length > 0 ? (
@@ -212,7 +217,7 @@ export function RecordInspector({ fieldSchemaTypes = {}, hiddenBodyFields = [], 
         ) : null}
       </SheetBody>
       <SheetFoot>
-        {streamRecordsHref ? <a className="rr-x-stream-all" href={streamRecordsHref}>Browse this kind →</a> : null}
+        {streamRecordsHref ? <a className="rr-x-stream-all" href={streamRecordsHref}>{browseKindLinkText(streamLabel ?? humanizeFieldLabel(record.stream))}</a> : null}
         <details className="rr-x-raw rr-x-inspector-details">
           <summary>Details</summary>
           <div className="rr-x-inspector-details__body">

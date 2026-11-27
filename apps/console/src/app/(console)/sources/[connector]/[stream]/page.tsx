@@ -13,6 +13,7 @@ import {
   humanizeFieldLabel,
   parseTimestampValue,
 } from "@pdpp/display";
+import { formatStreamPageCount } from "./stream-page-count.ts";
 import { DataList, PageHeader, Pager, Section } from "@pdpp/operator-ui/components/primitives";
 import type { ExplorerFieldCapability } from "@pdpp/operator-ui/components/views/explorer-utils";
 import { declaredRolesFromCapabilities } from "@pdpp/operator-ui/explore/explore-data-assembler";
@@ -64,33 +65,6 @@ const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}(?:$|[T ])/;
 
 function isDateValue(value: unknown): value is string {
   return typeof value === "string" && DATE_PREFIX_RE.test(value) && parseTimestampValue(value) !== null;
-}
-
-function formatStreamPageCount(input: {
-  filtered: boolean;
-  hasMore: boolean;
-  matchingCount: number | null;
-  pageNumber: number;
-  shown: number;
-  totalHeld: number | null;
-}): string {
-  const pagePrefix = `Page ${input.pageNumber} · ${input.shown}`;
-  if (input.filtered) {
-    if (input.matchingCount !== null) {
-      const matchingNoun = input.matchingCount === 1 ? "matching record" : "matching records";
-      const matchingPrefix = `${pagePrefix} of ${input.matchingCount.toLocaleString()} ${matchingNoun}`;
-      return input.totalHeld === null
-        ? matchingPrefix
-        : `${matchingPrefix} · ${input.totalHeld.toLocaleString()} total held`;
-    }
-    const filteredPrefix = `${pagePrefix} for current filters`;
-    return input.totalHeld === null
-      ? `${filteredPrefix}${input.hasMore ? " · more available" : ""}`
-      : `${filteredPrefix} · ${input.totalHeld.toLocaleString()} total held`;
-  }
-  return input.totalHeld === null
-    ? `${pagePrefix}${input.hasMore ? " · more available" : ""}`
-    : `${pagePrefix} of ${input.totalHeld.toLocaleString()}`;
 }
 
 function exactCountFromPage(page: RecordsPage): number | null {

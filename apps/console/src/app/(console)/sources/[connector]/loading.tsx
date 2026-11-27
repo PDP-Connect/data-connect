@@ -14,7 +14,7 @@ import { TitledDetailLoadingSkeleton } from "../../components/titled-detail-load
 export default function ConnectorDetailLoading() {
   return (
     <RecordroomShellWithPalette>
-      <TitledDetailLoadingSkeleton breadcrumbs={[{ href: "/sources", label: "Data sources" }]} label="this data source" mark />
+      <TitledDetailLoadingSkeleton breadcrumbs={[{ href: "/sources", label: "Data sources" }]} label="the data source" mark />
     </RecordroomShellWithPalette>
   );
 }

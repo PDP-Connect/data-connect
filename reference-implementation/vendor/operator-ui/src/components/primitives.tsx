@@ -197,6 +197,9 @@ export function Pager({
   next?: string | null;
   countLabel?: ReactNode;
 }) {
+  if (!(prev || next)) {
+    return countLabel ? <p className="pdpp-caption mt-5 text-muted-foreground tabular-nums">{countLabel}</p> : null;
+  }
   return (
     <nav aria-label="Pagination" className="pdpp-caption mt-5 flex flex-wrap items-center justify-between gap-3">
       <span className="text-muted-foreground tabular-nums">{countLabel}</span>
@@ -206,14 +209,14 @@ export function Pager({
             ← previous
           </Link>
         ) : (
-          <span className="text-muted-foreground/40">← previous</span>
+          <span aria-disabled="true" className="text-muted-foreground">← previous</span>
         )}
         {next ? (
           <Link className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" href={next}>
             next →
           </Link>
         ) : (
-          <span className="text-muted-foreground/40">next →</span>
+          <span aria-disabled="true" className="text-muted-foreground">next →</span>
         )}
       </div>
     </nav>

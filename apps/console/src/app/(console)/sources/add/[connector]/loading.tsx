@@ -10,7 +10,7 @@ export default function ConnectServiceLoading() {
     <RecordroomShellWithPalette>
       <TitledDetailLoadingSkeleton
         breadcrumbs={[{ href: "/", label: "Home" }, { href: "/sources", label: "Data sources" }, { href: "/sources/add", label: "Add a data source" }]}
-        label="this service"
+        label="the connection page"
         mark
       />
     </RecordroomShellWithPalette>

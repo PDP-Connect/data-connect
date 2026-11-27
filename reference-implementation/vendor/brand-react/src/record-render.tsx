@@ -31,6 +31,8 @@ interface RecordFieldProps {
   declaredType?: string | undefined;
   /** The wire key — what a client literally receives. Mono voice. */
   fieldKey: string;
+  /** A label the source's manifest declares for this field; wins over the built-in one. */
+  label?: string;
   /** The raw value from `data`. */
   value: unknown;
 }
@@ -56,7 +58,7 @@ function recordValueText(value: unknown, declaredType: string | undefined): stri
 }
 
 /** One plain field row with a human label and a readable value. */
-export function RecordField({ fieldKey, value, declaredType }: RecordFieldProps) {
+export function RecordField({ fieldKey, label, value, declaredType }: RecordFieldProps) {
   const resolved = resolveFieldValue(value, declaredType);
   const text = recordValueText(value, declaredType);
   const valClass = ["rr-fld__val", resolved.money ? "is-num" : undefined, resolved.empty ? "is-empty" : undefined]
@@ -64,7 +66,7 @@ export function RecordField({ fieldKey, value, declaredType }: RecordFieldProps)
     .join(" ");
   return (
     <div className="rr-fld">
-      <span className="rr-fld__label">{labelFor(fieldKey)}</span>
+      <span className="rr-fld__label">{label ?? labelFor(fieldKey)}</span>
       <span className={valClass}>
         {typeof value === "string" && WEB_LINK_RE.test(value) ? (
           <a href={value} rel="noreferrer" target="_blank">{text}</a>
@@ -101,11 +103,13 @@ interface RecordBodyProps {
   data: Record<string, unknown>;
   /** Declared field types from `field_capabilities` (money detection). */
   declaredTypes?: DeclaredFieldTypes;
+  /** Labels the source's manifest declares, by field name. */
+  fieldLabels?: Record<string, string>;
   /** The record kind, retained for compatibility with existing call sites. */
   stream: string;
 }
 
-export function RecordBody({ data, declaredTypes = {}, className, blobAffordance }: RecordBodyProps) {
+export function RecordBody({ data, declaredTypes = {}, className, blobAffordance, fieldLabels = {} }: RecordBodyProps) {
   const fields = Object.entries(data).filter(([key]) => key !== blobAffordance?.fieldName);
   if (fields.length === 0) {
     return <div className={["rr-recbody", className].filter(Boolean).join(" ")}><p className="rr-recbody__empty">No fields to show.</p></div>;
@@ -113,7 +117,7 @@ export function RecordBody({ data, declaredTypes = {}, className, blobAffordance
   return (
     <div className={["rr-recbody", className].filter(Boolean).join(" ")}>
       <div className="rr-flds">
-        {fields.map(([key, value]) => <RecordField declaredType={declaredTypes[key]} fieldKey={key} key={key} value={value} />)}
+        {fields.map(([key, value]) => <RecordField declaredType={declaredTypes[key]} fieldKey={key} key={key} label={fieldLabels[key]} value={value} />)}
       </div>
     </div>
   );
