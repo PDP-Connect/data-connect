@@ -643,3 +643,26 @@ test("n.eko launch passes each ICE settings array as a single argument", async (
   assert.equal(args[args.indexOf("--webrtc.iceservers.frontend") + 1], front);
   assert.equal(args[args.indexOf("--webrtc.iceservers.backend") + 1], back);
 });
+
+test("Patchright installer rejects incomplete Chromium metadata before invoking curl", async () => {
+  const root = await mkdtemp(join(tmpdir(), "patchright-invalid-chromium-"));
+  try {
+    const mod = join(root, "node_modules", "patchright-core");
+    await mkdir(mod, { recursive: true });
+    await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+    await writeFile(join(mod, "browsers.json"), JSON.stringify({ browsers: [{ name: "chromium", revision: "1234" }] }));
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "curl"), "#!/bin/sh\nprintf 'unexpected curl invocation\\n' >&2\nexit 99\n", { mode: 0o755 });
+    const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+      env: { PATH: bin + ":" + process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: join(root, "unused-browser-output") },
+      encoding: "utf8", timeout: 5_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /invalid chromium revision\/version/);
+    assert.doesNotMatch(result.stderr, /unexpected curl invocation/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
