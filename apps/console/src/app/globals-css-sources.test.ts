@@ -81,7 +81,7 @@ test("on a touch screen a text field is at least 44 px high (a field takes no ::
 	const result = await postcss([tailwindPostcss()]).process(source, { from: cssPath });
 	const coarse = result.css.match(/@media \(pointer: coarse\)[\s\S]*$/)?.[0];
 	assert.ok(coarse, "a coarse-pointer block");
-	const field = coarse.match(/input:not\([^)]*\)[^{]*\{([^}]*)\}/);
+	const field = coarse.match(/input:not\([^)]*\)[^{]*\{([^}]*)\}/)?.[1];
 	assert.ok(field, "a rule for text fields");
-	assert.match(field[1], /min-height:\s*44px/);
+	assert.match(field, /min-height:\s*44px/);
 });

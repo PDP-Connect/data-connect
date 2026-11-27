@@ -831,8 +831,10 @@ function ConnectorPageView({
   const scheduleSyncAvailable = connectionPrimaryAction?.kind === "reattach_schedule" && primaryAction.kind === "sync";
   const renderedAt = new Date(now);
   const signInRepairAvailable = credentialUpdateHref !== null;
-  const sourceStatus = sourceStatusWords(source, { now: renderedAt, offset, signInRepairAvailable });
-  const stateSentence = sourceStateSentence(source, { now: renderedAt, offset, name: serviceName, signInRepairAvailable });
+  // The Schedule section reads this page's own schedule; the sentence above it must read the same one.
+  const answerSource = model.scheduleError ? source : { ...source, schedule: model.schedule };
+  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable });
+  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
   const deviceStepsAvailable = hasDeviceLocalRemediation;

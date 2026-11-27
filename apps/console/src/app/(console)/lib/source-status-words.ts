@@ -3,6 +3,7 @@
 
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
 import { resolveSyncCause } from "./sync-cause.ts";
+import { isScheduled } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
@@ -137,6 +138,19 @@ function onlyUnmeasuredCompleteness(source: RefConnectorSummary): boolean {
       item.cta === "Some data from this source ended before it could be measured, and this one-time import will not run again");
 }
 
+/** The one sentence for a copy DataConnect cannot yet check. The list row says "Synced {when}" only. */
+export const UNMEASURED_CAVEAT = "DataConnect can't yet tell whether it got everything.";
+
+/** The sentence for a source whose last copy is old. Says "a refresh is due" only when a schedule is on. */
+function refreshRow(source: RefConnectorSummary, name: string, when: string | null): MatchedStatus {
+  const syncedClause = when ? `Last synced ${when}.` : "";
+  if (!isScheduled(source.schedule ?? null)) {
+    const text = `${when ? `${syncedClause} ` : ""}DataConnect checks ${name} only when you ask.`;
+    return { row: 17, words: text, tone: "plain", action: syncAction(source), sentence: { text, slot: null }, problem: false };
+  }
+  return { row: 17, words: when ? `A refresh is due · last synced ${when}` : "A refresh is due", tone: "plain", action: syncAction(source), sentence: { text: `A refresh is due.${when ? ` ${syncedClause}` : ""}`, slot: null }, problem: false };
+}
+
 function lifecycleRow(
   source: RefConnectorSummary,
   projection: ReturnType<typeof projectSourceActionability>,
@@ -152,7 +166,8 @@ function lifecycleRow(
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) , sentence: { text: "Disconnected. Your records stay.", slot: null }, problem: false };
   if (source.connector_implementation?.state === "not_installed") {
-    return { row: 4, words: "The program for this service is not installed. Install it again to keep syncing.", tone: "attention", action: action("install", "Install again", true) , sentence: { text: `DataConnect needs to install ${name} again before it can sync.`, slot: null }, problem: true };
+    const text = `DataConnect needs to install ${name} again before it can sync.`;
+    return { row: 4, words: text, tone: "attention", action: action("install", "Install again", true) , sentence: { text, slot: null }, problem: true };
   }
 
   switch (source.terminal_setup_disposition) {
@@ -253,13 +268,13 @@ function fallbackPillRow(source: RefConnectorSummary, options: SourceStatusOptio
   if (label === "Some records stuck") return { row: 15, words: withWhen("Some records are stuck"), tone: "plain", action: null , sentence: { text: `${(withWhen("Some records are stuck")) .replace(FINAL_STOP, "")}.`, slot: null }, problem: true };
   if (label === "Missing data" || label === "Can't collect") return { row: 16, words: withWhen("Trouble syncing"), tone: "plain", action: null , sentence: { text: withWhen("Trouble syncing"), slot: null }, problem: true };
   if (label === "Import complete") return { row: 18, words: when ? `Imported ${when}` : "Imported", tone: "plain", action: null , sentence: { text: `${when ? `Imported ${when}` : "Imported"}. This was a one-time import; it does not sync on its own.`, slot: null }, problem: false };
-  if (label === "Needs refresh") return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) , sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+  if (label === "Needs refresh") return refreshRow(source, name, when);
   if (label === "Not measured") {
-    if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${name} yet.`, slot: null }, problem: false };
+    if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. ${UNMEASURED_CAVEAT}`, slot: null }, problem: false };
     return { row: 23, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${(source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
   }
   if (label === "Healthy" || label === "Collected, not independently checked") {
-    return { row: 20, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` DataConnect has not compared this with ${name} yet.` : ""}`, slot: null }, problem: false };
+    return { row: 20, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` ${UNMEASURED_CAVEAT}` : ""}`, slot: null }, problem: false };
   }
   return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${("Status not available") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
 }
@@ -284,7 +299,7 @@ function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptio
   const savedKey = cause.credentialRejected && source.source_binding_kind === "static_secret";
   const sentence = savedKey ? `${name} no longer accepts the saved key.` : cause.sentence;
   const label = savedKey ? "Enter the key again" : cause.action;
-  const scheduled = cause.unavailable && source.schedule?.enabled === true;
+  const scheduled = cause.unavailable && isScheduled(source.schedule ?? null);
   if (scheduled) {
     const text = `${sentence} DataConnect will try again at the next check.`;
     return { row: 12, words: text, tone: "plain", action: null, sentence: { text, slot: null }, problem: true };
@@ -313,13 +328,16 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? " and sign-in" : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "blocked_maintainer") {
-    if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}. DataConnect can't yet tell whether it got everything.`, tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect can't yet tell whether it got everything.`, slot: null }, problem: false };
+    if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}`, tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. ${UNMEASURED_CAVEAT}`, slot: null }, problem: false };
     // The server blames the program for every failed run it cannot classify.
     // When the run's own cause is a step for the person or an unavailable
     // service, say that; only an unclassified cause keeps the maintainers.
     const known = failedRunAnswer(source, options, name);
     if (known) return known;
-    return { row: 13, words: "Waiting on a fix from the DataConnect maintainers", tone: "plain", action: null , sentence: { text: "This is waiting on a fix from the people who maintain DataConnect.", slot: null }, problem: true };
+    // Truly unknown: say what is true and what the owner can do. A retry is promised only when a schedule is on.
+    const stopped = "The last sync stopped for a reason DataConnect could not name.";
+    const retry = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";
+    return { row: 13, words: stopped, tone: "plain", action: canStartSync(source) ? action("sync_now", "Sync now", false) : null, sentence: { text: `${stopped} Records already copied are kept.${retry}`, slot: null }, problem: true };
   }
   if (
     schedulerBackoff?.backoff_applied &&
@@ -331,12 +349,8 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return failedRunAnswer(source, options, name, true)!;
   }
   if (resolver === "system_degraded" && source.rendered_verdict?.pill.label === "Needs refresh") {
-    // Nothing stopped: the last copy is old. Without a schedule, the person asks.
-    if (source.schedule?.enabled !== true) {
-      const text = `${when ? `Last synced ${when}. ` : ""}DataConnect checks ${name} only when you ask.`;
-      return { row: 17, words: text, tone: "plain", action: syncAction(source), sentence: { text, slot: null }, problem: false };
-    }
-    return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source), sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+    // Nothing stopped: the last copy is old.
+    return refreshRow(source, name, when);
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
@@ -352,9 +366,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
         : `Something stopped ${(source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "")} from syncing.`;
     return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: base.startsWith("Something stopped") ? base : withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null , sentence: { text: base.startsWith("Something stopped") ? base : `${base}.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: true };
   }
-  if (resolver === "refresh_due") {
-    return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source) , sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
-  }
+  if (resolver === "refresh_due") return refreshRow(source, name, when);
   if (source.collection_report?.some(entry => ["retryable_gap","terminal_gap","gaps","partial"].includes(entry.coverage_condition))) {
     const text = "Some records didn't come at the last sync.";
     return {row:16,words:text,tone:"plain",action:null,sentence:{text,slot:null},problem:true};
@@ -376,10 +388,10 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     ) {
       return { row: 19, words: when ? `Up to date · synced ${when}` : "Up to date", tone: "plain", action: null , sentence: { text: `Up to date.${when ? ` Synced ${when}.` : ""}`, slot: null }, problem: false };
     }
-    return { row: 20, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` DataConnect has not compared this with ${name} yet.` : ""}`, slot: null }, problem: false };
+    return { row: 20, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: source.local_device_progress?.records_pending === 0 && source.owner_state?.resolver === "needs_owner" ? "No records are waiting to be sent." : `Synced${when ? ` ${when}` : ""}.${source.connection_health.lateness?.state === "late" || source.connection_health.lateness?.state === "overdue" ? " The next sync is late." : ""}${source.owner_state?.posture === "frozen-since-last-run" ? ` ${UNMEASURED_CAVEAT}` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "not_measured") {
-    if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect has not compared this with ${name} yet.`, slot: null }, problem: false };
+    if (lastSuccessfulSync(source)) return { row: 21, words: when ? `Synced ${when}` : "Synced", tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. ${UNMEASURED_CAVEAT}`, slot: null }, problem: false };
     return { row: 22, words: source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet", tone: "plain", action: syncAction(source) , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${(source.source_kind === "manual" ? "Nothing imported yet" : "Not synced yet") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
   }
 

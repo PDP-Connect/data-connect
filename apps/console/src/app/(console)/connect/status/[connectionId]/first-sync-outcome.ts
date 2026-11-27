@@ -15,7 +15,7 @@ import type {
 	RefSchedule,
 	RunHandleStatus,
 } from "../../../lib/ref-client.ts";
-import { formatSourceRowSchedule } from "../../../sources/sources-view-model.ts";
+import { type ScheduleFacts, scheduleState } from "../../../lib/schedule-words.ts";
 import { setupHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export interface CollectedKind {
@@ -26,10 +26,7 @@ export interface CollectedKind {
 	readonly stream: string;
 }
 
-export type ScheduleFacts = Pick<
-	RefSchedule,
-	"effective_mode" | "enabled" | "interval_seconds"
->;
+export type { ScheduleFacts };
 
 export interface FirstSyncFacts {
 	readonly gaps?: readonly KnownGap[];
@@ -145,12 +142,11 @@ export function scheduleSentence(
 	name: string,
 	schedule: ScheduleFacts | null | undefined,
 ): string | null {
-	if (schedule === undefined) return null;
-	const label = formatSourceRowSchedule(schedule);
-	if (label === "Manual")
+	const state = scheduleState(schedule);
+	if (state.kind === "manual")
 		return `DataConnect checks ${name} only when you ask.`;
-	if (/^Every\b/.test(label))
-		return `DataConnect checks ${name} ${label.charAt(0).toLowerCase()}${label.slice(1)}.`;
+	if (state.kind === "scheduled")
+		return `DataConnect checks ${name} ${state.every}.`;
 	return null;
 }
 
@@ -246,7 +242,7 @@ function retryNote(
 	retryable: boolean,
 ): string | null {
 	if (!retryable || needsPerson || schedule === undefined) return null;
-	if (schedule !== null && /^Every\b/.test(formatSourceRowSchedule(schedule)))
+	if (scheduleState(schedule).kind === "scheduled")
 		return `It will try again the next time DataConnect checks ${name}.`;
 	return `Nothing is scheduled for ${name}, so it will not try again by itself.`;
 }

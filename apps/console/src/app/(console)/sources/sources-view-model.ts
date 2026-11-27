@@ -55,6 +55,7 @@ import type {
   RefSchedule,
 } from "../lib/ref-client.ts";
 import { scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
+import { formatSourceRowSchedule } from "../lib/schedule-words.ts";
 import {
   isArchivedSource,
   isRevokedConnector,
@@ -365,26 +366,7 @@ export function formatSourceRowRecords(totalRecords: number, state?: RefCountSta
   return isTotalRecordsAuthoritative(state) ? totalRecords.toLocaleString() : "—";
 }
 
-export function formatSourceRowSchedule(
-  schedule: Pick<RefSchedule, "effective_mode" | "enabled" | "interval_seconds"> | null
-): string {
-  if (!schedule) return "Manual";
-  const enabled = scheduleEnabled(schedule.enabled);
-  if (schedule.effective_mode === "manual" || enabled === false) return "Manual";
-  if (enabled !== true) return "—";
-
-  const seconds = scheduleIntervalSeconds(schedule.interval_seconds);
-  if (seconds === null) return "—";
-  const units = [
-    { label: "day", seconds: SECONDS_PER_DAY },
-    { label: "hour", seconds: SECONDS_PER_HOUR },
-    { label: "minute", seconds: SECONDS_PER_MINUTE },
-  ];
-  const unit = units.find((candidate) => seconds % candidate.seconds === 0);
-  if (!unit) return "—";
-  const count = seconds / unit.seconds;
-  return `Every${count === 1 ? "" : ` ${count}`} ${unit.label}${count === 1 ? "" : "s"}`;
-}
+export { formatSourceRowSchedule };
 
 export type SourceRowMenuItem =
   | { kind: "sync"; label: "Sync now" }

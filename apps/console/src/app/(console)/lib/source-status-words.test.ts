@@ -139,7 +139,7 @@ test("row 1 words an archived source", () => assertRow(1, "Archived", "faint"));
 // DIRECTION.md, "One status table": row 2 is faint with an outlined action.
 test("row 2 words a setup that never completed", () => assertRow(2, "Example source was never connected.", "faint", { kind: "continue_setup", label: "Set up again", filled: true }));
 test("row 3 words a revoked source", () => assertRow(3, "Disconnected", "faint", { kind: "set_up_again", label: "Set up again", filled: false }));
-test("row 4 words a source whose collector is not installed", () => assertRow(4, "The program for this service is not installed. Install it again to keep syncing.", "attention", { kind: "install", label: "Install again", filled: true }));
+test("row 4 words a source whose collector is not installed", () => assertRow(4, "DataConnect needs to install Example source again before it can sync.", "attention", { kind: "install", label: "Install again", filled: true }));
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
@@ -235,11 +235,16 @@ test("a pending rendered status does not outrank the maintainer row when owner s
   assert.equal(result.row, 13);
 });
 test("row 12 words an automatic retry", () => assertRow(12, "Trying again on its own · last synced 2 hours ago", "plain"));
-test("row 13 words a wait for a maintainer fix", () => assertRow(13, "Waiting on a fix from the DataConnect maintainers", "plain"));
+test("row 13 words a stop DataConnect could not name, with the step", () => assertRow(13, "The last sync stopped for a reason DataConnect could not name.", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
 test("row 14 words missing optional data", () => assertRow(14, "Some optional data is missing · last synced 2 hours ago", "plain"));
 test("row 15 words stuck records", () => assertRow(15, "Some records are stuck · last synced 2 hours ago", "plain"));
 test("row 16 words another degraded result", () => assertRow(16, "Something stopped Example source from syncing.", "plain", { kind: "sync_now", label: "Try again", filled: true }));
-test("row 17 words a refresh due", () => assertRow(17, "A refresh is due · last synced 2 hours ago", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
+test("row 17 words an old copy of a source that is checked only on request", () => assertRow(17, "Last synced 2 hours ago. DataConnect checks Example source only when you ask.", "plain", { kind: "sync_now", label: "Sync now", filled: false }));
+test("row 17 says a refresh is due only when a schedule is on", () => {
+  const due = { ...fixture(17), schedule: automaticSchedule };
+  assert.equal(sourceStatusWords(due, { now: NOW }).words, "A refresh is due · last synced 2 hours ago");
+  assert.equal(sourceStateSentence(due, { now: NOW, name: "Example source" }).text, "A refresh is due. Last synced 2 hours ago.");
+});
 test("row 18 words a completed import", () => assertRow(18, "Imported 2 hours ago", "plain"));
 test("row 19 says up to date when healthy, green, observed and on time", () => assertRow(19, "Up to date · synced 2 hours ago", "plain"));
 test("row 20 words a healthy source without a proven on-time schedule", () => assertRow(20, "Synced 2 hours ago", "plain"));
@@ -248,7 +253,7 @@ test("the unchecked pill belongs to row 21, not the row 20 fixture", () => {
   assert.equal(fixture(20).rendered_verdict?.pill.label, "Healthy");
   assert.equal(fixture(21).rendered_verdict?.pill.label, "Collected, not independently checked");
   // DIRECTION.md row 21: use plain words instead of the banned word "gaps".
-  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect has not compared this with Example source yet.");
+  assert.equal(sourceStateSentence(fixture(21), { now: NOW, name: "Example source" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
 });
 
 test("pending detail work uses one shared sentence for rows 19 and 20", () => {
@@ -385,7 +390,7 @@ test("source page sentences use the same row and named slots for page-owned fact
   assert.deepEqual(sentence(fixture(3)), { text: "Disconnected. Your records stay.", slot: null });
   assert.deepEqual(sentence(fixture(5)), { text: "The first copy of Example source may not be complete.", slot: "what_you_can_do" });
   assert.deepEqual(sentence(fixture(8)), { text: "Example source needs you to sign in again.", slot: null });
-  assert.deepEqual(sentence(fixture(13)), { text: "This is waiting on a fix from the people who maintain DataConnect.", slot: null });
+  assert.deepEqual(sentence(fixture(13)), { text: "The last sync stopped for a reason DataConnect could not name. Records already copied are kept.", slot: null });
   assert.deepEqual(sentence(fixture(14)), { text: "Some optional data is missing. Last synced 2 hours ago.", slot: null });
   assert.deepEqual(sentence(fixture(22)), { text: "Nothing imported yet. Add an export to copy your records.", slot: null });
 });
@@ -473,16 +478,16 @@ test("only the sole unmeasured-completeness maintainer cause gets the plain sync
   const unmeasured = requiredAction({ audience: "maintainer", kind: "code_fix", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" }, cta: "Some data from this source isn't being measured yet", urgency: "soon" });
   const base = source({ owner_state: { ...healthyState, resolver: "blocked_maintainer" }, rendered_verdict: verdict("Not measured", [unmeasured]) });
   const words = sourceStatusWords(base, { now: NOW });
-  assert.equal(words.words, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
+  assert.equal(words.words, "Synced 2 hours ago");
   assert.equal(words.needsYou, words.action !== null);
   assert.equal(words.tone, "plain");
   assert.equal(words.action, null);
-  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, words.words);
+  assert.equal(sourceStateSentence(base, { now: NOW, name: "Northwind" }).text, "Synced 2 hours ago. DataConnect can't yet tell whether it got everything.");
   for (const actions of [[{ ...unmeasured, cta: "Fix the copy" }], [{ ...unmeasured, terminal: true }], [unmeasured, requiredAction()]]) {
-    assert.match(sourceStateSentence({ ...base, rendered_verdict: verdict("Not measured", actions) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
+    assert.match(sourceStateSentence({ ...base, rendered_verdict: verdict("Not measured", actions) }, { now: NOW, name: "Northwind" }).text, /stopped for a reason DataConnect could not name/);
   }
-  assert.match(sourceStateSentence({ ...base, last_run: { run_id: "failed", status: "failed", event_count: 0, failure_reason: "failed", first_at: SUCCESS, last_at: SUCCESS, started_at: SUCCESS, finished_at: SUCCESS } }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
-  assert.match(sourceStateSentence({ ...base, connection_health: health({ last_success_at: null }) }, { now: NOW, name: "Northwind" }).text, /waiting on a fix/);
+  assert.match(sourceStateSentence({ ...base, last_run: { run_id: "failed", status: "failed", event_count: 0, failure_reason: "failed", first_at: SUCCESS, last_at: SUCCESS, started_at: SUCCESS, finished_at: SUCCESS } }, { now: NOW, name: "Northwind" }).text, /stopped for a reason DataConnect could not name/);
+  assert.match(sourceStateSentence({ ...base, connection_health: health({ last_success_at: null }) }, { now: NOW, name: "Northwind" }).text, /stopped for a reason DataConnect could not name/);
 });
 
 test("retired setup visibility is authoritative despite leftover measurement evidence", () => {
@@ -541,7 +546,7 @@ test("a rejected saved key asks for the key, never for another sync", () => {
 test("only a fault in DataConnect's own program keeps the maintainers sentence", () => {
   const result = sourceStatusWords(source({ connector_display_name: "Steam", owner_state: blockedByMaintainer, last_run: failedRun(null, "connector_protocol_violation"), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
   assert.equal(result.row, 13);
-  assert.equal(result.words, "Waiting on a fix from the DataConnect maintainers");
+  assert.equal(result.words, "The last sync stopped for a reason DataConnect could not name.");
 });
 
 test("a sign-in that expired is the person's step even when the server blames the program", () => {
@@ -587,4 +592,25 @@ test("a partial sync with no known cause keeps the maintainers sentence", () => 
 test("a partial sync with a known cause reads it when the server says only that something stopped", () => {
   const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: { ...healthyState, resolver: "system_degraded" }, last_run: partialRun([sessionGap]), rendered_verdict: verdict("Can't collect") }), { now: NOW });
   assert.equal(result.words, "Venmo asked for a new sign-in.");
+});
+
+test("a source with a schedule is told it will be retried; one without is not", () => {
+  const unknown = source({ connector_display_name: "Steam", owner_state: blockedByMaintainer, last_run: failedRun(null, "connector_protocol_violation"), rendered_verdict: verdict("Can't collect", [maintainerAction]) });
+  const without = sourceStateSentence({ ...unknown, schedule: null }, { now: NOW, name: "Steam" }).text;
+  assert.equal(without, "The last sync stopped for a reason DataConnect could not name. Records already copied are kept.");
+  const withSchedule = sourceStateSentence({ ...unknown, schedule: automaticSchedule }, { now: NOW, name: "Steam" }).text;
+  assert.equal(withSchedule, `${without} DataConnect will try again at the next check.`);
+  assert.deepEqual(sourceStatusWords(unknown, { now: NOW }).action, { kind: "sync_now", label: "Sync now", filled: false });
+});
+
+test("a list row never carries the completeness caveat; the page sentence does, once", () => {
+  const unmeasured = requiredAction({ audience: "maintainer", kind: "code_fix", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" }, cta: "Some data from this source isn't being measured yet", urgency: "soon" });
+  for (const base of [
+    source({ owner_state: { ...healthyState, resolver: "blocked_maintainer" }, rendered_verdict: verdict("Not measured", [unmeasured]) }),
+    fixture(21),
+  ]) {
+    assert.doesNotMatch(sourceStatusWords(base, { now: NOW }).words, /can't yet tell/);
+    const text = sourceStateSentence(base, { now: NOW, name: "Steam" }).text;
+    assert.equal(text.split("can't yet tell").length - 1, 1);
+  }
 });
