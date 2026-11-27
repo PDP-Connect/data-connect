@@ -64,7 +64,6 @@ function Breadcrumbs({ items }: { items: Breadcrumb[] }) {
     >
       {items.map((item, index) => (
         <span className="inline-flex items-center gap-1.5" key={`${item.href ?? "leaf"}:${item.label}`}>
-          {index > 0 ? <span className="text-muted-foreground/60">/</span> : null}
           {item.href ? (
             <Link className="underline-offset-2 hover:text-foreground hover:underline" href={item.href}>
               {item.label}
@@ -72,6 +71,7 @@ function Breadcrumbs({ items }: { items: Breadcrumb[] }) {
           ) : (
             <span className="text-foreground">{item.label}</span>
           )}
+          {index < items.length - 1 ? <span className="text-muted-foreground/60">/</span> : null}
         </span>
       ))}
     </nav>

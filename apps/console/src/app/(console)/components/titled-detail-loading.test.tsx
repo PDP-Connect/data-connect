@@ -26,3 +26,14 @@ test("the run page loading screen has the Sync history trail and a title block",
   assert.match(html, /<h1[^>]*>/);
   assert.match(html, /Loading this run…/);
 });
+
+// Round 9 (F23): a wrapped trail must not start a line with "/": each separator stays with the item before it.
+test("each trail separator follows its item, so a wrapped line never starts with a slash", () => {
+  const html = renderToStaticMarkup(createElement(TitledDetailLoadingSkeleton, { breadcrumbs: [{ href: "/", label: "Home" }, { href: "/sources", label: "Data sources" }, { label: "Add a data source" }], label: "this page" }));
+  const nav = /<nav[^>]*aria-label="Breadcrumb"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? "";
+  const items = nav.split(/<span class="inline-flex items-center gap-1.5">/).slice(1);
+  assert.equal(items.length, 3);
+  assert.doesNotMatch(items[0] ?? "", /^<span[^>]*>\//, "no leading slash on an item");
+  assert.match(items[0] ?? "", /Home<\/a><span[^>]*>\/<\/span>/);
+  assert.doesNotMatch(items[2] ?? "", /\/<\/span><\/span>$/, "the last item has no trailing slash");
+});
