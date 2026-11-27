@@ -362,3 +362,26 @@ test("streamed diagnostics redact a password split between chunks and authentica
     /secret-value|session-token|bearer-token/
   )
 })
+
+test("owned harness preserves a startup error and removes its scratch directory", async () => {
+  const failure = new Error("synthetic startup failure")
+  let root
+  await assert.rejects(runOwnedHarness(({ root: ownedRoot }) => {
+    root = ownedRoot
+    throw failure
+  }), error => error === failure)
+  assert.ok(root)
+  await assert.rejects(stat(root), { code: "ENOENT" })
+})
+
+test("owned harness preserves a nonzero result and removes its scratch directory", async () => {
+  let root
+  const result = await runOwnedHarness(async ({ root: ownedRoot }) => {
+    root = ownedRoot
+    await writeFile(join(root, "fixture.txt"), "scratch fixture")
+    return 17
+  })
+  assert.equal(result, 17)
+  assert.ok(root)
+  await assert.rejects(stat(root), { code: "ENOENT" })
+})
