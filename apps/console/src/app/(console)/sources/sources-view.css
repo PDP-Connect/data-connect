@@ -354,6 +354,11 @@
 
 /* The confirmation box is a real 44 px target on touch: the label is the press area for its checkbox. */
 @media (pointer: coarse) {
+  .rr-s-menu-trigger {
+    width: 44px;
+    height: 44px;
+    margin-top: 0;
+  }
   .rr-s-confirm label {
     align-items: center;
     min-height: 44px;

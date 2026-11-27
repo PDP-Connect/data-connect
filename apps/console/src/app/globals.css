@@ -89,6 +89,16 @@
     :where(input:not([type="hidden"], [type="checkbox"], [type="radio"], [type="range"], [type="file"]), select, textarea) {
       min-height: 44px;
     }
+    /* A bare checkbox is drawn larger and pressed through its label, which is 44px tall. */
+    :where(input[type="checkbox"], input[type="radio"]) {
+      flex: none;
+      height: 22px;
+      width: 22px;
+    }
+    :where(label:has(> input[type="checkbox"], > input[type="radio"])) {
+      align-items: center;
+      min-height: 44px;
+    }
   }
 }
 
