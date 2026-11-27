@@ -59,3 +59,11 @@ test("DataConnect's own sync line gives an empty line (not shown) when it cannot
   const sentence = changeSentence({ id: "e", trace_id: "t", day: "2026-11-25", at: "2026-11-25T12:00:00Z", client_id: "dataconnect-connector-runtime", change: "allowed", source_id: null, source_kind: null, connection_id: null }, runtime, []);
   assert.equal(sentence, "");
 });
+
+// Round 9 (F13): with no entries the page says so first, then where history starts.
+test("an empty Activity says so above 'History starts'",()=>{
+ const html=renderToStaticMarkup(React.createElement(ActivityView,{apps:[],rows:[],changes:[],sources:[],offset:0,firstDay:"2026-08-13"}));
+ const said=html.indexOf("No app has read your data yet.");
+ assert.ok(said>=0,"the empty sentence is shown");
+ assert.ok(html.indexOf("History starts")<0 || said<html.indexOf("History starts"),"and comes before the start line");
+});
