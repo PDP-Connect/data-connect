@@ -572,11 +572,11 @@ test("an idle source that only syncs when asked is not broken", () => {
     last_run: { event_count: 0, failure_reason: null, finished_at: "2026-11-14T12:00:00Z", first_at: "2026-11-14T12:00:00Z", last_at: "2026-11-14T12:00:00Z", run_id: "run-test", started_at: "2026-11-14T12:00:00Z", status: "succeeded" } as never,
   });
   const manual = sourceStatusWords({ ...idle, schedule: null }, { now: NOW });
-  assert.equal(manual.words, "Last synced 14 Nov. DataConnect checks Steam only when you ask.");
+  assert.equal(manual.words, "Last synced 10 days ago. DataConnect checks Steam only when you ask.");
   assert.deepEqual(manual.action, { kind: "sync_now", label: "Sync now", filled: false });
   assert.equal(sourceStateSentence({ ...idle, schedule: null }, { now: NOW, name: "Steam" }).text, manual.words);
   const scheduled = sourceStatusWords({ ...idle, schedule: automaticSchedule }, { now: NOW });
-  assert.equal(scheduled.words, "A refresh is due · last synced 14 Nov");
+  assert.equal(scheduled.words, "A refresh is due · last synced 10 days ago");
   assert.deepEqual(scheduled.action, { kind: "sync_now", label: "Sync now", filled: false });
 });
 

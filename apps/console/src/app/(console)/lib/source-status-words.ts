@@ -83,23 +83,12 @@ function lastSuccessfulSync(source: RefConnectorSummary): string | null {
   return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
 }
 
-function formatWhen(value: string | null, now: Date, offset = -now.getTimezoneOffset()): string | null {
+/** One form for "when" on every page: the relative form ("10 days ago"), as the Recent syncs list uses. */
+function formatWhen(value: string | null, now: Date, _offset = -now.getTimezoneOffset()): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-
-  const age = now.getTime() - date.getTime();
-  if (age < 0) return "just now";
-  if (age < 7 * DAY_MS) return formatRelative(date, now.getTime());
-
-  const readerDate = new Date(`${personDay(value,offset)}T12:00:00Z`);
-  const sameYear = personDay(value,offset).slice(0,4) === personDay(now.getTime(),offset).slice(0,4);
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "numeric",
-    month: "short",
-    ...(sameYear ? {} : { year: "numeric" }),
-    timeZone: "UTC",
-  }).format(readerDate);
+  return date.getTime() > now.getTime() ? "just now" : formatRelative(date, now.getTime());
 }
 
 function action(kind: SourceStatusActionKind, label: string, filled: boolean): SourceStatusAction {
