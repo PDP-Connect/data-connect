@@ -98,6 +98,7 @@ function installService(
   dataDir: string,
   options: {
     readonly digest?: string;
+    readonly installArtifact?: (root: string) => void;
     readonly installTimeoutMs?: number;
     readonly manifest?: Record<string, unknown>;
     readonly store?: ConnectorInstallStore;
@@ -118,9 +119,11 @@ function installService(
       },
     ],
     dataDir,
-    installArtifact: (root) => {
-      writeArtifact(root, manifest);
-    },
+    installArtifact:
+      options.installArtifact ??
+      ((root) => {
+        writeArtifact(root, manifest);
+      }),
     ...(options.installTimeoutMs === undefined ? {} : { installTimeoutMs: options.installTimeoutMs }),
     registerManifest: installedConnectorManifestRegistration.registerManifest,
     store: options.store ?? createConnectorInstallStore(),
@@ -486,6 +489,76 @@ test("a first install retries after a crash between publishing and activating", 
     }
     assert.equal(await registeredVersion(), installedGmail.version);
     assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a retry after the publish crash stages a fresh copy before it replaces the orphan root", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const file = "profile/collection-profile.json";
+    const orphanFile = join(root, file);
+    const expected = join(dir, "expected-artifact");
+    writeArtifact(expected, installedGmail);
+    const expectedBytes = readFileSync(join(expected, file));
+    // Different bytes in the orphan: adopting it instead of staging would leave them in place.
+    const orphanText = `${readFileSync(orphanFile, "utf8")}\n `;
+    writeFileSync(orphanFile, orphanText);
+
+    const store = createConnectorInstallStore();
+    const staged: string[] = [];
+    const service = installService(dataDir, {
+      installArtifact: (stage) => {
+        staged.push(stage);
+        assert.notEqual(stage, root);
+        assert.equal(readFileSync(orphanFile, "utf8"), orphanText, "the orphan is untouched while the fresh copy stages");
+        writeArtifact(stage, installedGmail);
+      },
+      store,
+    });
+    const installed = await service.install("gmail", GMAIL_INSTALL_DIGEST);
+    assert.equal(staged.length, 1);
+    assert.equal(installed.root, root);
+    assert.deepEqual(readFileSync(orphanFile), expectedBytes);
+    assert.deepEqual((await store.listActive()).map((record) => record.digest), [GMAIL_INSTALL_DIGEST]);
+    assert.equal(await registeredVersion(), installedGmail.version);
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a refused retry after the publish crash leaves the orphan root and both pointers unchanged", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const files = ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"];
+    const bytesBefore = files.map((file) => readFileSync(join(root, file)));
+    const store = createConnectorInstallStore();
+    const before = await agreement();
+    let installs = 0;
+    const service = installService(dataDir, {
+      installArtifact: (stage) => {
+        installs++;
+        assert.notEqual(stage, root);
+        throw new Error("test fixture install refused");
+      },
+      store,
+    });
+    await assert.rejects(service.install("gmail", GMAIL_INSTALL_DIGEST), /test fixture install refused/);
+    assert.equal(installs, 1);
+    assert.deepEqual(
+      files.map((file) => readFileSync(join(root, file))),
+      bytesBefore,
+    );
+    assert.deepEqual(await store.listActive(), []);
+    assert.deepEqual(await agreement(), before);
   });
 });
 
