@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import type { ReactNode } from "react";
 import { LoadingRegion } from "./route-loading.tsx";
 
 function Bar({ className }: { className: string }) {
@@ -14,10 +15,13 @@ function Bar({ className }: { className: string }) {
  * trail stops at the steps that do not wait for data; the last step is the name.
  */
 export function TitledDetailLoadingSkeleton({
+  body,
   breadcrumbs,
   label,
   mark = false,
 }: {
+  /** The shape under the title when it is not the default two blocks (for example a table). */
+  body?: ReactNode;
   breadcrumbs: readonly { href: string; label: string }[];
   label: string;
   /** The page's title starts with a 48 px service mark. */
@@ -34,13 +38,15 @@ export function TitledDetailLoadingSkeleton({
           </span>
         }
       />
-      <div aria-hidden="true" className="flex flex-col gap-4">
-        <div className="flex flex-col gap-2 rounded-md border border-border/70 px-4 py-4">
-          <Bar className="h-4 w-32" />
-          <Bar className="h-3 w-full max-w-md" />
-          <Bar className="h-3 w-2/3 max-w-sm" />
+      {body ?? (
+        <div aria-hidden="true" className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 rounded-md border border-border/70 px-4 py-4">
+            <Bar className="h-4 w-32" />
+            <Bar className="h-3 w-full max-w-md" />
+            <Bar className="h-3 w-2/3 max-w-sm" />
+          </div>
         </div>
-      </div>
+      )}
     </LoadingRegion>
   );
 }

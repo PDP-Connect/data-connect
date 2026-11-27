@@ -32,3 +32,18 @@ test("Schedules and Search loading screens draw their page's own title", () => {
     assert.ok(src.includes(`title="${title}"`), rel);
   }
 });
+
+test("pages with a title never load behind an untitled skeleton", () => {
+  const untitled = /\b(ListLoadingSkeleton|TableLoadingSkeleton|DetailLoadingSkeleton)\b/;
+  for (const rel of [
+    "audit/loading.tsx",
+    "explore/loading.tsx",
+    "schedules/loading.tsx",
+    "search/loading.tsx",
+    "sources/[connector]/[stream]/loading.tsx",
+    "sources/[connector]/[stream]/[recordKey]/loading.tsx",
+    "grants/[grantId]/loading.tsx",
+  ]) {
+    assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), untitled, rel);
+  }
+});
