@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 import {
   describeConnectorIdRename,
   migrateRenamedConnectorIdsSqlite,
 } from "../server/connector-id-rename-migration.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { SqliteDriver } from "../server/sqlite-driver.ts";
 
 type Db = ReturnType<typeof getDb>;
 
@@ -245,6 +247,127 @@ test("initDb renames retired ids stored in an existing database file", () => {
     assert.deepEqual(ids(db, "connector_instances"), ["apple-photos"]);
     closeDb();
   } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+const RENAMED: Readonly<Record<string, string>> = {
+  apple_photos: "apple-photos",
+  claude_code: "claude-code",
+  google_messages: "google-messages",
+  google_takeout: "google-takeout",
+};
+const renamed = (id: string): string => RENAMED[id] ?? id;
+
+type Readable = Pick<Db, "prepare">;
+
+/** Ordinary tables (not virtual or FTS shadow tables), with whether each has a connector_id column. */
+function plainTables(db: Readable): { name: string; hasConnectorId: boolean }[] {
+  const tables = db
+    .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    .all() as { name: string }[];
+  return tables.map(({ name }) => ({
+    hasConnectorId: (db.prepare("SELECT name FROM pragma_table_info(?)").all(name) as { name: string }[]).some(
+      (column) => column.name === "connector_id"
+    ),
+    name,
+  }));
+}
+
+/** Everything the upgrade must preserve, read from one store. */
+function snapshot(db: Readable) {
+  const rowCounts: Record<string, number> = {};
+  const connectorIds: Record<string, string[]> = {};
+  for (const { name, hasConnectorId } of plainTables(db)) {
+    rowCounts[name] = Number((db.prepare(`SELECT count(*) AS n FROM "${name}"`).get() as { n: number }).n);
+    if (hasConnectorId) {
+      connectorIds[name] = (
+        db.prepare(`SELECT connector_id FROM "${name}" ORDER BY connector_id`).all() as { connector_id: string }[]
+      ).map((row) => row.connector_id);
+    }
+  }
+  const rows = (sql: string) => db.prepare(sql).all() as Record<string, unknown>[];
+  return {
+    connectorIds,
+    instances: rows("SELECT connector_instance_id, connector_id FROM connector_instances ORDER BY 1"),
+    recordChanges: rows(
+      "SELECT connector_id, connector_instance_id, stream, record_key, version, record_json FROM record_changes ORDER BY 2, 3, 5"
+    ),
+    records: rows(
+      "SELECT connector_id, connector_instance_id, stream, record_key, version, record_json FROM records ORDER BY 2, 3, 4"
+    ),
+    rowCounts,
+  };
+}
+
+const withRenamedIds = (rows: Record<string, unknown>[]) =>
+  rows.map((row) => ({ ...row, connector_id: renamed(String(row.connector_id)) }));
+
+test("first start upgrades a v0.9.9 store that holds the retired ids, losing only collided old-id rows", () => {
+  // v0.9.9 is the last release before the rename; provenance.json says how the store was made.
+  const fixture = new URL("./fixtures/connector-id-rename/v0.9.9-store.sqlite.gz", import.meta.url);
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-v099-store-"));
+  const path = join(dir, "pdpp.sqlite");
+  try {
+    writeFileSync(path, gunzipSync(readFileSync(fixture)));
+    const original = new SqliteDriver(path, { fileMustExist: true, readonly: true });
+    const before = snapshot(original);
+    original.close();
+
+    initDb(path);
+    const after = snapshot(getDb());
+
+    // Every retired id is renamed, and the only rows lost are the two old-id rows whose key a
+    // current-id row already held: connectors (claude-code) and dataset_summary_stream_projection
+    // (claude-code, sessions).
+    const collided: Record<string, string> = {
+      connectors: "claude-code",
+      dataset_summary_stream_projection: "claude-code",
+    };
+    for (const [table, ids] of Object.entries(before.connectorIds)) {
+      const expected = ids.map(renamed).sort();
+      if (collided[table]) {
+        expected.splice(expected.indexOf(collided[table]), 1);
+      }
+      assert.deepEqual(after.connectorIds[table], expected, table);
+    }
+    // Tables without a connector id lose nothing; first start may add bookkeeping rows to them
+    // (for example a migration ledger entry).
+    for (const [table, count] of Object.entries(before.rowCounts)) {
+      if (!(table in before.connectorIds)) {
+        assert.ok((after.rowCounts[table] ?? 0) >= count, `${table}: ${after.rowCounts[table]} < ${count}`);
+      }
+    }
+
+    // The current-id row wins each collision; the lone old-id projection row is renamed.
+    const db = getDb();
+    const manifest = db.prepare("SELECT manifest FROM connectors WHERE connector_id = 'claude-code'").get() as {
+      manifest: string;
+    };
+    assert.equal(JSON.parse(manifest.manifest).display_name, "current manifest");
+    assert.deepEqual(
+      db
+        .prepare(
+          "SELECT stream, record_count FROM dataset_summary_stream_projection WHERE connector_id = 'claude-code' ORDER BY stream"
+        )
+        .all(),
+      [
+        { record_count: 3, stream: "messages" },
+        { record_count: 9, stream: "sessions" },
+      ]
+    );
+
+    // Owner data keeps its connection, stream, key, version and content; only the id is renamed.
+    assert.ok(before.records.length > 0 && before.recordChanges.length > 0, "the fixture holds owner records");
+    assert.deepEqual(after.records, withRenamedIds(before.records));
+    assert.deepEqual(after.recordChanges, withRenamedIds(before.recordChanges));
+    assert.deepEqual(after.instances, withRenamedIds(before.instances));
+
+    closeDb();
+    initDb(path);
+    assert.deepEqual(snapshot(getDb()), after, "a second start changes nothing");
+  } finally {
+    closeDb();
     rmSync(dir, { force: true, recursive: true });
   }
 });
