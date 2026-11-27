@@ -24,8 +24,9 @@ test("the per-row Remove control on an app's page is 44px tall on a coarse point
   const button = source.slice(source.lastIndexOf("<Button", at), at);
   assert.match(button, /pointer-coarse:min-h-11/);
 });
-// Round 8 B2: a source the owner just removed leaves "What it can read" at once.
-test("a removed source is filtered out of the current section, not only given no Remove button", () => {
+// Round 8 B2: a source the owner just removed leaves "What it can read" at once; the rule is deriveAppReadingView (app-access.test.ts).
+test("the app page lists the rows deriveAppReadingView returns, not its own filter", () => {
   const source = read("./app-page.tsx");
-  assert.match(source, /\.filter\(\(source\) => !reading \|\| \(source\.in_force && !removal\.removed\.includes\(JSON\.stringify\(source\.source\)\)\)\)/);
+  assert.match(source, /deriveAppReadingView\(app, removal\.removed\)/);
+  assert.match(source, /visibleRows\.map\(/);
 });
