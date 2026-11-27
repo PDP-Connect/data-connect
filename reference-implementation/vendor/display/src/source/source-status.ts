@@ -72,7 +72,7 @@ export const TERMINAL_SETUP_DISPOSITION_COPY: Record<SourceTerminalSetupDisposit
     what: "The first sync completed without durable count evidence. Review the connection before retrying.",
   },
   unverified_zero: {
-    actionLabel: "Retry first sync",
+    actionLabel: "Try again",
     statusLabel: "needs review",
     what: "The first sync returned zero records without proving the account was empty. Review the connection and retry.",
   },

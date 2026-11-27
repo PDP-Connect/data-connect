@@ -143,7 +143,7 @@ test("row 4 words a source whose collector is not installed", () => assertRow(4,
 test("row 5 uses the server action or starts a sync when no server action exists", () => {
   const status = sourceStatusWords(fixture(5), { now: NOW });
   // DIRECTION.md, one status table row 5: the needs-you status has one next action.
-  assert.deepEqual(status.action, { kind: "sync_now", label: "Retry first sync", filled: true });
+  assert.deepEqual(status.action, { kind: "sync_now", label: "Try again", filled: true });
 
   const serverAction = sourceStatusWords(source({
     ...fixture(5),
@@ -155,7 +155,7 @@ test("row 5 uses the server action or starts a sync when no server action exists
     ...fixture(5),
     rendered_verdict: verdict("Can't collect", [requiredAction({ satisfied_when: { kind: "none" } })]),
   }), { now: NOW });
-  assert.deepEqual(unavailableServerAction.action, { kind: "sync_now", label: "Retry first sync", filled: true });
+  assert.deepEqual(unavailableServerAction.action, { kind: "sync_now", label: "Try again", filled: true });
 
   const pausedDevice = sourceStatusWords(source({
     ...fixture(5),
@@ -168,10 +168,10 @@ test("row 5 uses the server action or starts a sync when no server action exists
 test("first-sync retry actions use one label for both unverified first-sync rows", () => {
   const rowFive = sourceStatusWords(fixture(5), { now: NOW }).action;
   const rowSix = sourceStatusWords(fixture(6), { now: NOW }).action;
-  assert.equal(rowFive?.label, "Retry first sync");
-  assert.equal(rowSix?.label, "Retry first sync");
+  assert.equal(rowFive?.label, "Try again");
+  assert.equal(rowSix?.label, "Try again");
 });
-test("row 6 words an unverified empty first sync", () => assertRow(6, "First sync found no records", "attention", { kind: "retry_first_sync", label: "Retry first sync", filled: true }));
+test("row 6 words an unverified empty first sync", () => assertRow(6, "First sync found no records", "attention", { kind: "retry_first_sync", label: "Try again", filled: true }));
 test("row 7 words a verified empty first sync", () => assertRow(7, "No records found", "plain", { kind: "review_result", label: "Review result", filled: false }));
 test("row 8 words a required owner action", () => assertRow(8, "Needs you to sign in again", "attention", { kind: "server_cta", label: "Review this source", filled: true }));
 test("a lifecycle-paused source stays out of needs-you when an owner action is stored", () => {
@@ -541,6 +541,13 @@ test("a rejected saved key asks for the key, never for another sync", () => {
   const result = sourceStatusWords(source({ connector_display_name: "Steam", source_binding_kind: "static_secret", owner_state: blockedByMaintainer, last_run: failedRun(rejected), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
   assert.equal(result.words, "Steam no longer accepts the saved key.");
   assert.deepEqual(result.action, { kind: "repair_sign_in", label: "Enter the key again", filled: true });
+});
+
+test("a rejected saved username and password agrees with first sync: sign in again, not the key", () => {
+  const rejected = { code: "invalid_credentials", message: "Venmo rejected the password", origin: null, retryable: false };
+  const result = sourceStatusWords(source({ connector_display_name: "Venmo", source_binding_kind: "static_secret", owner_state: blockedByMaintainer, last_run: failedRun(rejected), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW, credentialKind: "username_password" });
+  assert.equal(result.words, "Venmo didn't accept the sign-in.");
+  assert.deepEqual(result.action, { kind: "repair_sign_in", label: "Sign in again", filled: true });
 });
 
 test("only a fault in DataConnect's own program keeps the maintainers sentence", () => {

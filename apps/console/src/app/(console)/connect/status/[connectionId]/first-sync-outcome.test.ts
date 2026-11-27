@@ -9,6 +9,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { bannedCopyProblems, visibleText } from "../../../sources/add/banned-copy.ts";
 import type { ConnectionSetupStatus } from "../../../lib/ref-client.ts";
+import { resolveSyncCause } from "../../../lib/sync-cause.ts";
 import { type FirstSyncFacts, firstSyncOutcome, headlineFor, scheduleSentence } from "./first-sync-outcome.ts";
 
 Object.assign(globalThis, { React });
@@ -423,4 +424,29 @@ test("record kinds take the manifest's label on the first-sync page", () => {
   const streams = [{ name: "profile", display: { label: "Your Venmo profile" } }] as never;
   const outcome = firstSyncOutcome(status(), "Venmo", { kinds: [{ count: 2, kind: "profile" }], schedule: undefined, streams });
   assert.equal(outcome.kind === "worked" ? outcome.collected[0]?.label : null, "Your Venmo profile");
+});
+
+// Review of 95a98de959, finding 2: structured evidence must reach the cause resolver here as on the row.
+test("a structured unavailable error survives a generic terminal reason, as on the list row", () => {
+  const facts = { ...withOrders, failureReason: "connector_reported_failed", connectorError: { code: "upstream_unavailable", message: "Steam answered 503", retryable: true } } as FirstSyncFacts;
+  const outcome = firstSyncOutcome(status({ setup_state: "first_sync_failed", last_error: { reason: "connector_reported_failed", remediation: "y" } }), "Steam", facts);
+  const row = resolveSyncCause({ reason: "connector_reported_failed", connector_error: facts.connectorError }, "Steam");
+  assert.equal(outcome.kind, "failed");
+  assert.equal(outcome.kind === "failed" ? outcome.reason : null, row.sentence);
+});
+
+// Finding 3: for a partial result whose cause is the person's step, the repair step is the main button.
+test("partial expired session makes the repair step primary and See your data second", async () => {
+  const expired = { ...withOrders, kinds: [{ count: 1, kind: "profile" }], gaps: [{ kind: "skip_result", stream: "transactions", reason: "session_expired", message: "Venmo ended the session" }] } as FirstSyncFacts;
+  const outcome = firstSyncOutcome(status({ setup_kind: "browser_session" }), "Venmo", expired);
+  assert.equal(outcome.kind, "partial");
+  if (outcome.kind !== "partial") { return; }
+  assert.equal(outcome.retry?.label, "Sign in again");
+  const { FirstSyncBody } = await bodyModule;
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" }));
+  const links = [...html.matchAll(/<a [^>]*class="([^"]*)"[^>]*>([^<]*)<\/a>/g)].map((m) => ({ cls: m[1] ?? "", text: m[2] ?? "" }));
+  const signIn = links.findIndex((l) => l.text === "Sign in again");
+  const seeData = links.findIndex((l) => l.text === "See your Venmo data");
+  assert.ok(signIn >= 0 && seeData > signIn, JSON.stringify(links));
+  assert.notEqual(links[signIn]?.cls, links[seeData]?.cls, "the repair step is styled as the main button");
 });

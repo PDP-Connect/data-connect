@@ -619,7 +619,7 @@ test("terminal setup disposition keeps a draft out of sync groups and carries sh
   const [card] = model.pendingSetupCards;
   assert.ok(card);
   assert.equal(card.statusLabel, "needs review");
-  assert.equal(card.actionLabel, "Retry first sync");
+  assert.equal(card.actionLabel, "Try again");
   assert.match(card.what, UNVERIFIED_ZERO_COPY_RE);
 });
 

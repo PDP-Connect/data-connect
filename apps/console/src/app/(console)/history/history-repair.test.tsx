@@ -5,7 +5,10 @@ import test from "node:test";
 import { resolveSyncCause } from "../lib/sync-cause.ts";
 import { sourceStatusWords, sourceStateSentence } from "../lib/source-status-words.ts";
 import { buildSourcesDemoSummaries } from "../sources/sources-demo-data.ts";
-import { currentActionShown, syncDaySentence } from "../syncs/daily-syncs-view.tsx";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { personDay } from "./day-cut.ts";
+import { currentActionShown, syncDaySentence, SyncHistoryDays } from "../syncs/daily-syncs-view.tsx";
 import { toSourceInstanceView } from "../sources/sources-view-model.ts";
 import { buildHomeViewModel } from "../components/views/standing-view-model.ts";
 import { syncPractice } from "./practice.ts";
@@ -186,4 +189,25 @@ test("a worked day never joins the generic stopped answer",()=>{
   assert.match(generic,/copied 3 records$/);
   const named=syncDaySentence({...worked,currentState:"Now: A refresh is due · last synced 14 Nov."},"Venmo");
   assert.match(named,/ · Now: A refresh is due/);
+});
+
+test("a failed day says the cause once when Failed and Now say the same thing", () => {
+  const fixture = syncPractice("mixed", 0);
+  if (fixture.history.mode !== "days") { throw Error("mode"); }
+  const base = fixture.history.data[1]!;
+  const row = { ...base, last_outcome: "failed" as const, failed: 1, cause: "session_expired", evidence: undefined, currentState: "Now: Northwind asked for a new sign-in. See Northwind for the next step." } as Parameters<typeof syncDaySentence>[0];
+  const sentence = syncDaySentence(row, "Northwind");
+  assert.equal(sentence.match(/asked for a new sign-in/g)?.length, 1, sentence);
+  assert.doesNotMatch(sentence, /Now:/);
+});
+
+test("older days with only fine sources say '1 data source checked', never 'all 1'", () => {
+  const now = Date.now();
+  const fixture = syncPractice("mixed", 0, now);
+  if (fixture.history.mode !== "days") { throw Error("mode"); }
+  const base = fixture.history.data[3]!;
+  const older = { ...base, day: personDay(now - 3 * 86_400_000, 0), failed: 0, stopped: 0, interrupted: 0, could_not_start: 0, last_outcome: "finished" as const, cause: null } as Parameters<typeof syncDaySentence>[0];
+  const html = renderToStaticMarkup(createElement(SyncHistoryDays, { rows: [older], sources: fixture.sources, offset: 0 }));
+  assert.match(html, /1 data source checked/);
+  assert.doesNotMatch(html, /all 1/);
 });

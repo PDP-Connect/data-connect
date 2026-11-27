@@ -439,7 +439,7 @@ function RuntimeNotice({ advisory }: { advisory: SourcesRuntimeAdvisory }) {
 
 const COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
-function buildDuplicateNotice(reviews: readonly DuplicateSourceReview[]) {
+export function buildDuplicateNotice(reviews: readonly DuplicateSourceReview[]) {
   const primary = reviews[0];
   if (!primary) return null;
   const total = COUNT_WORDS[primary.total] ?? primary.total.toLocaleString();

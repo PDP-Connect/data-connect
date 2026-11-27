@@ -68,6 +68,8 @@ export interface SourceStatusOptions {
   offset?: number;
   pendingDetails?: boolean;
   signInRepairAvailable?: boolean;
+  /** The manifest's credential kind: a saved username and password is signed in with again; any other saved secret is a key. */
+  credentialKind?: string | null;
   /** The manifest's streams, so a record kind has the same name here as on the source page. */
   streams?: readonly StreamManifestEntry[];
 }
@@ -184,7 +186,7 @@ function lifecycleRow(
           ? action("resume", "Resume", false)
           : syncAction(source);
       const firstSyncAction = fallbackAction?.kind === "sync_now"
-        ? { ...fallbackAction, label: "Retry first sync" }
+        ? { ...fallbackAction, label: "Try again" }
         : fallbackAction;
       return {
         row: 5,
@@ -196,7 +198,7 @@ function lifecycleRow(
       sentence: { text: `The first copy of ${name} may not be complete.`, slot: "what_you_can_do" }, problem: true };
     }
     case "unverified_zero":
-      return { row: 6, words: "First sync found no records", tone: "attention", action: action("retry_first_sync", "Retry first sync", true) , sentence: { text: "First sync found no records.", slot: "what_you_can_do" }, problem: true };
+      return { row: 6, words: "First sync found no records", tone: "attention", action: action("retry_first_sync", "Try again", true) , sentence: { text: "First sync found no records.", slot: "what_you_can_do" }, problem: true };
     case "verified_empty":
       return { row: 7, words: "No records found", tone: "plain", action: action("review_result", "Review result", false) , sentence: { text: "No records found.", slot: "what_you_can_do" }, problem: false };
   }
@@ -289,6 +291,20 @@ function fallbackPillRow(source: RefConnectorSummary, options: SourceStatusOptio
  * `any` false it answers only when the cause is a step for the person or an
  * unavailable service (the cases the server's maintainer verdict gets wrong).
  */
+/** The credential kind a manifest declares for saved sign-in details, if any. */
+export function manifestCredentialKind(manifest: { setup?: unknown } | null | undefined): string | null {
+  const setup = manifest?.setup;
+  if (typeof setup !== "object" || setup === null || !("credential_capture" in setup)) return null;
+  const capture = setup.credential_capture;
+  if (typeof capture !== "object" || capture === null || !("credential_kind" in capture)) return null;
+  return typeof capture.credential_kind === "string" ? capture.credential_kind : null;
+}
+
+/** A rejected saved secret: "a key" unless the connector saves a username and password (the same rule first sync uses). */
+function savedKeyRejected(source: RefConnectorSummary, options: SourceStatusOptions, cause: { credentialRejected?: boolean }): boolean {
+  return cause.credentialRejected === true && source.source_binding_kind === "static_secret" && options.credentialKind !== "username_password";
+}
+
 function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptions, name: string, any = false): MatchedStatus | null {
   const run = source.last_run;
   if (!run) return null;
@@ -300,7 +316,7 @@ function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptio
     ? resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, name)
     : resolveSyncCause({ connector_error: gaps }, name);
   if ((!failed || !any) && !cause.needsPerson && !cause.unavailable) return null;
-  const savedKey = cause.credentialRejected && source.source_binding_kind === "static_secret";
+  const savedKey = savedKeyRejected(source, options, cause);
   const sentence = savedKey ? `${name} no longer accepts the saved key.` : cause.sentence;
   const label = savedKey ? "Enter the key again" : cause.action;
   const scheduled = cause.unavailable && isScheduled(source.schedule ?? null);
@@ -330,7 +346,7 @@ function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions
   const head = `${joinNames(labels)} didn't come at the last sync.`;
   const words = known ? `${head} ${known.sentence}` : head;
   if (known?.needsPerson && known.action === "Sign in again") {
-    const savedKey = known.credentialRejected && source.source_binding_kind === "static_secret";
+    const savedKey = savedKeyRejected(source, options, known);
     return { row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
   }
   const next = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";

@@ -34,6 +34,8 @@ export interface FirstSyncFacts {
 	readonly streams?: readonly StreamManifestEntry[];
 	readonly gaps?: readonly KnownGap[];
 	readonly failureReason?: string | null;
+	/** The run's structured connector error, the same evidence the list row gives the cause resolver. */
+	readonly connectorError?: unknown;
 	readonly runStatus?: RunHandleStatus | null;
 	readonly signedIn?: boolean;
 	/** Kinds with counts from the finished run, or null when the run did not report them. */
@@ -319,7 +321,7 @@ export function firstSyncOutcome(
 		const cause = title
 			? null
 			: resolveSyncCause(
-					{ error: facts.failureReason, reason: status.last_error?.reason },
+					{ connector_error: facts.connectorError, error: facts.failureReason, reason: status.last_error?.reason },
 					name,
 				);
 		const technical = technicalLink(status.run?.run_id);

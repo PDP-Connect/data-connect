@@ -185,3 +185,17 @@ test("successful revoke redirects to the visible connections list instead of a n
   const actions = await read(ACTIONS_FILE);
   assert.match(actions, ACT_REVOKE_REDIRECT_LIST_RE);
 });
+
+test("Copy everything again is hidden when the source has no records (hasRecords gates the form)", async () => {
+  const source = await readFile(DANGER_ZONE_FILE, "utf8");
+  assert.match(source, /hasRecords = true,/);
+  assert.match(source, /setupFailed \|\| inactive \|\| !hasRecords \? null/);
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.match(page, /hasRecords=\{recordTotal\.count !== 0\}/);
+});
+
+test("on a rejected key the Manage section does not repeat the top button", async () => {
+  const page = await readFile(PAGE_FILE, "utf8");
+  assert.match(page, /topButtonShown=\{sourceStatus\.action\?\.kind === "repair_sign_in"\}/);
+  assert.match(page, /if \(setupFailed \|\| topButtonShown\) return null;/);
+});

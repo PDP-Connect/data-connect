@@ -524,7 +524,7 @@ function applyStatusRow(model: ConnectorPageModel, row: SourceStatusRow, include
     case 6:
     case 7: {
       const disposition = row === 5 ? "unverified_missing_counts" : row === 6 ? "unverified_zero" : "verified_empty";
-      const label = row === 5 ? "Review setup" : row === 6 ? "Retry first sync" : "Review result";
+      const label = row === 5 ? "Review setup" : row === 6 ? "Try again" : "Review result";
       source = {
         ...source,
         terminal_setup_disposition: disposition,

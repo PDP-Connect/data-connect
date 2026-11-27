@@ -84,7 +84,7 @@ import {
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
 } from "../../lib/source-actionability.ts";
-import { type SourceStatusAction, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
+import { type SourceStatusAction, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { readConnectorUpdates } from "../connector-updates-read.ts";
@@ -833,8 +833,8 @@ function ConnectorPageView({
   const signInRepairAvailable = credentialUpdateHref !== null;
   // The Schedule section reads this page's own schedule; the sentence above it must read the same one.
   const answerSource = model.scheduleError ? source : { ...source, schedule: model.schedule };
-  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[] });
-  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[] });
+  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
+  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
   const deviceStepsAvailable = hasDeviceLocalRemediation;
@@ -920,6 +920,7 @@ function ConnectorPageView({
               setupFailed={setupFailed || archived}
               storedCredentialUpdateHref={credentialUpdateHref}
               hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
+              topButtonShown={sourceStatus.action?.kind === "repair_sign_in"}
               label={sourceStatus.action?.kind === "repair_sign_in" ? sourceStatus.action.label : "Update sign-in details"}
             />
             {!neverConnected && !revoked ? addAnotherAccountAction : null}
@@ -1899,7 +1900,10 @@ function CredentialRepairLinks({
   storedCredentialUpdateHref,
   hasStaticSecretCredentialUpdate,
   label,
+  topButtonShown,
 }: {
+  /** The top of the page already offers this step: Manage does not repeat the button. */
+  topButtonShown: boolean;
   /** The same words the row and the status line use for this step. */
   label: string;
   revoked: boolean;
@@ -1907,7 +1911,7 @@ function CredentialRepairLinks({
   storedCredentialUpdateHref: string | null;
   hasStaticSecretCredentialUpdate: boolean;
 }) {
-  if (setupFailed) return null;
+  if (setupFailed || topButtonShown) return null;
   return storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate ? (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
       <p className="pdpp-body text-muted-foreground">Replace the saved sign-in details. Your records are kept.</p>

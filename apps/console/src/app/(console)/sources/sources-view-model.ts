@@ -66,7 +66,7 @@ import {
   type SourcePrimaryVerdictAction,
   type SourceStatusFlag,
 } from "../lib/source-actionability.ts";
-import { ENTER_THE_CODE, type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
+import { ENTER_THE_CODE, manifestCredentialKind, type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
 import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../lib/total-records-label.ts";
 import { summarizeVersionChurn } from "../lib/version-churn-summary.ts";
 
@@ -724,7 +724,7 @@ export function toSourceInstanceView(
   const manifest = options.manifests
     ? options.manifests.find((candidate) => manifestMatchesConnectorId(candidate, connectorId))
     : undefined;
-  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset,streams: manifest?.streams as StreamManifestEntry[] | undefined });
+  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset,streams: manifest?.streams as StreamManifestEntry[] | undefined,credentialKind: manifestCredentialKind(manifest) });
   const nextAction = primaryVerdictAction?.ownerRunnable ? null : actionability.nextAction;
   const { ownerActionCue } = actionability;
   const status = actionability.renderedStatus;

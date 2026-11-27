@@ -30,6 +30,13 @@ function firstValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+/** The terminal event's connector error as the list row's run summary carries it: code, message, retryable. */
+function terminalConnectorError(event: ReturnType<typeof getCollectionTerminalEvent>): unknown {
+  const data = event?.data;
+  if (!data || typeof data.connector_error_code !== "string") return undefined;
+  return { code: data.connector_error_code, message: data.connector_error_message ?? null, retryable: data.connector_error_retryable ?? null };
+}
+
 async function readFacts(
   status: Awaited<ReturnType<typeof getConnectionSetupStatus>>,
   streams: FirstSyncFacts["streams"]
@@ -43,7 +50,7 @@ async function readFacts(
     runId ? getRunStatus(runId).catch(() => null) : Promise.resolve(null),
   ]);
   const kinds = timeline ? getCollectedKinds(getCollectionTerminalEvent(timeline.events)) : null;
-  return { streams, kinds, schedule, gaps: runStatus ? extractKnownGapsFromEventData(runStatus).gaps : timeline ? extractTerminalKnownGaps(timeline.events).gaps : [], failureReason: runStatus?.terminal_reason ?? runStatus?.failure?.reason, runStatus: runStatus?.status, signedIn: timeline ? hasResolvedBrowserSurfaceAssistance(timeline.events) : false };
+  return { streams, kinds, schedule, gaps: runStatus ? extractKnownGapsFromEventData(runStatus).gaps : timeline ? extractTerminalKnownGaps(timeline.events).gaps : [], failureReason: runStatus?.terminal_reason ?? runStatus?.failure?.reason, connectorError: timeline ? terminalConnectorError(getCollectionTerminalEvent(timeline.events)) : undefined, runStatus: runStatus?.status, signedIn: timeline ? hasResolvedBrowserSurfaceAssistance(timeline.events) : false };
 }
 
 export default async function ConnectionSetupStatusPage({
