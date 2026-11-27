@@ -790,7 +790,7 @@ export function SyncsView({
   seeded?: boolean;
 }) {
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+    <div className="mx-auto w-full max-w-5xl">
       <header className="mb-6">
         <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.022em] text-foreground min-[860px]:text-[26px]">
           {title}

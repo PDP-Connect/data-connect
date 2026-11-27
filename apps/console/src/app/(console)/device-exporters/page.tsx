@@ -46,7 +46,7 @@ export default async function DeviceExportersPage({
   if (practice)
     return (
       <RecordroomShellWithPalette>
-        <main className="mx-auto grid max-w-5xl gap-6 px-4 py-6">
+        <main className="mx-auto grid max-w-5xl gap-6">
           <CollectorHeading />
           <CollectorList devices={practice} practice />
           <CollectorSetup collectorConnectorIds={["sample"]} referenceBaseUrl="https://maple.example.test" practice />

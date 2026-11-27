@@ -25,7 +25,7 @@ async function loadNotificationState() {
 export default async function NotificationsPage({ searchParams }: { searchParams?: Promise<{ demo?: string }> }) {
   const params = await searchParams;
   const practice = process.env.NODE_ENV !== "production" && ["off", "on", "blocked", "unsupported", "insecure", "devices"].includes(params?.demo ?? "") ? params!.demo : undefined;
-  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-6"><PageHeading /><WebPushSettings plain practice={practice} config={{ object: "web_push_config", enabled: true, public_key: "practice", unavailable_reason: null }} subscriptions={[]} /></main></RecordroomShellWithPalette>;
+  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-4"><PageHeading /><WebPushSettings plain practice={practice} config={{ object: "web_push_config", enabled: true, public_key: "practice", unavailable_reason: null }} subscriptions={[]} /></main></RecordroomShellWithPalette>;
   let state: Awaited<ReturnType<typeof loadNotificationState>> | null = null;
   let unreachable = false;
   let loadError = "Notifications could not be loaded";
@@ -44,7 +44,7 @@ export default async function NotificationsPage({ searchParams }: { searchParams
   if (unreachable || !state) {
     return (
       <RecordroomShellWithPalette>
-        <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+        <main className="mx-auto w-full max-w-5xl">
           <PageHeading />
           <p className="text-[15px] text-muted-foreground">
             This could not be loaded. <Link className="text-primary underline" href="/notifications">Try again</Link>.
@@ -57,7 +57,7 @@ export default async function NotificationsPage({ searchParams }: { searchParams
 
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6 lg:px-8">
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-4">
         <PageHeading />
         <WebPushSettings plain config={state.config} subscriptions={state.subscriptions} />
       </main>

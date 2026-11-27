@@ -30,7 +30,7 @@ interface DeploymentPageParams {
 export default async function DeploymentPage({ searchParams }: { searchParams: Promise<DeploymentPageParams> }) {
   const params = await searchParams;
   const practice = process.env.NODE_ENV !== "production" && params.demo ? buildServerPractice(params.demo) : null;
-  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><ServerChecks inputs={practice.inputs} practice={practice} /><nav aria-label="Server settings" className="grid gap-3"><Link className="underline" href="/deployment/tokens">Tokens for scripts and tools</Link><Link className="underline" href="/deployment/provider-apps">Sign-in apps for data sources</Link></nav><Link className="underline" href="/deployment/technical">Technical details</Link></main></RecordroomShellWithPalette>;
+  if (practice) return <RecordroomShellWithPalette><main className="mx-auto grid w-full max-w-5xl gap-6"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><ServerChecks inputs={practice.inputs} practice={practice} /><nav aria-label="Server settings" className="grid gap-3"><Link className="underline" href="/deployment/tokens">Tokens for scripts and tools</Link><Link className="underline" href="/deployment/provider-apps">Sign-in apps for data sources</Link></nav><Link className="underline" href="/deployment/technical">Technical details</Link></main></RecordroomShellWithPalette>;
   let report: DeploymentDiagnostics | null = null;
   let unreachable = false;
   let loadError = "Server checks could not be loaded";
@@ -48,14 +48,14 @@ export default async function DeploymentPage({ searchParams }: { searchParams: P
   if (unreachable || !report) {
     return (
       <RecordroomShellWithPalette>
-        <main className="mx-auto grid max-w-5xl gap-4 px-4 py-6"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><p>This could not be loaded. <Link href="/deployment">Try again</Link>.</p><SupportCopy details={loadError} /></main>
+        <main className="mx-auto grid max-w-5xl gap-4"><PageHeader breadcrumbs={settingsTrail("Server")} title="Server" /><p>This could not be loaded. <Link href="/deployment">Try again</Link>.</p><SupportCopy details={loadError} /></main>
       </RecordroomShellWithPalette>
     );
   }
 
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
         <PageHeader breadcrumbs={settingsTrail("Server")} title="Server" />
         {params.error ? <div role="status"><p>This could not be completed. Try again from Technical details.</p><SupportCopy details={params.error} /></div> : null}
         {params.notice === "dataset_summary_rebuilt" ? <p role="status">The stored data list was rebuilt.</p> : null}

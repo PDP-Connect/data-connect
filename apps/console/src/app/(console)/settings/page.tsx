@@ -46,7 +46,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
 
   return (
     <RecordroomShellWithPalette>
-      <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6 px-4 py-6">
+      <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6">
         <PageHeader title="Settings" />
         <Section>
           {managedDesktopHost ? <RemoteAccessRow practiceName={practice?.name} /> : <SettingsRow href="/settings/remote-access" title="Remote access" />}

@@ -20,7 +20,7 @@ export default async function RemoteAccessPage({ searchParams }: { searchParams?
   const address = managed ? null : practice ? practice.publicAddress : (await loadSettingsSummary()).publicAddress
   return (
     <RecordroomShellWithPalette>
-      <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6 px-4 py-6">
+      <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6">
         <PageHeader breadcrumbs={settingsTrail("Remote access")} title="Remote access" />
         <Section id="remote-access">
           {!managed ? <ServerRemoteAccess address={address} /> : practice ? <RemoteAccessPractice appVersion={identity.version} name={practice.name} /> : <RemoteAccessSetting appVersion={identity.version} />}

@@ -130,7 +130,7 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
     if (err instanceof ReferenceServerUnreachableError) {
       return (
         <RecordroomShellWithPalette>
-          <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+          <main className="mx-auto w-full max-w-5xl">
             <PageHeader title="Sync history" />
             <p className="text-[15px] text-muted-foreground">
               This could not be loaded. <Link className="text-primary underline" href="/syncs">Try again</Link>.
@@ -149,7 +149,7 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   if (connectorsPage.kind === "error") {
     return (
       <RecordroomShellWithPalette>
-        <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+        <main className="mx-auto w-full max-w-5xl">
           <PageHeader title="Sync history" />
           <p className="text-[15px] text-muted-foreground">
             This could not be loaded. <Link className="text-primary underline" href={SYNCS_PATH}>Try again</Link>.

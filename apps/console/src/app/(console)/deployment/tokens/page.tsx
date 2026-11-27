@@ -46,7 +46,7 @@ export default async function TokensPage({
   const created = practice?.created ?? flow?.token
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
         <PageHeader breadcrumbs={settingsTrail("Tokens for scripts and tools")} title="Tokens for scripts and tools" />
         <p className="text-muted-foreground">
           A token lets a script or tool of yours read all your data without

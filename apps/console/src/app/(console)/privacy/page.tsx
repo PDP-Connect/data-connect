@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export default function PrivacyPage() {
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
         <PageHeader breadcrumbs={settingsTrail("Privacy")} title="Privacy" />
         <PrivacyContent />
       </main>

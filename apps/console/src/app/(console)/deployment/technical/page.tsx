@@ -144,7 +144,7 @@ export default async function DeploymentPage({
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={isDeploymentIndexing(report)} />
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
         <PageHeader title="Technical details" />
         <NotificationDiagnostics />
         <nav

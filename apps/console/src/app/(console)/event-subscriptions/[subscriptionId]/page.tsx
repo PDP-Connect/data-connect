@@ -34,7 +34,7 @@ export default async function WebhookPage({
   )
   return (
     <RecordroomShellWithPalette>
-      <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
+      <main className="mx-auto grid w-full max-w-5xl gap-6">
         <PageHeader title="Webhook" />
         <Link className="underline" href="/event-subscriptions">
           All webhooks

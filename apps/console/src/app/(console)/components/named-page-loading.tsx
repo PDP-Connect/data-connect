@@ -51,7 +51,7 @@ export function NamedPageLoadingSkeleton({
       {children}
     </LoadingRegion>
   );
-  return framed ? <div className="mx-auto grid min-w-0 w-full max-w-5xl gap-6 px-4 py-6">{body}</div> : body;
+  return framed ? <div className="mx-auto grid min-w-0 w-full max-w-5xl gap-6">{body}</div> : body;
 }
 
 /** Name on the left, a short state on the right: Settings and the pages that look like it. */
