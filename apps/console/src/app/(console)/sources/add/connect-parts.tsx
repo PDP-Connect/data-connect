@@ -65,12 +65,15 @@ export function WentWrong({ message }: { message: string }) {
   );
 }
 
+/** The id the fields point at (aria-describedby) when the form was rejected. */
+export const CONNECT_ERROR_ID = "connect-error";
+
 /** A failed start: one plain sentence, the cause in authored words under "What went wrong". */
 export function StartFailed({ message, sentence }: { message: string; sentence: string }) {
   return (
-    <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" role="alert">
+    <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" id={CONNECT_ERROR_ID} role="alert">
       <p className="pdpp-caption">{sentence}</p>
-      <WentWrong message={message} />
+      <p className="pdpp-caption break-words">{connectErrorWords(message)}</p>
     </div>
   );
 }

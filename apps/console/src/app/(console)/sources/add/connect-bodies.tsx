@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants, IcButton, type ConnectorIconLike } from "@pdpp/brand-react";
+import { type ConnectorIconLike } from "@pdpp/brand-react";
 import type { ReactNode } from "react";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { cannotAddWhy, connectHeading, fileCopy, keyCopy, signInCopy } from "./connect-copy.ts";
@@ -12,8 +12,10 @@ import {
   type ExistingAccount,
   ExistingAccountsNote,
   NewServiceNote,
+  CONNECT_ERROR_ID,
   StartFailed,
 } from "./connect-parts.tsx";
+import { SubmitButton } from "./submit-button.tsx";
 import { CredentialFields, type CredentialFieldSpec, OptionalSignIn } from "./credential-fields.tsx";
 
 /** "Open Health. Tap your picture." becomes two lines; a sentence ends at . ! or ? before a capital or digit. */
@@ -89,15 +91,13 @@ export function SignInConnectBody({
           {capture?.required ? (
             <>
               <input name="credential_capture_required" type="hidden" value="1" />
-              <CredentialFields fields={capture.fields} idPrefix="sign-in" required />
+              <CredentialFields errorId={error ? CONNECT_ERROR_ID : undefined} fields={capture.fields} idPrefix="sign-in" required />
               <p className="pdpp-caption text-muted-foreground">{signInCopy.storage(name)}</p>
             </>
           ) : null}
           <NewServiceNote name={name} tier={service.tier} />
           <div>
-            <button className={buttonVariants({ className: "min-h-11", size: "lg", variant: "default" })} type="submit">
-              {repairMode ? `Reconnect ${name}` : signInCopy.button(name)}
-            </button>
+            <SubmitButton>{repairMode ? `Reconnect ${name}` : signInCopy.button(name)}</SubmitButton>
           </div>
           {capture && !capture.required ? (
             <OptionalSignIn checkboxName={capture.checkboxName} fields={capture.fields} name={name} />
@@ -180,13 +180,11 @@ export function KeyConnectBody({
                 <input name="display_name" type="hidden" value={displayNameParam} />
               ) : null}
               {mode === "replace" ? null : <AccountNameField accounts={accounts} fieldName="display_name" name={name} />}
-              <CredentialFields fields={fields} idPrefix="key" required={!keyIsOptional} />
+              <CredentialFields errorId={error ? CONNECT_ERROR_ID : undefined} fields={fields} idPrefix="key" required={!keyIsOptional} />
               <p className="pdpp-caption text-muted-foreground">{keyCopy.storage(name)}</p>
               <NewServiceNote name={name} tier={service.tier} />
               <div>
-                <IcButton className="min-h-11" type="submit" variant="default">
-                  {reconnecting ? `Reconnect ${name}` : keyCopy.button(name)}
-                </IcButton>
+                <SubmitButton>{reconnecting ? `Reconnect ${name}` : keyCopy.button(name)}</SubmitButton>
               </div>
             </form>
           </>

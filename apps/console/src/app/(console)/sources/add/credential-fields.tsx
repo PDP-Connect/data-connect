@@ -3,7 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { splitHelpText } from "./credential-help.ts";
+import { fieldLabelWords, splitHelpText } from "./credential-help.ts";
 import { IcInput } from "@pdpp/brand-react";
 import { useState } from "react";
 import { signInCopy } from "./connect-copy.ts";
@@ -24,10 +24,13 @@ export interface CredentialFieldSpec {
 
 /** The fields the service names, each with its own label and nothing else. */
 export function CredentialFields({
+  errorId,
   fields,
   idPrefix,
   required,
 }: {
+  /** Set when the form was rejected: the id of the alert that says why. */
+  errorId?: string | undefined;
   fields: readonly CredentialFieldSpec[];
   idPrefix: string;
   /** Whether the browser should block an empty submit. */
@@ -40,7 +43,7 @@ export function CredentialFields({
         return (
           <div className="grid gap-1" key={field.name}>
             <label className="grid gap-1" htmlFor={`${idPrefix}-${field.name}`}>
-              <span className="pdpp-eyebrow">{field.label}</span>
+              <span className="pdpp-eyebrow">{fieldLabelWords(field.label, field.name)}</span>
               {help ? (
                 <span className="pdpp-caption text-muted-foreground" id={`${idPrefix}-${field.name}-help`}>
                   {help.short}
@@ -48,7 +51,8 @@ export function CredentialFields({
               ) : null}
             </label>
             <IcInput
-              aria-describedby={help ? `${idPrefix}-${field.name}-help` : undefined}
+              aria-describedby={[help ? `${idPrefix}-${field.name}-help` : null, errorId ?? null].filter(Boolean).join(" ") || undefined}
+              aria-invalid={errorId ? true : undefined}
               autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
               className="min-h-11"
               defaultValue={field.secret ? undefined : field.defaultValue}

@@ -16,12 +16,12 @@ function coarseBlocks(css: string): string {
 
 test("a bare checkbox is drawn at 22px on a coarse pointer, pressed through its 44px label", () => {
   const coarse = coarseBlocks(globals);
-  assert.match(coarse, /input\[type="checkbox"\][^{}]*\{[^}]*height:\s*22px/s);
-  assert.match(coarse, /label:has\(>\s*input\[type="checkbox"\][^{]*\{[^}]*min-height:\s*44px/s);
+  assert.match(coarse, /input\[type="checkbox"\][^{}]*\{[^}]*height:\s*22px/);
+  assert.match(coarse, /label:has\(>\s*input\[type="checkbox"\][^{]*\{[^}]*min-height:\s*44px/);
 });
 
 test("the row menu trigger is 44px on a coarse pointer", () => {
   const coarse = coarseBlocks(sourcesCss);
-  assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(width|min-width):\s*44px/s);
-  assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(height|min-height):\s*44px/s);
+  assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(width|min-width):\s*44px/);
+  assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(height|min-height):\s*44px/);
 });

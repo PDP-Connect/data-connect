@@ -29,3 +29,33 @@ test("a field with no help text draws no help line", () => {
   );
   assert.doesNotMatch(html, /aria-describedby/);
 });
+
+test("an empty or raw field label falls back to a readable name", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(CredentialFields, {
+      fields: [
+        { autocomplete: null, label: "", name: "api_key", placeholder: null, required: true, secret: true, type: "password" },
+        { autocomplete: null, label: "steamId", name: "steamId", placeholder: null, required: true, secret: false, type: "text" },
+      ],
+      idPrefix: "key",
+      required: true,
+    })
+  );
+  assert.match(html, />Api key</);
+  assert.match(html, />Steam id</);
+  assert.doesNotMatch(html, />api_key</);
+  assert.doesNotMatch(html, />steamId</);
+});
+
+test("when the form was rejected, each field is marked invalid and points at the reason", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(CredentialFields, {
+      errorId: "connect-error",
+      fields: [{ autocomplete: null, helpText: "Short help.", label: "Key", name: "k", placeholder: null, required: true, secret: true, type: "password" }],
+      idPrefix: "key",
+      required: true,
+    })
+  );
+  assert.match(html, /aria-invalid="true"/);
+  assert.match(html, /aria-describedby="key-k-help connect-error"/);
+});
