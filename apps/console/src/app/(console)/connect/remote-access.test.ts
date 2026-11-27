@@ -36,3 +36,25 @@ test("an address says where it works: this computer, your own network, or anywhe
   // An address that cannot be read is not offered as usable from the internet.
   for (const bad of ["not a url", "ftp://nas", "http://user:pw@nas:3000"]) assert.deepEqual(addressReach(bad), { kind: "unusable", phrase: null }, bad);
 });
+
+// Round 10 (R1): every boundary of the address classes, one table.
+test("address classes at their boundaries", async () => {
+  const { addressReach } = await import("./remote-access.ts");
+  const table: [string, string][] = [
+    ["http://localhost.:3000", "this-computer"], ["http://127.255.255.254", "this-computer"], ["http://[::1]", "this-computer"],
+    ["http://100.64.0.1", "private-network"], ["http://100.127.255.255", "private-network"], ["http://100.63.255.255", "public"], ["http://100.128.0.1", "public"],
+    ["http://169.254.1.1", "private-network"], ["http://172.15.0.1", "public"], ["http://172.16.0.1", "private-network"], ["http://172.31.255.255", "private-network"], ["http://172.32.0.1", "public"],
+    ["http://[fe80::1]", "private-network"], ["http://[febf::1]", "private-network"], ["http://[fec0::1]", "public"], ["http://[fc00::1]", "private-network"], ["http://[fdff::1]", "private-network"], ["http://[fe00::1]", "public"],
+    ["http://nas.local.:3000", "private-network"], ["http://nas.", "private-network"], ["https://data.example.com.", "public"], ["https://data.example.com", "public"],
+    ["http://0.0.0.0:3000", "unusable"], ["http://[::]:3000", "unusable"],
+  ];
+  for (const [origin, kind] of table) assert.equal(addressReach(origin).kind, kind, origin);
+});
+
+test("the endpoint and the command are built from the origin alone", async () => {
+  const { mcpEndpoint } = await import("./remote-access.ts");
+  const { claudeCodeCommand } = await import("./assistant-instructions.ts");
+  assert.equal(mcpEndpoint("https://data.example.com/"), "https://data.example.com/mcp");
+  assert.equal(mcpEndpoint("https://data.example.com:8443/app?x=1#top"), "https://data.example.com:8443/mcp");
+  assert.match(claudeCodeCommand("https://data.example.com/path?x=1"), /'https:\/\/data\.example\.com\/mcp'$/);
+});

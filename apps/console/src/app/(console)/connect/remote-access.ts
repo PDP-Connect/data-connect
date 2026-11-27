@@ -15,14 +15,25 @@ export function addressReach(origin: string): { kind: AddressKind; phrase: strin
   }
   // Not an address an assistant could use: other schemes, or sign-in details inside the address.
   if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) return { kind: "unusable", phrase: null };
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  let host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  host = host.replace(/\.+$/, "");
+  if (host === "0.0.0.0" || host === "::" || host === "") return { kind: "unusable", phrase: null };
   if (host === "localhost" || host === "::1" || host.startsWith("127.")) return { kind: "this-computer", phrase: "only works on this computer" };
+  const firstHextet = host.includes(":") ? Number.parseInt(host.split(":")[0] || "0", 16) : Number.NaN;
+  const secondOctet = /^100\.(\d+)\./.exec(host)?.[1];
   const privateName =
     host.endsWith(".local") || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.") ||
     PRIVATE_172_ADDRESS.test(host) ||
-    (host.includes(":") && (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:"))) ||
+    (secondOctet !== undefined && Number(secondOctet) >= 64 && Number(secondOctet) <= 127) ||
+    // fc00::/7 (unique local) and fe80::/10 (link local)
+    (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) || (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) ||
     (!host.includes(".") && !host.includes(":"));
   return privateName ? { kind: "private-network", phrase: "only works on your own network" } : { kind: "public", phrase: null };
+}
+
+/** The address an assistant is given: the origin alone, whatever path or query the page address carried. */
+export function mcpEndpoint(origin: string): string {
+  return `${new URL(origin).origin}/mcp`;
 }
 
 export function needsRemoteAccess(origin: string): boolean {

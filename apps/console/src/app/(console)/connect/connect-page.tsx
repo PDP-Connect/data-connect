@@ -6,7 +6,7 @@ import Link from "next/link";
 import type { AppAccess } from "../grants/app-access.ts";
 import { assistantInstructions, claudeCodeCommand } from "./assistant-instructions.ts";
 import { CopyAddress } from "./copy-address.tsx";
-import { addressReach, needsRemoteAccess } from "./remote-access.ts";
+import { addressReach, mcpEndpoint, needsRemoteAccess } from "./remote-access.ts";
 /** The assistants that run on the internet, so they cannot use an address that only works on this network. */
 const REMOTE_ONLY_ASSISTANTS = new Set(["ChatGPT", "Claude"]);
 
@@ -43,7 +43,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
         </div>
       ) : null}
       <Section title="1. Copy your address">
-        <CopyAddress address={`${origin.replace(/\/+$/, "")}/mcp`} />
+        <CopyAddress address={mcpEndpoint(origin)} />
       </Section>
       <Section title="2. Add it to your assistant">
         <div className="grid gap-6 sm:grid-cols-2">

@@ -1,5 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { mcpEndpoint } from "./remote-access.ts";
+
 /** Menu names checked against the linked first-party help on the stated date. */
 export const assistantInstructions = [
   {
@@ -35,9 +37,10 @@ export const assistantInstructions = [
     steps: ["Give the app the address above. Follow its help page to add a remote server."],
   },
 ] as const;
+import { mcpEndpoint } from "./remote-access.ts";
 
 /** Matches the existing technical setup command; quote the address for a shell. */
 export function claudeCodeCommand(origin: string): string {
-  const address = `${origin.replace(/\/+$/, "")}/mcp`;
+  const address = mcpEndpoint(origin);
   return `claude mcp add --transport http dataconnect '${address.replaceAll("'", "'\\''")}'`;
 }
