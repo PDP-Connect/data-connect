@@ -343,6 +343,35 @@ test("desktop pairing: unknown, used and expired codes return one identical 401"
   });
 });
 
+test("desktop pairing: a server restart discards pending codes", async () => {
+  // Both instances open the same database file, so a code stored there would survive.
+  const directory = await mkdtemp(join(tmpdir(), "pdpp-desktop-pairing-"));
+  const dbPath = join(directory, "owner.sqlite");
+  try {
+    initDb(dbPath);
+    await setOwnerPassword(createOwnerPasswordVerifierStore(), TEST_PASSWORD);
+    closeDb();
+    let pendingCode = "";
+    await withServer({ dbPath }, async ({ asUrl }) => {
+      const { cookie } = await login(asUrl, TEST_PASSWORD);
+      assert.ok(cookie);
+      const created = await createPairing(asUrl, cookie);
+      assert.equal(created.status, 201);
+      pendingCode = created.body.code;
+      assert.match(pendingCode, CODE_PATTERN);
+    });
+    await withServer({ dbPath }, async ({ asUrl }) => {
+      // The owner password survived, so the database did.
+      assert.ok((await login(asUrl, TEST_PASSWORD)).cookie);
+      const result = await redeem(asUrl, { code: pendingCode });
+      assert.equal(result.status, 401);
+      assert.deepEqual(result.body, INVALID_CODE_ERROR);
+    });
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
 test("desktop pairing: redeem rejects a malformed body with 400 invalid_request", async () => {
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
     for (const payload of [{}, { code: 42 }, { code: "" }, { code: "ABCD", label: 7 }, [], "null"]) {
@@ -418,6 +447,42 @@ test("desktop pairing: revoking the paired session ends it immediately", async (
     });
     assert.equal(revoke.status, 204);
     assert.equal(await sessionStatus(asUrl, session), 401);
+  });
+});
+
+test("desktop pairing: revoking Desk A leaves Desk B signed in", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const { cookie } = await login(asUrl, TEST_PASSWORD);
+    assert.ok(cookie);
+    async function pairDesktop(label: string) {
+      const created = await createPairing(asUrl, cookie!);
+      assert.equal(created.status, 201);
+      const result = await redeem(asUrl, { code: created.body.code, label });
+      assert.equal(result.status, 200);
+      assert.equal(result.body.label, label);
+      assert.equal(typeof result.body.session, "string");
+      return result.body.session as string;
+    }
+    const deskA = await pairDesktop("Desk A");
+    const deskB = await pairDesktop("Desk B");
+    assert.notEqual(deskA, deskB);
+    assert.equal(await sessionStatus(asUrl, deskA), 204);
+    assert.equal(await sessionStatus(asUrl, deskB), 204);
+
+    const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json" });
+    headers.set("Cookie", cookie);
+    const response = await fetch(`${asUrl}/owner/sessions`, { headers });
+    assert.equal(response.status, 200);
+    const list = (await response.json()) as { sessions: Array<{ id: string; label: string }> };
+    const itemA = list.sessions.find((entry) => entry.label === "Desk A");
+    const itemB = list.sessions.find((entry) => entry.label === "Desk B");
+    assert.ok(itemA);
+    assert.ok(itemB);
+    assert.notEqual(itemA.id, itemB.id);
+    const revoked = await fetch(`${asUrl}/owner/sessions/${itemA.id}/revoke`, { headers, method: "POST" });
+    assert.equal(revoked.status, 204);
+    assert.equal(await sessionStatus(asUrl, deskA), 401);
+    assert.equal(await sessionStatus(asUrl, deskB), 204);
   });
 });
 
