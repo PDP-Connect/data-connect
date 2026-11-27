@@ -61,3 +61,10 @@ test("each assistant's cell can shrink, so a long command scrolls inside its box
   const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://127.0.0.1:18708", apps: [] }));
   assert.match(html, /<section class="min-w-0">/);
 });
+
+test("a loopback address says it only works on this computer; a private one says your own network", () => {
+  const loopback = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://127.0.0.1:18708", apps: [] }));
+  assert.match(loopback, /address only works on this computer\./);
+  const lan = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://192.168.1.10:3000", apps: [] }));
+  assert.match(lan, /address only works on your own network\./);
+});

@@ -6,7 +6,7 @@ import Link from "next/link";
 import type { AppAccess } from "../grants/app-access.ts";
 import { assistantInstructions, claudeCodeCommand } from "./assistant-instructions.ts";
 import { CopyAddress } from "./copy-address.tsx";
-import { needsRemoteAccess } from "./remote-access.ts";
+import { addressReach, needsRemoteAccess } from "./remote-access.ts";
 /** The assistants that run on the internet, so they cannot use an address that only works on this network. */
 const REMOTE_ONLY_ASSISTANTS = new Set(["ChatGPT", "Claude"]);
 
@@ -21,7 +21,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
       </p>
       {needsRemote ? (
         <div className="mb-6 rounded-md border border-warning p-4">
-          <p>ChatGPT and Claude can't reach this DataConnect yet. Its address only works on your own network.</p>
+          <p>ChatGPT and Claude can't reach this DataConnect yet. Its address {addressReach(origin).phrase ?? "only works on your own network"}.</p>
           <p className="mt-2">
             Remote access gives this DataConnect an address on the internet that only apps you approve can use.
           </p>
