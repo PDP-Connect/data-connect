@@ -17,3 +17,14 @@ test("a source row's name and kind lines wrap instead of ending in an ellipsis",
     assert.doesNotMatch(body, /white-space:\s*nowrap/);
   }
 });
+
+// The "…" menu stays at the top right when a row wraps, on desktop as on phone.
+test("the row menu is top-aligned on desktop and the phone layout adds no offset", async () => {
+  const css = await readFile(fileURLToPath(new URL("./sources-view.css", import.meta.url)), "utf8");
+  const desktop = css.match(/\n\.rr-s-menu-trigger \{([^}]*)\}/)?.[1];
+  assert.ok(desktop, "desktop menu rule");
+  assert.match(desktop, /align-self:\s*start/);
+  const phone = css.match(/\n  \.rr-s-menu-trigger \{([^}]*)\}/)?.[1];
+  assert.ok(phone, "phone menu rule");
+  assert.match(phone, /margin-top:\s*0/);
+});

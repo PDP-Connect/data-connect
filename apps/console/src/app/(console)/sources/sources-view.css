@@ -240,6 +240,10 @@
 .rr-s-menu-trigger {
   grid-column: 6;
   justify-self: end;
+  /* Top right when the row wraps. The 2px keeps a one-line row where it was: the 36px logo
+     is the tallest cell, so a 32px menu centred in it sat 2px down. */
+  align-self: start;
+  margin-top: 2px;
   display: grid;
   place-items: center;
   width: 32px;
@@ -468,6 +472,7 @@
   .rr-s-menu-trigger {
     grid-column: 2;
     grid-row: 1;
+    margin-top: 0;
   }
 
   .rr-s-row__action,

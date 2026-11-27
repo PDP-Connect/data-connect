@@ -83,3 +83,15 @@ test("the shared skeleton is lightweight and accessible", async () => {
   // Exactly one animation primitive — the pulse — no bespoke motion framework.
   assert.match(src, ANIMATE_PULSE_RE);
 });
+
+// The titled detail skeleton (source page, run page) is also a shared skeleton: same
+// accessibility and weight rules as the plain one. Its outline matching the real page
+// (trail, title bar) is pinned in titled-detail-loading.test.tsx and by the scenes
+// loading-outline check; this file only guards that every loading.tsx uses a shared skeleton.
+test("the titled detail skeleton is lightweight and accessible", async () => {
+  const src = await readFile(`${DASHBOARD}components/titled-detail-loading.tsx`, "utf8");
+  assert.match(src, ROLE_STATUS_RE);
+  assert.match(src, ARIA_BUSY_RE);
+  assert.match(src, ARIA_HIDDEN_RE);
+  assert.match(src, ANIMATE_PULSE_RE);
+});

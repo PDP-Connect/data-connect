@@ -82,6 +82,10 @@
       height: max(100%, 44px);
       transform: translate(-50%, -50%);
     }
+    /* A field is a replaced element: it takes no ::after, so it gets the height itself. */
+    :where(input:not([type="hidden"], [type="checkbox"], [type="radio"], [type="range"], [type="file"]), select, textarea) {
+      min-height: 44px;
+    }
   }
 }
 
