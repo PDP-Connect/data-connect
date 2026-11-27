@@ -264,15 +264,15 @@ interface Readable {
   prepare(sql: string): { all(...params: string[]): unknown[]; get(...params: string[]): unknown };
 }
 
-/** Ordinary tables (not virtual or FTS shadow tables), with whether each has a connector_id column. */
-function plainTables(db: Readable): { name: string; hasConnectorId: boolean }[] {
+/** Ordinary tables (not virtual or FTS shadow tables), with their connector id columns. */
+function plainTables(db: Readable): { name: string; idColumns: string[] }[] {
   const tables = db
     .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as { name: string }[];
   return tables.map(({ name }) => ({
-    hasConnectorId: (db.prepare("SELECT name FROM pragma_table_info(?)").all(name) as { name: string }[]).some(
-      (column) => column.name === "connector_id"
-    ),
+    idColumns: (db.prepare("SELECT name FROM pragma_table_info(?)").all(name) as { name: string }[])
+      .map((column) => column.name)
+      .filter((column) => column === "connector_id" || column === "connector_key"),
     name,
   }));
 }
@@ -280,19 +280,22 @@ function plainTables(db: Readable): { name: string; hasConnectorId: boolean }[] 
 /** Everything the upgrade must preserve, read from one store. */
 function snapshot(db: Readable) {
   const rowCounts: Record<string, number> = {};
+  // Keyed by "table.column".
   const connectorIds: Record<string, string[]> = {};
-  for (const { name, hasConnectorId } of plainTables(db)) {
+  for (const { name, idColumns } of plainTables(db)) {
     rowCounts[name] = Number((db.prepare(`SELECT count(*) AS n FROM "${name}"`).get() as { n: number }).n);
-    if (hasConnectorId) {
-      connectorIds[name] = (
-        db.prepare(`SELECT connector_id FROM "${name}" ORDER BY connector_id`).all() as { connector_id: string }[]
-      ).map((row) => row.connector_id);
+    for (const column of idColumns) {
+      connectorIds[`${name}.${column}`] = (
+        db.prepare(`SELECT "${column}" AS id FROM "${name}" ORDER BY 1`).all() as { id: string | null }[]
+      ).map((row) => String(row.id));
     }
   }
   const rows = (sql: string) => db.prepare(sql).all() as Record<string, unknown>[];
   return {
     connectorIds,
-    instances: rows("SELECT connector_instance_id, connector_id FROM connector_instances ORDER BY 1"),
+    instances: rows(
+      "SELECT connector_instance_id, connector_id, owner_subject_id, source_kind, source_binding_key, status FROM connector_instances ORDER BY 1"
+    ),
     recordChanges: rows(
       "SELECT connector_id, connector_instance_id, stream, record_key, version, record_json FROM record_changes ORDER BY 2, 3, 5"
     ),
@@ -324,21 +327,27 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
     // current-id row already held: connectors (claude-code) and dataset_summary_stream_projection
     // (claude-code, sessions).
     const collided: Record<string, string> = {
-      connectors: "claude-code",
-      dataset_summary_stream_projection: "claude-code",
+      "connectors.connector_id": "claude-code",
+      "dataset_summary_stream_projection.connector_id": "claude-code",
     };
-    for (const [table, ids] of Object.entries(before.connectorIds)) {
+    for (const [column, ids] of Object.entries(before.connectorIds)) {
       const expected = ids.map(renamed).sort();
-      if (collided[table]) {
-        expected.splice(expected.indexOf(collided[table]), 1);
+      if (collided[column]) {
+        expected.splice(expected.indexOf(collided[column]), 1);
       }
-      assert.deepEqual(after.connectorIds[table], expected, table);
+      assert.deepEqual(after.connectorIds[column], expected, column);
     }
-    // Tables without a connector id lose nothing; first start may add bookkeeping rows to them
-    // (for example a migration ledger entry).
+    // Tables without a connector id keep their row count. Only the migration ledger may grow,
+    // because first start records the migrations it ran.
+    const bookkeeping = new Set(["storage_migration_ledger"]);
     for (const [table, count] of Object.entries(before.rowCounts)) {
-      if (!(table in before.connectorIds)) {
+      if (Object.keys(before.connectorIds).some((column) => column.startsWith(`${table}.`))) {
+        continue;
+      }
+      if (bookkeeping.has(table)) {
         assert.ok((after.rowCounts[table] ?? 0) >= count, `${table}: ${after.rowCounts[table]} < ${count}`);
+      } else {
+        assert.equal(after.rowCounts[table], count, table);
       }
     }
 
