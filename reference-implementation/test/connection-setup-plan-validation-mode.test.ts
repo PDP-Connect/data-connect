@@ -76,8 +76,8 @@ test("the setup plan carries validationMode for static-secret connectors", () =>
 
 test("non-static-secret modalities always advertise first_sync", () => {
   const localCollector = buildConnectionSetupPlan({
-    connectorKey: "claude_code",
-    manifest: manifest("claude_code", { runtime_requirements: { bindings: { filesystem: { required: true } } } }),
+    connectorKey: "claude-code",
+    manifest: manifest("claude-code", { runtime_requirements: { bindings: { filesystem: { required: true } } } }),
   });
   assert.equal(localCollector.setupModality, "local_collector");
   assert.equal(localCollector.validationMode, "first_sync");

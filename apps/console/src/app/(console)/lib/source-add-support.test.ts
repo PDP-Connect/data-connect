@@ -16,12 +16,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CatalogManifestLike } from "./connection-catalog.ts";
-import { buildSourceAddSupport, resolveSourceAddSupport } from "./source-add-support.ts";
+import { buildSourceAddSupport as buildSourceAddSupportFrom, resolveSourceAddSupport } from "./source-add-support.ts";
+
+/** These fixtures stand for manifests the server read from its registered catalog. */
+function buildSourceAddSupport(manifests: readonly CatalogManifestLike[]) {
+  return buildSourceAddSupportFrom(manifests, "registered_catalog");
+}
 
 const SUPPORTED_LISTING = { public_listing: { tier: "supported" as const } };
 
 const ADD_ANOTHER_ACCOUNT_LABEL_RE = /add another account/i;
-const CONNECT_BROWSER_SESSION_ROUTE_RE = /\/connect\/browser-session\/amazon/;
 const STATIC_SECRET_ROUTE_RE = /\/connect\/static-secret\/gmail/;
 const DEVICE_EXPORTER_ROUTE_RE = /\/device-exporters\?connector=/;
 const MANUAL_UPLOAD_ROUTE_RE = /\/connect\/manual-upload\/google-maps/;
@@ -40,7 +44,7 @@ const DEV_JARGON_RE = /pnpm --dir|packages\/|monorepo|env var|connector_instance
  */
 function staticSecretManifest(connectorId: string): CatalogManifestLike {
   return {
-    capabilities: SUPPORTED_LISTING,
+    capabilities: { ...SUPPORTED_LISTING, proven: { static_secret_live: { proven: true } } },
     connector_id: connectorId,
     display_name: connectorId,
     runtime_requirements: { bindings: { network: {} } },
@@ -74,7 +78,7 @@ function browserCollectorManifest(connectorId: string): CatalogManifestLike {
 /** A local-collector connector manifest (filesystem-class). */
 function localCollectorManifest(connectorId: string): CatalogManifestLike {
   return {
-    capabilities: SUPPORTED_LISTING,
+    capabilities: { ...SUPPORTED_LISTING, proven: { local_collector: true } },
     connector_id: connectorId,
     display_name: connectorId,
     runtime_requirements: { bindings: { filesystem: {} } },
@@ -136,28 +140,25 @@ test("proven static-secret source supports self-service add-another-account with
 });
 
 test("supported local collector supports self-service add and routes to enrollment", () => {
-  // claude_code is in the proven local-collector set.
-  const map = buildSourceAddSupport([localCollectorManifest("claude_code")]);
-  const support = resolveSourceAddSupport(map, "claude_code");
+  // The manifest claims a proven local collector.
+  const map = buildSourceAddSupport([localCollectorManifest("claude-code")]);
+  const support = resolveSourceAddSupport(map, "claude-code");
   assert.ok(support);
   assert.equal(support.support, "self_service");
   assert.ok(support.action);
   assert.match(support.action.href, DEVICE_EXPORTER_ROUTE_RE);
 });
 
-test("supported browser collector source is self-service and routes to browser-session setup", () => {
+test("a browser collector manifest alone is not self-service: that verdict comes from the server", () => {
   const map = buildSourceAddSupport([browserCollectorManifest("amazon")]);
   const support = resolveSourceAddSupport(map, "amazon");
   assert.ok(support);
-  assert.equal(support.support, "self_service");
-  assert.ok(support.action);
-  assert.match(support.action.label, ADD_ANOTHER_ACCOUNT_LABEL_RE);
-  assert.match(support.action.href, CONNECT_BROWSER_SESSION_ROUTE_RE);
-  assert.match(support.supportLabel, ADD_ANOTHER_ACCOUNT_LABEL_RE);
-  assert.doesNotMatch(support.supportLabel, DEMOTION_COPY_RE);
+  assert.equal(support.support, "not_self_service");
+  assert.equal(support.action, null);
+  assert.match(support.supportLabel, NOT_SELF_SERVICE_RE);
 });
 
-test("a known-scaffold browser runbook stays unavailable for self-service setup", () => {
+test("a browser-bound runbook stays unavailable for self-service setup", () => {
   const map = buildSourceAddSupport([browserBoundManifest("anthropic")]);
   const support = resolveSourceAddSupport(map, "anthropic");
   assert.ok(support);
@@ -165,15 +166,6 @@ test("a known-scaffold browser runbook stays unavailable for self-service setup"
   assert.equal(support.action, null);
   assert.match(support.supportLabel, NOT_SELF_SERVICE_RE);
   assert.doesNotMatch(support.supportLabel, DEMOTION_COPY_RE);
-});
-
-test("a browser source no key list names gets browser self-service setup", () => {
-  const map = buildSourceAddSupport([browserBoundManifest("some_browser_source")]);
-  const support = resolveSourceAddSupport(map, "some_browser_source");
-  assert.ok(support);
-  assert.equal(support.support, "self_service");
-  assert.ok(support.action);
-  assert.match(support.action.href, /\/connect\/browser-session\/some_browser_source/);
 });
 
 test("unshipped manual upload path stays unavailable for self-service setup", () => {
@@ -222,9 +214,21 @@ test("every support state carries an owner-safe label with no developer jargon",
   const map = buildSourceAddSupport([
     staticSecretManifest("ynab"),
     browserBoundManifest("some_browser_source"),
-    localCollectorManifest("claude_code"),
+    localCollectorManifest("claude-code"),
   ]);
   for (const support of map.values()) {
     assert.doesNotMatch(support.supportLabel, DEV_JARGON_RE);
+  }
+});
+
+test("a manifest that only describes itself never makes a source self-service", () => {
+  // Same proof claims as the registered fixtures above, but no provenance: the
+  // planner must ignore `capabilities.proven.*`, so no add-another action.
+  for (const manifest of [staticSecretManifest("gmail"), localCollectorManifest("claude-code")]) {
+    const map = buildSourceAddSupportFrom([manifest]);
+    const support = resolveSourceAddSupport(map, manifest.connector_id ?? "");
+    assert.ok(support, `${manifest.connector_id}: still listed`);
+    assert.notEqual(support.support, "self_service", `${manifest.connector_id}: presentation data cannot attest proof`);
+    assert.equal(support.action, null, `${manifest.connector_id}: no add-another action`);
   }
 });

@@ -1,14 +1,15 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { registerConnector } from "../../../server/auth.ts";
+import { ingestRecord } from "../../../server/records.ts";
+import { lexicalIndexBackfillForManifest } from "../../../server/search.ts";
 // Shared fixture for the connector-wide teardown failure matrix
 // (test/records-teardown-failure-matrix.test.ts). One connector with two
 // connections, two lexical streams, records with history, blobs shared across
 // the two connections (content-addressed cross-reference), and lexical index
 // rows; plus an untouched sibling connector used to check isolation.
-import { registerConnector } from "../../../server/auth.ts";
-import { ingestRecord } from "../../../server/records.ts";
-import { lexicalIndexBackfillForManifest } from "../../../server/search.ts";
+import { withFixtureSourceDeclaration } from "../../helpers/fixture-source-declaration.ts";
 
 /** Names for one scenario; a unique `tag` keeps scenarios apart in a shared Postgres database. */
 export function fixtureIds(tag: string) {
@@ -37,26 +38,29 @@ export interface Sql {
 }
 
 export function manifestFor(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: `Teardown matrix ${connectorId}`,
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: ["items", "notes"].map((name) => ({
-      name,
-      primary_key: ["id"],
-      query: { search: { lexical_fields: ["subject"] } },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
-      },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    })),
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: `Teardown matrix ${connectorId}`,
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: ["items", "notes"].map((name) => ({
+        name,
+        primary_key: ["id"],
+        query: { search: { lexical_fields: ["subject"] } },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      })),
+      version: "0.1.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 const NOW = "2026-10-18T00:00:00.000Z";

@@ -8,9 +8,9 @@ declare module "@opendatalabs/data-connectors-tools/installer-core" {
   export const DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
   export function fetchCatalog(options: Record<string, unknown>): Promise<unknown>;
   export function fetchResolvedArtifact(
-    source: Record<string, unknown>,
+    source: null,
     entry: Record<string, unknown>,
     options: Record<string, unknown>
   ): Promise<unknown>;
-  export function installFromLock(options: Record<string, unknown>): Promise<unknown>;
+  export function installFromLock(options: Record<string, unknown> & { source: null }): Promise<unknown>;
 }

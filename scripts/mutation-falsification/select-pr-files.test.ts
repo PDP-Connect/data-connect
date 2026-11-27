@@ -137,7 +137,7 @@ describe("classifyForCohort", () => {
       classifyForCohort(
         {
           status: "M",
-          path: "reference-implementation/server/generated/connector-registry.generated.ts",
+          path: "reference-implementation/server/generated/example-table.generated.ts",
         },
         referenceCohort
       )

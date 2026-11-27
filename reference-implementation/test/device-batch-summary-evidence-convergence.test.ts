@@ -45,6 +45,7 @@
  * SQLite alone.
  */
 
+import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -271,7 +272,7 @@ function createDriver(kind: string, server: { asPort: number }): Driver {
         : (row as { manifest: unknown }).manifest;
     },
     async registerManifest(manifest: unknown, options: Record<string, unknown> = {}) {
-      await registerConnector(manifest as never, options as never);
+      await registerConnector(manifest as Record<string, unknown>, options as never);
     },
     target(instanceId: string) {
       return { connector_id: "codex", connector_instance_id: instanceId };
@@ -340,8 +341,9 @@ async function configureMessagesManifest(driver: Driver) {
   assert.ok(messages, "shipped codex manifest must retain messages");
   messages.query.search.lexical_fields = ["content"];
   messages.query.search.semantic_fields = ["content"];
-  await driver.registerManifest(manifest);
-  return manifest;
+  const reauthored = withReauthoredFixtureDeclaration(manifest);
+  await driver.registerManifest(reauthored);
+  return reauthored;
 }
 
 async function enrollConfiguredDevice(driver: Driver, name: string) {
@@ -535,7 +537,7 @@ async function runManifestRaceOracle(driver: Driver) {
     // sort-backfill and pauses there — the exact "registration owns the
     // fence, then a device request races in" ordering
     // runManifestRegistrationOracle's second scenario constructs.
-    registration = driver.registerManifest(m2);
+    registration = driver.registerManifest(withReauthoredFixtureDeclaration(m2));
     await within(backfillAtTarget.promise, "M2 sort backfill to own the target instance");
 
     // While registration holds the fence, issue a real device batch against

@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import type { ManifestLike } from "../scripts/compact-record-history.ts";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -22,7 +23,8 @@ import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: localized test assertion preserves its explicit contract.
 import type pg from "pg";
 import type { CompactionPlan, PlanCompactionInput } from "../scripts/compact-record-history.ts";
-import { COMPACTION_POLICIES } from "../scripts/compact-record-history.ts";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
+import { compactionPoliciesFromManifests, COMPACTION_POLICIES } from "../scripts/compact-record-history.ts";
 import {
   type DryRunRow,
   formatDryRunTable,
@@ -134,7 +136,7 @@ test("policiesForConnector matches claude-code (hyphen) connector id", () => {
   // The live DB uses connector_id = 'claude-code' (hyphen). An earlier version of
   // the policy builder used 'claude_code' (underscore), which never matched and
   // silently excluded all claude-code instances from --all scans.
-  const cc = policiesForConnector("cin_cc", "claude-code");
+  const cc = policiesForConnector("cin_cc", "claude-code", compactionPoliciesFromManifests(readShippedManifests().map(({ manifest }) => manifest as ManifestLike)).policies);
   // biome-ignore lint/suspicious/useArraySortCompare: localized test assertion preserves its explicit contract.
   const streams = cc.map((s) => s.stream).sort();
   assert.deepEqual(streams, [
@@ -148,6 +150,7 @@ test("policiesForConnector matches claude-code (hyphen) connector id", () => {
     "sessions",
     "skills",
     "slash_commands",
+    "usage",
   ]);
   for (const scope of cc) {
     assert.equal(scope.connectorInstanceId, "cin_cc");

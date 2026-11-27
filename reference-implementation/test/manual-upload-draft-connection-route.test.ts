@@ -8,7 +8,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { getDb } from "../server/db.ts";
@@ -147,7 +147,7 @@ async function fetchJson(url: string | URL, opts: RequestInit = {}): Promise<Jso
 }
 
 function loadManifest(name: string): unknown {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

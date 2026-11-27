@@ -16,4 +16,3 @@ Use the upstream command text as the canonical process.
 
 - Treat references to slash commands (for example `/workflows:review`) as this skill invocation.
 - If upstream instructions assume unavailable tools/agents, preserve intent and use the closest local equivalent.
-- Do not propose deleting `docs/plans/*.md` or `docs/solutions/*.md` artifacts during review synthesis.

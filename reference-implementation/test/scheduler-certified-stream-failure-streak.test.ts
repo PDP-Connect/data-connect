@@ -22,9 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-
 import { emitSpineEvent } from "../lib/spine.ts";
-
 import { BLOCKED_PROMOTION_THRESHOLD } from "../runtime/connection-health-policy.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import {
@@ -38,6 +36,7 @@ import { startServer } from "../server/index.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import type { SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const BASE_INTERVAL_MS = 60_000;
 const CONNECTOR_ID = "scheduler-certified-stream-failure-streak";
@@ -176,7 +175,10 @@ test("a certified-with-siblings run is not a success: it does not pose as one fo
   // `lastSuccessAtMs` is the only way a success is recorded off the scheduler's
   // own history. A certified run must not be turned into one by the walk.
   const records = history(10, (index) => certifiedWithSiblings(index));
-  assert.equal(records.every((record) => record.status === "failed"), true);
+  assert.equal(
+    records.every((record) => record.status === "failed"),
+    true
+  );
   const decision = computeNextRunWithBackoff(records, BASE_INTERVAL_MS, NOW_MS + 20_000, { lastSuccessAtMs: null });
   assert.equal(decision.reasonClass, null, "no failure class is reported for a progress run");
 });
@@ -259,7 +261,11 @@ async function dispatchGateOutcome(
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = { ...spotifyManifest, connector_id: CONNECTOR_ID, connector_key: CONNECTOR_ID };
+  const manifest = withFixtureSourceDeclaration({
+    ...spotifyManifest,
+    connector_id: CONNECTOR_ID,
+    connector_key: CONNECTOR_ID,
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${(server as unknown as { asPort: number }).asPort}`;
   const rsUrl = `http://localhost:${(server as unknown as { rsPort: number }).rsPort}`;

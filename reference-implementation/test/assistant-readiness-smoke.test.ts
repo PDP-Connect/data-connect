@@ -32,10 +32,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
@@ -134,7 +135,7 @@ async function registerManifest(asUrl: string, manifest: Manifest): Promise<void
 }
 
 function loadManifest(filename: string): Manifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === filename);
+  const entry = readShippedManifests().find((candidate) => candidate.file === filename);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${filename}`);
   }
@@ -361,36 +362,39 @@ test("assistant smoke: in-memory fallback activates for stale DB cursor_field dr
     // a supported shape and then verifying the records path still works
     // when the cursor is missing on some records. (Full stale-DB simulation
     // is covered by the reconcile tests.)
-    const manifest = {
-      connector_id: "fallback-smoke",
-      connector_key: "fallback-smoke",
-      display_name: "Fallback smoke",
-      manifest_uri: "https://sources.example/connectors/fallback-smoke",
-      // Custom (non-first-party) manifest: connector_id must be a bare slug
-      // that matches connector_key. The registry URL belongs in manifest_uri,
-      // not connector_id. See canonicalize-connector-keys (connector_id ==
-      // connector_key invariant enforced at registration + ingest).
-      protocol_version: "0.1.0",
-      runtime_requirements: { bindings: { network: { required: true } } },
-      streams: [
-        {
-          cursor_field: "updated_at",
-          name: "items",
-          primary_key: ["id"],
-          schema: {
-            properties: {
-              id: { type: "string" },
-              updated_at: { format: "date-time", type: ["string", "null"] },
+    const manifest = withFixtureSourceDeclaration(
+      {
+        connector_id: "fallback-smoke",
+        connector_key: "fallback-smoke",
+        display_name: "Fallback smoke",
+        manifest_uri: "https://sources.example/connectors/fallback-smoke",
+        // Custom (non-first-party) manifest: connector_id must be a bare slug
+        // that matches connector_key. The registry URL belongs in manifest_uri,
+        // not connector_id. See canonicalize-connector-keys (connector_id ==
+        // connector_key invariant enforced at registration + ingest).
+        protocol_version: "0.1.0",
+        runtime_requirements: { bindings: { network: { required: true } } },
+        streams: [
+          {
+            cursor_field: "updated_at",
+            name: "items",
+            primary_key: ["id"],
+            schema: {
+              properties: {
+                id: { type: "string" },
+                updated_at: { format: "date-time", type: ["string", "null"] },
+              },
+              required: ["id"],
+              type: "object",
             },
-            required: ["id"],
-            type: "object",
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
-          selection: { fields: true, resources: true },
-          semantics: "mutable_state",
-        },
-      ],
-      version: "1.0.0",
-    };
+        ],
+        version: "1.0.0",
+      },
+      { sourceId: "https://sources.example/connectors/fallback-smoke" }
+    );
     await registerManifest(asUrl, manifest);
     const ownerToken = await issueOwnerToken(asUrl);
     await seedRecords(rsUrl, ownerToken, manifest.connector_id, "items", [

@@ -43,6 +43,58 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) =>
   }
 });
 
+test("acknowledged v2 terminal coverage survives outbox pruning and reopen", async (t) => {
+  const path = await tempOutboxPath(t);
+  const payload = {
+    collection_boundary: "scope-1",
+    terminal_facts: [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }],
+    version: 2,
+  };
+  const outbox = new LocalDeviceOutbox({ path });
+  outbox.enqueue({ id: "coverage-1", kind: "terminal_run_commit", payload, sourceInstanceId: "source-1" });
+  const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000 });
+  assert.ok(claimed);
+  outbox.acknowledge({
+    holder: "worker",
+    id: claimed.id,
+    leaseEpoch: claimed.lease_epoch,
+    terminalAck: { collectionRevision: 7, runId: "run-1", runSequence: 1, storageEpoch: 1 },
+  });
+  outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+  outbox.close();
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(reopened.get("coverage-1"), null);
+    const receipt = reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+    assert.ok(receipt?.asOf, "the receipt names its as-of");
+    assert.deepEqual(receipt, {
+      asOf: {
+        acknowledgedAt: receipt.asOf.acknowledgedAt,
+        collectionRevision: 7,
+        runId: "run-1",
+        runSequence: 1,
+        storageEpoch: 1,
+      },
+      collectionBoundary: "scope-1",
+      terminalFacts: payload.terminal_facts,
+    });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-2" }), null);
+    reopened.enqueue({
+      id: "legacy-2",
+      kind: "terminal_run_commit",
+      payload: { collection_boundary: "scope-2", terminal_facts: [], version: 1 },
+      sourceInstanceId: "source-1",
+    });
+    const [legacy] = reopened.claimReady({ holder: "worker", leaseMs: 60_000 });
+    assert.ok(legacy);
+    reopened.acknowledge({ holder: "worker", id: legacy.id, leaseEpoch: legacy.lease_epoch });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" }), null);
+  } finally {
+    reopened.close();
+  }
+});
+
 test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
@@ -157,7 +209,7 @@ test("schema v3/v4 migration preserves pending v2 work and accepts terminal run 
     const version = migrated.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    assert.equal(version.user_version, 4);
+    assert.equal(version.user_version, 6);
   } finally {
     migrated.close();
   }
@@ -185,12 +237,120 @@ test("an old v2 binary uses the production version fence to refuse a v3 outbox",
   }
 });
 
-test("current binary refuses a future v5 outbox before applying schema", async (t) => {
+test("current binary refuses a future v7 outbox before applying schema", async (t) => {
   const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA user_version = 5");
+  db.exec("PRAGMA user_version = 7");
   db.close();
-  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 4/);
+  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 6/);
+});
+
+/** Enqueue and acknowledge one v2 terminal record whose single store reads `status`. */
+function acknowledgeTerminal(
+  outbox: LocalDeviceOutbox,
+  runId: string,
+  ack: { runSequence: number | null; storageEpoch: number | null; collectionRevision: number | null } | null,
+  status = "collected"
+): void {
+  outbox.enqueue({
+    id: `terminal-${runId}`,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "scope-1",
+      run_id: runId,
+      terminal_facts: [{ scoped: true, stores: [{ status, store: runId }], stream: "messages" }],
+      version: 2,
+    },
+    sourceInstanceId: "source-1",
+  });
+  const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "source-1" });
+  assert.ok(claimed);
+  outbox.acknowledge({
+    holder: "worker",
+    id: claimed.id,
+    leaseEpoch: claimed.lease_epoch,
+    ...(ack ? { terminalAck: { ...ack, runId } } : {}),
+  });
+}
+
+function receiptRun(outbox: LocalDeviceOutbox): string | null {
+  const receipt = outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+  return receipt ? (receipt.terminalFacts[0]?.stores[0]?.store ?? null) : null;
+}
+
+test("an older run's late ACK does not replace a newer run's receipt", async (t) => {
+  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  try {
+    acknowledgeTerminal(outbox, "run-b", { collectionRevision: 10, runSequence: 2, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-b");
+    // Run A started first, but its terminal record was acknowledged later.
+    acknowledgeTerminal(outbox, "run-a", { collectionRevision: 11, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-b", "run B's receipt stays");
+    assert.equal(outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" })?.asOf?.runSequence, 2);
+    // A newer epoch orders after every sequence of the old one.
+    acknowledgeTerminal(outbox, "run-c", { collectionRevision: 3, runSequence: 1, storageEpoch: 2 });
+    assert.equal(receiptRun(outbox), "run-c", "a run issued after a restore step is later");
+  } finally {
+    outbox.close();
+  }
+});
+
+test("an ACK without a run sequence clears the evidence and keeps the stored order", async (t) => {
+  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  try {
+    acknowledgeTerminal(outbox, "run-b", { collectionRevision: 10, runSequence: 2, storageEpoch: 1 });
+    acknowledgeTerminal(outbox, "run-unsequenced", null);
+    assert.equal(receiptRun(outbox), null, "an unordered run leaves no evidence");
+    acknowledgeTerminal(outbox, "run-a", { collectionRevision: 12, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), null, "an older run's late ACK does not restore evidence");
+    acknowledgeTerminal(outbox, "run-d", { collectionRevision: 13, runSequence: 3, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-d");
+  } finally {
+    outbox.close();
+  }
+});
+
+test("a v5 outbox upgrades to v6 and keeps its receipt readable without an as-of", async (t) => {
+  const path = await tempOutboxPath(t);
+  const current = new LocalDeviceOutbox({ path });
+  current.close();
+  const raw = new DatabaseSync(path);
+  try {
+    for (const column of ["run_id", "run_sequence", "storage_epoch", "collection_revision"]) {
+      raw.exec(`ALTER TABLE local_device_terminal_coverage_receipts DROP COLUMN ${column}`);
+    }
+    raw
+      .prepare(
+        `INSERT INTO local_device_terminal_coverage_receipts
+           (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at) VALUES (?, ?, ?, ?)`
+      )
+      .run(
+        "source-1",
+        "scope-1",
+        JSON.stringify([{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }]),
+        "2026-10-01T00:00:00.000Z"
+      );
+    raw.exec("PRAGMA user_version = 5");
+  } finally {
+    raw.close();
+  }
+  const upgraded = new LocalDeviceOutbox({ path });
+  try {
+    const receipt = upgraded.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+    assert.equal(receipt?.collectionBoundary, "scope-1", "the v5 receipt stays readable");
+    assert.equal(receipt?.asOf, null, "a v5 receipt names no as-of");
+    // The first sequenced ACK replaces a receipt that has no sequence.
+    acknowledgeTerminal(upgraded, "run-a", { collectionRevision: 4, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(upgraded), "run-a");
+  } finally {
+    upgraded.close();
+  }
+  const version = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal((version.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+  } finally {
+    version.close();
+  }
 });
 
 test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes and metadata intact", async (t) => {
@@ -519,7 +679,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
   const replacementId = "src-terminal:new-terminal";
   const terminalIdentity = {
     collection_boundary: "scope-1",
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: "cin-1",
     device_id: "device-1",
     run_id: "run-old",
@@ -566,7 +726,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
       () =>
         outbox.retireDeadLetteredTerminalCommits({
           collectionBoundary: "scope-1",
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           connectorInstanceId: "cin-1",
           replacementId,
           sourceInstanceId: "src-terminal",
@@ -586,7 +746,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     assert.equal(
       outbox.retireDeadLetteredTerminalCommits({
         collectionBoundary: "scope-1",
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         connectorInstanceId: "cin-1",
         replacementId,
         sourceInstanceId: "src-terminal",
@@ -664,6 +824,45 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", () => {
     assert.equal(outbox.get("src-1:record_batch:timeout")?.status, "ready");
     assert.equal(outbox.get("src-1:record_batch:400")?.status, "dead_letter");
     assert.equal(outbox.summary({ sourceInstanceId }).deadLetter, 1);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("LocalDeviceOutbox reopens only a succeeded row, as ready, and leaves other rows alone", () => {
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
+  try {
+    outbox.enqueue({
+      id: "src-1:gap:first",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    outbox.enqueue({
+      id: "src-1:gap:second",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    const [claim] = outbox.claimReady({
+      holder: "worker-a",
+      leaseMs: 60_000,
+      limit: 1,
+      sourceInstanceId: "src-1",
+    });
+    assert.ok(claim);
+    outbox.acknowledge({
+      holder: "worker-a",
+      id: claim.id,
+      leaseEpoch: claim.lease_epoch,
+    });
+    const otherId = claim.id === "src-1:gap:first" ? "src-1:gap:second" : "src-1:gap:first";
+
+    assert.equal(outbox.reopenSucceeded(otherId), false, "a ready row is not reopened");
+    assert.equal(outbox.get(otherId)?.status, "ready");
+    assert.equal(outbox.reopenSucceeded(claim.id), true);
+    assert.equal(outbox.get(claim.id)?.status, "ready");
+    assert.equal(outbox.summary({ sourceInstanceId: "src-1" }).ready, 2);
   } finally {
     outbox.close();
   }
@@ -1314,151 +1513,6 @@ test("classifyDeadLetterError preserves status shape and scrubs secrets, paths, 
   assert.equal(classifyDeadLetterError("first line\nsecond line with /root/secret"), "first line");
 });
 
-test("hasObservedStream / countRecordBatches detect coverage records across statuses and ignore dead letters", () => {
-  const path = ":memory:";
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // A drained content batch carrying a coverage_diagnostics record.
-    outbox.enqueue({
-      id: "rb-coverage",
-      kind: "record_batch",
-      payload: {
-        records: [
-          { data: { id: "s-1" }, stream: "sessions" },
-          { data: { id: "c-1" }, stream: "coverage_diagnostics" },
-        ],
-      },
-      sourceInstanceId: "src-1",
-    });
-    const [claim] = outbox.claimReady({
-      holder: "w",
-      leaseMs: 60_000,
-      sourceInstanceId: "src-1",
-    });
-    assert.ok(claim);
-    outbox.acknowledge({
-      holder: "w",
-      id: claim.id,
-      leaseEpoch: claim.lease_epoch,
-    });
-
-    // Coverage observation survives a clean drain (succeeded rows are retained).
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "coverage_diagnostics",
-      }),
-      true
-    );
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "messages",
-      }),
-      false
-    );
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-1" }), 1);
-
-    // Isolation: a different source instance sees none of this.
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-2",
-        stream: "coverage_diagnostics",
-      }),
-      false
-    );
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-2" }), 0);
-
-    // A coverage record that only ever dead-lettered must NOT count, and a
-    // dead-letter record batch is excluded from the record-batch count.
-    outbox.enqueue({
-      id: "rb-dl",
-      kind: "record_batch",
-      payload: {
-        records: [{ data: { id: "c-2" }, stream: "coverage_diagnostics" }],
-      },
-      sourceInstanceId: "src-3",
-    });
-    const [dlClaim] = outbox.claimReady({
-      holder: "w",
-      leaseMs: 60_000,
-      sourceInstanceId: "src-3",
-    });
-    assert.ok(dlClaim);
-    outbox.deadLetter({
-      error: "terminal",
-      holder: "w",
-      id: dlClaim.id,
-      leaseEpoch: dlClaim.lease_epoch,
-    });
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-3",
-        stream: "coverage_diagnostics",
-      }),
-      false
-    );
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-3" }), 0);
-  } finally {
-    outbox.close();
-  }
-});
-
-test("enqueue maintains the observed-stream index so coverage detection never reparses payloads", async (t) => {
-  const path = await tempOutboxPath(t);
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    outbox.enqueue({
-      id: "rb-1",
-      kind: "record_batch",
-      payload: {
-        records: [
-          { data: { id: "s-1" }, stream: "sessions" },
-          { data: { id: "c-1" }, stream: "coverage_diagnostics" },
-        ],
-      },
-      sourceInstanceId: "src-1",
-    });
-  } finally {
-    outbox.close();
-  }
-
-  // Prove the probe reads the index, not the payload: blank out payload_json
-  // for the row out-of-band. A payload-scanning implementation would now miss
-  // the stream; the index-backed one still answers true.
-  const raw = new DatabaseSync(path);
-  try {
-    const indexRows = raw
-      .prepare("SELECT stream FROM local_device_observed_stream WHERE source_instance_id = ? ORDER BY stream")
-      .all("src-1")
-      .map((row) => (row as { stream: string }).stream);
-    assert.deepEqual(indexRows, ["coverage_diagnostics", "sessions"]);
-    raw.prepare("UPDATE local_device_outbox SET payload_json = '{}' WHERE id = ?").run("rb-1");
-  } finally {
-    raw.close();
-  }
-
-  const reopened = new LocalDeviceOutbox({ path });
-  try {
-    assert.equal(
-      reopened.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "coverage_diagnostics",
-      }),
-      true
-    );
-    assert.equal(
-      reopened.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "messages",
-      }),
-      false
-    );
-  } finally {
-    reopened.close();
-  }
-});
-
 test("a record_batch carrying no records is indexed (sentinel) and never treated as legacy unindexed", async (t) => {
   const path = await tempOutboxPath(t);
   const outbox = new LocalDeviceOutbox({ path });
@@ -1483,141 +1537,6 @@ test("a record_batch carrying no records is indexed (sentinel) and never treated
   }
 });
 
-test("hasObservedStream backfills a legacy (pre-index) outbox within budget and answers exactly", async (t) => {
-  const path = await tempOutboxPath(t);
-  // Build a legacy v1 outbox (no observed-stream index table) directly.
-  seedLegacyV1Outbox(path, [
-    { id: "legacy-1", sourceInstanceId: "src-1", streams: ["sessions"] },
-    {
-      id: "legacy-2",
-      sourceInstanceId: "src-1",
-      streams: ["coverage_diagnostics"],
-    },
-    { id: "legacy-3", sourceInstanceId: "src-2", streams: ["messages"] },
-  ]);
-
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // The schema upgrade backfilled the index from the legacy rows.
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "coverage_diagnostics",
-      }),
-      true
-    );
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "sessions",
-      }),
-      true
-    );
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-1",
-        stream: "messages",
-      }),
-      false
-    );
-    // Source isolation survives the migration.
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-2",
-        stream: "coverage_diagnostics",
-      }),
-      false
-    );
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-1" }), 2);
-  } finally {
-    outbox.close();
-  }
-});
-
-test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindexed backlog returns null", async (t) => {
-  const path = await tempOutboxPath(t);
-  const budget = 5000;
-  // Seed more unindexed legacy rows for one lane than the bounded scan budget,
-  // none on the queried stream. Opening the DB does NO payload work (the index
-  // is populated lazily), so all of these are unindexed at probe time. A
-  // payload-scanning probe would reparse all of them; the bounded one must
-  // refuse and return null rather than scan unboundedly.
-  const seed = Array.from({ length: budget + 50 }, (_value, index) => ({
-    id: `legacy-${index}`,
-    sourceInstanceId: "src-big",
-    streams: ["messages"],
-  }));
-  seedLegacyV1Outbox(path, seed);
-
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // The queried stream was never present, and the unindexed backlog exceeds
-    // the budget, so the probe reports "unknown" instead of a false negative
-    // from a partial scan.
-    assert.equal(
-      outbox.hasObservedStream({
-        sourceInstanceId: "src-big",
-        stream: "coverage_diagnostics",
-      }),
-      null
-    );
-  } finally {
-    outbox.close();
-  }
-});
-
-test("countRecordBatches reads indexed status/kind columns only and ignores dead letters", () => {
-  const path = ":memory:";
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    outbox.enqueue({
-      id: "rb-a",
-      kind: "record_batch",
-      payload: { records: [] },
-      sourceInstanceId: "src-1",
-    });
-    outbox.enqueue({
-      id: "rb-b",
-      kind: "record_batch",
-      payload: { records: [] },
-      sourceInstanceId: "src-1",
-    });
-    outbox.enqueue({
-      id: "cp-1",
-      kind: "checkpoint",
-      payload: { state: 1 },
-      sourceInstanceId: "src-1",
-    });
-    const [claim] = outbox.claimReady({
-      holder: "w",
-      leaseMs: 60_000,
-      sourceInstanceId: "src-1",
-    });
-    assert.ok(claim);
-    outbox.deadLetter({
-      error: "terminal",
-      holder: "w",
-      id: claim.id,
-      leaseEpoch: claim.lease_epoch,
-    });
-    // One of the two record batches dead-lettered; the checkpoint never counts.
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-1" }), 1);
-  } finally {
-    outbox.close();
-  }
-});
-
-// --- compact / disk reclaim (local-collector-memory-slvp-v1) ---
-//
-// Invariant: prune deletes rows but the file never shrinks on its own
-// (auto_vacuum=NONE); compact() runs VACUUM to return the freelist to disk
-// without dropping any row — succeeded or unsent.
-
-/**
- * Seed `count` succeeded record_batch rows carrying a ~2 KiB payload each so a
- * later prune leaves a large freelist the compact can reclaim. Returns once the
- * rows are committed.
- */
 function seedFatSucceededRows(path: string, sourceInstanceId: string, count: number): void {
   new LocalDeviceOutbox({ path }).close();
   const db = new DatabaseSync(path);
@@ -1834,71 +1753,6 @@ test("temporary outbox roots register their own removal before the path is retur
   assert.doesNotThrow(() => statSync(sibling));
 });
 
-/**
- * Seed a schema-v1 (pre-observed-stream-index) outbox file directly, so tests
- * can exercise the legacy backfill / bounded-scan fallback. Mirrors the v1
- * table DDL and inserts `record_batch` rows whose payloads carry the given
- * stream names — but creates NO `local_device_observed_stream` table, exactly
- * as a database created before this index existed would look.
- */
-function seedLegacyV1Outbox(
-  path: string,
-  rows: ReadonlyArray<{
-    id: string;
-    sourceInstanceId: string;
-    streams: readonly string[];
-  }>
-): void {
-  const db = new DatabaseSync(path);
-  try {
-    db.exec(`
-      CREATE TABLE local_device_outbox (
-        id TEXT PRIMARY KEY,
-        source_instance_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        body_hash TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        next_attempt_at TEXT NOT NULL,
-        lease_holder TEXT,
-        lease_epoch INTEGER NOT NULL DEFAULT 0,
-        lease_until TEXT,
-        last_error TEXT,
-        acknowledged_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      PRAGMA user_version = 1;
-    `);
-    const insert = db.prepare(
-      `INSERT INTO local_device_outbox (
-         id, source_instance_id, kind, status, payload_json, body_hash,
-         attempt_count, next_attempt_at, created_at, updated_at
-       ) VALUES (?, ?, 'record_batch', 'succeeded', ?, 'hash', 0, ?, ?, ?)`
-    );
-    const stamp = "2026-05-19T12:00:00.000Z";
-    db.exec("BEGIN");
-    try {
-      for (const row of rows) {
-        const payload = JSON.stringify({
-          records: row.streams.map((stream, index) => ({
-            data: { id: `${stream}-${index}` },
-            stream,
-          })),
-        });
-        insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
-      }
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-  } finally {
-    db.close();
-  }
-}
-
 function fixedClock(iso: string): () => Date {
   return () => new Date(iso);
 }
@@ -1930,6 +1784,47 @@ function seedSucceededRows(path: string, sourceInstanceId: string, count: number
     db.close();
   }
 }
+
+test("pruneSent keeps a delivered failure gap until recovery deletes it", async (t) => {
+  // Delivery marks a gap succeeded; only recovery removes it. Pruning the
+  // acknowledged tail must not close a barrier the server still holds open.
+  const path = await tempOutboxPath(t);
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    outbox.enqueue({
+      id: "gap-1",
+      kind: "gap",
+      payload: {
+        connectorId: "connector-1",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "source-1",
+      },
+      sourceInstanceId: "source-1",
+    });
+    outbox.enqueue({
+      id: "batch-1",
+      kind: "record_batch",
+      payload: { batchSeq: 1, records: [{ key: "m-1" }] },
+      sourceInstanceId: "source-1",
+    });
+    for (let claims = 0; claims < 2; claims += 1) {
+      const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "source-1" });
+      assert.ok(claimed);
+      outbox.acknowledge({ holder: "worker", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+    }
+    assert.equal(outbox.get("gap-1")?.status, "succeeded");
+
+    const result = outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+    assert.equal(result.pruned, 1, "only the acknowledged record batch is prunable");
+    assert.equal(outbox.get("gap-1")?.status, "succeeded", "a delivered gap survives pruning");
+    assert.equal(outbox.countOpenGaps({ sourceInstanceId: "source-1" }), 1);
+  } finally {
+    outbox.close();
+  }
+});
 
 test("pruneSent deletes a backlog larger than SQLite's per-statement variable limit", async (t) => {
   // The live incident shape: ~170k succeeded rows. A single

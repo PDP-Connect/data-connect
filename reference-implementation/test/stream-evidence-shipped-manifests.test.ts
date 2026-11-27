@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { CollectionReportEntry, RuntimeCollectionFact } from "../server/ref-control.ts";
 import { buildCollectionReport } from "../server/ref-control.ts";
 
@@ -23,7 +23,7 @@ interface ShippedManifest {
 }
 
 function shippedPolyfillManifests(): ShippedManifest[] {
-  return readPolyfillManifests()
+  return readShippedManifests()
     .map(({ file, manifest }) => ({ file, manifest: manifest as Record<string, unknown> }))
     .sort((a, b) => a.file.localeCompare(b.file));
 }
@@ -35,7 +35,7 @@ function manifestStreamsFromValue(manifest: Record<string, unknown>): ManifestSt
 }
 
 function manifestStreams(connectorId: string): ManifestStreamFixture[] {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${connectorId}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${connectorId}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${connectorId}.json`);
   }

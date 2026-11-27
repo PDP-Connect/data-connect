@@ -39,7 +39,8 @@ function manifest(connectorId: string, runtimeRequirements?: Record<string, unkn
 async function childTuningEnvironment(
   connectorId: string,
   runManifest: ReturnType<typeof manifest>,
-  serverEnv: Record<string, string>
+  serverEnv: Record<string, string>,
+  options: { installedConnectorKeys?: readonly string[] } = {}
 ): Promise<Record<string, string>> {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-tuning-env-"));
   const capturePath = join(tmpDir, "env.json");
@@ -71,6 +72,7 @@ rl.on('line', (line) => {
       connectorId,
       connectorInstanceId: "cin_tuning",
       connectorPath,
+      ...(options.installedConnectorKeys ? { installedConnectorKeys: options.installedConnectorKeys } : {}),
       manifest: runManifest as unknown as RuntimeRunConnectorOptions["manifest"],
       onInteraction: null,
       onProgress: () => undefined,
@@ -107,7 +109,7 @@ test("a real ChatGPT child receives its own undeclared knob and not Gmail's", as
   assert.deepEqual(env, { PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "250" });
 });
 
-test("a real child receives a knob its first-party manifest declares", async () => {
+test("a real child receives a knob its manifest declares in its own namespace", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/strava";
   const env = await childTuningEnvironment(
     connectorId,
@@ -127,4 +129,58 @@ test("a real third-party child receives no declared knob without an operator bin
   );
 
   assert.deepEqual(env, {});
+});
+
+test("a real child of a connector in no list receives its own declared knob and not an out-of-namespace one", async () => {
+  const connectorId = "acme-widgets";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, {
+      tuning_environment: ["PDPP_ACME_WIDGETS_PAGE_SIZE", "PDPP_OTHER_PAGE_SIZE"],
+    }),
+    { ...SERVER_ENV, PDPP_ACME_WIDGETS_PAGE_SIZE: "7", PDPP_OTHER_PAGE_SIZE: "9" }
+  );
+
+  assert.deepEqual(env, { PDPP_ACME_WIDGETS_PAGE_SIZE: "7" });
+});
+
+test("a real child of a connector keyed database never receives the server's database URL", async () => {
+  const connectorId = "database";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, { tuning_environment: ["PDPP_DATABASE_URL"] }),
+    { ...SERVER_ENV, PDPP_DATABASE_URL: "postgres://secret" }
+  );
+
+  assert.deepEqual(env, {});
+});
+
+test("a real child receives a nested-namespace key only when it is the longest-match connector", async () => {
+  const serverEnv = { ...SERVER_ENV, PDPP_FOO_BAR_X: "nested", PDPP_FOO_X: "own" };
+  const declared = { tuning_environment: ["PDPP_FOO_X", "PDPP_FOO_BAR_X"] };
+  const installedConnectorKeys = ["foo", "foo_bar"];
+
+  assert.deepEqual(
+    await childTuningEnvironment("foo", manifest("foo", declared), serverEnv, { installedConnectorKeys }),
+    { PDPP_FOO_X: "own" }
+  );
+  assert.deepEqual(
+    await childTuningEnvironment("foo_bar", manifest("foo_bar", declared), serverEnv, { installedConnectorKeys }),
+    { PDPP_FOO_BAR_X: "nested" }
+  );
+});
+
+test("a real child gets no key from a namespace another installed connector shares", async () => {
+  const serverEnv = { ...SERVER_ENV, PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" };
+  const declared = { tuning_environment: ["PDPP_GOOGLE_MESSAGES_PAGE_SIZE"] };
+  const installedConnectorKeys = ["google-messages", "google_messages"];
+  const spawn = (connectorId: string, installed: readonly string[]) =>
+    childTuningEnvironment(connectorId, manifest(connectorId, declared), serverEnv, {
+      installedConnectorKeys: installed,
+    });
+
+  assert.deepEqual(await spawn("google-messages", ["google-messages"]), { PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" });
+  assert.deepEqual(await spawn("google_messages", ["google_messages"]), { PDPP_GOOGLE_MESSAGES_PAGE_SIZE: "5" });
+  assert.deepEqual(await spawn("google-messages", installedConnectorKeys), {}, "beside google_messages");
+  assert.deepEqual(await spawn("google_messages", installedConnectorKeys), {}, "beside google-messages");
 });

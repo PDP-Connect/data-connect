@@ -22,11 +22,13 @@ const TOP_LEVEL_REGEX_17 = /not scheduled \(gave_up/;
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { Controller } from "../runtime/controller.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
@@ -42,9 +44,26 @@ import {
 import type { ActiveRunRecord, SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
 import { getDefaultSchedulerStore } from "../server/stores/scheduler-store.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
+
+type CapturingLogger = NonNullable<NonNullable<Parameters<typeof startServer>[0]>["logger"]>;
+
+function capturingLogger(lines: string[]): CapturingLogger {
+  const loadedPino = createRequire(import.meta.url)("pino") as (
+    options: Record<string, unknown>,
+    destination: Writable
+  ) => CapturingLogger;
+  const destination = new Writable({
+    write(chunk, _encoding, callback) {
+      lines.push(Buffer.from(chunk).toString("utf8"));
+      callback();
+    },
+  });
+  return loadedPino({ level: "debug" }, destination);
+}
 
 function readServerSchedulerFixtureManifest(): Record<string, unknown> & {
   connector_id: string;
@@ -55,27 +74,30 @@ function readServerSchedulerFixtureManifest(): Record<string, unknown> & {
   const base = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   ) as Record<string, unknown> & { capabilities?: Record<string, unknown> };
-  return {
-    ...base,
-    capabilities: {
-      ...base.capabilities,
-      refresh_policy: {
-        background_safe: true,
-        bot_detection_sensitivity: "low",
-        interaction_posture: "none",
-        maximum_staleness_seconds: 3600,
-        minimum_interval_seconds: 1,
-        rate_limit_sensitivity: "low",
-        rationale: "Deterministic scheduler integration fixture.",
-        recommended_interval_seconds: 60,
-        recommended_mode: "automatic",
+  return withFixtureSourceDeclaration(
+    {
+      ...base,
+      capabilities: {
+        ...base.capabilities,
+        refresh_policy: {
+          background_safe: true,
+          bot_detection_sensitivity: "low",
+          interaction_posture: "none",
+          maximum_staleness_seconds: 3600,
+          minimum_interval_seconds: 1,
+          rate_limit_sensitivity: "low",
+          rationale: "Deterministic scheduler integration fixture.",
+          recommended_interval_seconds: 60,
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: "scheduler-fixture",
+      connector_key: "scheduler-fixture",
+      display_name: "Scheduler fixture",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-fixture",
     },
-    connector_id: "scheduler-fixture",
-    connector_key: "scheduler-fixture",
-    display_name: "Scheduler fixture",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-fixture",
-  };
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-fixture" }
+  );
 }
 
 interface ClosableHttpServer {
@@ -427,6 +449,7 @@ async function registerSchedulerFixtureConnectorInstance(options: {
   displayName: string | undefined;
   ownerSubjectId: string;
   sourceBindingKey: string;
+  sourceKind?: string;
   timestamp?: string;
 }): Promise<void> {
   const timestamp = options.timestamp ?? "2026-04-29T00:00:00.000Z";
@@ -438,7 +461,7 @@ async function registerSchedulerFixtureConnectorInstance(options: {
     ownerSubjectId: options.ownerSubjectId,
     sourceBinding: { kind: "test_scheduler_fixture" },
     sourceBindingKey: options.sourceBindingKey,
-    sourceKind: "account",
+    sourceKind: options.sourceKind ?? "account",
     updatedAt: timestamp,
   });
 }
@@ -497,6 +520,97 @@ test("server-owned scheduler starts persisted enabled schedules after startup", 
     });
 
     await waitFor(() => readAttempts(attemptsPath).length === 1, 5000);
+    const schedulerStore = getDefaultSchedulerStore();
+    await waitForAsync(async () => {
+      const history = await schedulerStore.listRunHistory(20);
+      return history.some((run) => run.status === "succeeded" && run.connectorInstanceId === serverOwnedCanonicalKey);
+    }, 5000);
+  } finally {
+    if (server) {
+      await closeServer(server);
+    }
+    closeDb();
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+});
+
+test("server scheduler refuses a persisted local-device schedule during admission", async () => {
+  const spotifyManifest = readServerSchedulerFixtureManifest();
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-server-scheduler-placement-"));
+  const dbPath = join(tmpDir, "pdpp.sqlite");
+  const { attemptsPath, connectorPath } = writeLoggingConnector(tmpDir);
+  // biome-ignore lint/suspicious/noEvolvingTypes: test fixture inference is intentionally widened
+  let server = null;
+
+  try {
+    server = await startServer({
+      asPort: 0,
+      autoEnrollEligibleSchedules: false,
+      dbPath,
+      quiet: true,
+      rsPort: 0,
+    });
+    const registerResp = await fetchJson(`http://localhost:${server.asPort}/connectors`, {
+      body: JSON.stringify(spotifyManifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201, JSON.stringify(registerResp.body));
+    const connectorId = canonicalConnectorKey(spotifyManifest.connector_id) ?? spotifyManifest.connector_id;
+    await registerSchedulerFixtureConnectorInstance({
+      connectorId,
+      connectorInstanceId: connectorId,
+      displayName: "Paired-device connection",
+      ownerSubjectId: "owner_local",
+      sourceBindingKey: "scheduler-local-device",
+      sourceKind: "local_device",
+    });
+    const scheduleStore = getDefaultSchedulerStore();
+    const scheduleCreatedAt = new Date(Date.now() - 120_000).toISOString();
+    await scheduleStore.createSchedule({
+      connector_id: connectorId,
+      connector_instance_id: connectorId,
+      created_at: scheduleCreatedAt,
+      enabled: true,
+      interval_seconds: 1,
+      jitter_seconds: 0,
+      updated_at: scheduleCreatedAt,
+    });
+    assert.equal(
+      (await scheduleStore.listSchedules()).filter((schedule) => schedule.connector_instance_id === connectorId).length,
+      1,
+      "the test starts from an enabled persisted local-device schedule"
+    );
+    await closeServer(server);
+    closeDb();
+    server = null;
+
+    const logLines: string[] = [];
+    server = await startServer({
+      asPort: 0,
+      autoEnrollEligibleSchedules: false,
+      connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
+      connectorPathResolver: () => connectorPath,
+      dbPath,
+      logger: capturingLogger(logLines),
+      quiet: true,
+      rsPort: 0,
+    });
+
+    // Scheduler hydration admits each persisted schedule before handing it to
+    // the executor, and runs asynchronously after listen. Wait for the
+    // hydration refusal itself, so the negative assertions below cannot pass
+    // merely because the scheduler has not looked at the schedule yet.
+    await waitFor(() => logLines.some((line) => line.includes("local_device_control_unsupported")), 5000);
+    const schedulerStore = getDefaultSchedulerStore();
+    assert.equal(readAttempts(attemptsPath).length, 0, "admission refuses before connector spawn");
+    assert.deepEqual(await schedulerStore.listRunHistory(20), [], "admission refuses before creating a run to retry");
+    assert.equal(
+      (await schedulerStore.listSchedules()).filter((schedule) => schedule.connector_instance_id === connectorId)
+        .length,
+      1,
+      "the persisted schedule remains available for diagnosis but is not dispatched"
+    );
   } finally {
     if (server) {
       await closeServer(server);
@@ -707,7 +821,7 @@ test("autonomous scheduler canonicalizes a legacy URL-shaped schedule connector_
   // under the non-canonical key — mismatching the canonical key the read and
   // admission paths key on. This test seeds the legacy row directly, ticks the
   // scheduler once, and asserts every persisted identity is the canonical key.
-  const ynabManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "ynab.json");
+  const ynabManifestEntry = readShippedManifests().find((candidate) => candidate.file === "ynab.json");
   if (!ynabManifestEntry) {
     throw new Error("no polyfill manifest found for ynab.json");
   }
@@ -1262,29 +1376,32 @@ test("scheduler progress watchdog allows long direct runs that keep reporting pr
 });
 
 test("scheduler preserves failure reasons and checkpoint summaries from failed runConnector results", async () => {
-  const manifest = {
-    connector_id: "scheduler-failure-test",
-    display_name: "Scheduler Failure Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-failure-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-failure-test",
+      display_name: "Scheduler Failure Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-failure-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-failure-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-failure-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -1395,43 +1512,46 @@ rl.on('line', (line) => {
 });
 
 test("scheduler preserves partial checkpoint commit summaries from state persistence failures after DONE(succeeded)", async () => {
-  const manifest = {
-    connector_id: "scheduler-partial-checkpoint-test",
-    display_name: "Scheduler Partial Checkpoint Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-partial-checkpoint-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-partial-checkpoint-test",
+      display_name: "Scheduler Partial Checkpoint Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-partial-checkpoint-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-      {
-        name: "other_items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+        {
+          name: "other_items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-partial-checkpoint-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-partial-checkpoint-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -1601,29 +1721,32 @@ rl.on('line', (line) => {
 });
 
 test("scheduler preserves terminal counter mismatch failures from runConnector results", async () => {
-  const manifest = {
-    connector_id: "scheduler-terminal-counter-mismatch-test",
-    display_name: "Scheduler Terminal Counter Mismatch Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-terminal-counter-mismatch-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-terminal-counter-mismatch-test",
+      display_name: "Scheduler Terminal Counter Mismatch Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-terminal-counter-mismatch-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-terminal-counter-mismatch-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-terminal-counter-mismatch-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -1749,29 +1872,32 @@ rl.on('line', (line) => {
 });
 
 test("scheduler preserves connector-declared terminal error details from failed runs", async () => {
-  const manifest = {
-    connector_id: "scheduler-terminal-error-test",
-    display_name: "Scheduler Terminal Error Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-terminal-error-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-terminal-error-test",
+      display_name: "Scheduler Terminal Error Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-terminal-error-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-terminal-error-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-terminal-error-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -1878,28 +2004,31 @@ rl.on('line', (line) => {
 });
 
 test("scheduler preserves known gaps from partial connector runs", async () => {
-  const manifest = {
-    connector_id: "scheduler-known-gap-test",
-    display_name: "Scheduler Known Gap Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-known-gap-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-known-gap-test",
+      display_name: "Scheduler Known Gap Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-known-gap-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-known-gap-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-known-gap-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -1974,7 +2103,11 @@ rl.on('line', (line) => {
     assert.ok(knownGap, "expected a known gap entry");
     assert.equal(knownGap.kind, "skip_result");
     assert.equal(knownGap.severity, "transient");
-    assert.equal(knownGap.recovery_hint?.action, "retry_by_runtime");
+    // Section 5.5: an absent SKIP_RESULT.recovery_hint is not turned into an action
+    // from the connector's `http_429` reason text. The runtime has no structured
+    // transport evidence for this skip, so the gated action is `unknown`
+    // (Section 5.11). Oracle: the spec clause, not the previous text-inferred value.
+    assert.equal(knownGap.recovery_hint?.action, "unknown");
     assert.deepEqual(knownGap.scope?.resource_ids, ["item_1"]);
 
     const stats = scheduler.getStats();
@@ -1988,29 +2121,32 @@ rl.on('line', (line) => {
 });
 
 test("scheduler preserves connector-declared terminal error details from cancelled runs", async () => {
-  const manifest = {
-    connector_id: "scheduler-cancelled-terminal-error-test",
-    display_name: "Scheduler Cancelled Terminal Error Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-cancelled-terminal-error-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-cancelled-terminal-error-test",
+      display_name: "Scheduler Cancelled Terminal Error Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-cancelled-terminal-error-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-cancelled-terminal-error-test" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-cancelled-terminal-error-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
@@ -2124,28 +2260,31 @@ rl.on('line', (line) => {
 });
 
 test("scheduler does not retry deterministic connector protocol violations", async () => {
-  const manifest = {
-    connector_id: "scheduler-no-retry-protocol-violation",
-    display_name: "Scheduler No Retry Protocol Violation Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-no-retry-protocol-violation",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-no-retry-protocol-violation",
+      display_name: "Scheduler No Retry Protocol Violation Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-no-retry-protocol-violation",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-no-retry-protocol-violation" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-no-retry-protocol-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   const attemptsPath = join(tmpDir, "attempts.log");
@@ -2229,30 +2368,39 @@ rl.on('line', (line) => {
   }
 });
 
-test("scheduler retries connector-declared retryable failures and records the succeeding attempt", async () => {
-  const manifest = {
-    connector_id: "scheduler-retryable-terminal-error",
-    display_name: "Scheduler Retryable Terminal Error Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-retryable-terminal-error",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+// A connector's DONE.error.retryable is a claim, not retry authority (Collection
+// Profile Sections 5.8 and 5.11). The runtime must not start an automatic attempt
+// from it. Oracle: the spec clause. The positive control for a runtime-owned
+// transport retry is the `scheduler retries runtime ...` tests below, which stay
+// unchanged. Plausible defect caught: a connector's `retryable: true` restarts a
+// doomed run. Required backend: memory profile (in-memory SQLite, child process).
+test("scheduler does not auto-retry a connector-declared retryable failure (Section 5.11)", async () => {
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-retryable-terminal-error",
+      display_name: "Scheduler Retryable Terminal Error Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-retryable-terminal-error",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-retryable-terminal-error" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-retryable-terminal-error-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   const attemptsPath = join(tmpDir, "attempts.log");
@@ -2346,15 +2494,148 @@ rl.on('line', (line) => {
 
     const [record] = completedRuns;
     assert.ok(record, "expected a completed run record");
-    assert.equal(record.status, "succeeded");
-    assert.equal(record.attempt, 2);
-    assert.equal(record.failureReason, null);
-    assert.equal(record.terminalReason, null);
-    assert.equal(record.connectorError, null);
-    assert.equal(record.recordsEmitted, 1);
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1, "a connector's retryable claim must not start a second attempt");
+    assert.equal(record.recordsEmitted, 0);
+    // The connector's own report stays visible; its retryable flag is not authority.
+    assert.equal(record.connectorError?.message, "Rate limited, retry later");
+    assert.equal(record.connectorError?.retryable, true);
 
     const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
-    assert.equal(attempts.length, 2, "retryable terminal failures should be retried once before succeeding");
+    assert.equal(attempts.length, 1, "a connector-declared retryable failure must not be retried automatically");
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+test("scheduler does not auto-retry a DONE(failed) that carries no error object (legacy connector)", async () => {
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-no-error-failed-done",
+      display_name: "Scheduler No Error Failed Done Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-no-error-failed-done",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-no-error-failed-done" }
+  );
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-no-error-failed-done-"));
+  const connectorPath = join(tmpDir, "connector.mjs");
+  const attemptsPath = join(tmpDir, "attempts.log");
+  writeFileSync(
+    connectorPath,
+    `
+import { appendFileSync, readFileSync } from 'node:fs';
+import { createInterface } from 'readline';
+const attemptsPath = ${JSON.stringify(attemptsPath)};
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type !== 'START') return;
+  appendFileSync(attemptsPath, 'attempt\\n', 'utf8');
+  const attempts = readFileSync(attemptsPath, 'utf8').trim().split('\\n').filter(Boolean).length;
+  if (attempts === 1) {
+    process.stdout.write(JSON.stringify({
+      type: 'DONE',
+      status: 'failed',
+      records_emitted: 0,
+    }) + '\\n');
+    rl.close();
+    process.exit(1);
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({
+    type: 'RECORD',
+    stream: 'items',
+    key: 'retry_success',
+    data: { id: 'retry_success', value: 'after retry' },
+    emitted_at: new Date().toISOString(),
+  }) + '\\n');
+  process.stdout.write(JSON.stringify({
+    type: 'DONE',
+    status: 'succeeded',
+    records_emitted: 1,
+  }) + '\\n');
+  rl.close();
+  process.exit(0);
+});
+`,
+    "utf-8"
+  );
+
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const completedRuns: RunRecord[] = [];
+
+  try {
+    const registerResp = await fetchJson(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+
+    const ownerToken = await issueOwnerToken(asUrl, "scheduler_no_error_failed_done_user");
+    const connectorInstanceId = await materializeRunConnection(
+      manifest.connector_id,
+      "scheduler_no_error_failed_done_user"
+    );
+    const scheduler = createScheduler({
+      admitRunConnection: fakeAdmitRunConnection(),
+      connectors: [
+        {
+          connectorId: manifest.connector_id,
+          connectorInstanceId,
+          connectorPath,
+          intervalMs: 60_000,
+          manifest,
+          maxRetries: 2,
+          ownerSubjectId: "scheduler_no_error_failed_done_user",
+          ownerToken,
+        },
+      ],
+      getState: async () => null,
+      onInteraction: async (interaction: unknown) => cancelledInteractionResponse(interaction),
+      // biome-ignore lint/suspicious/noShadow: fixture terminology mirrors the protocol field name
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl,
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: skipped test callback is intentionally empty
+      setState: async () => {},
+    });
+
+    scheduler.start();
+    await waitFor(() => completedRuns.length === 1, 8000);
+    scheduler.stop();
+
+    const [record] = completedRuns;
+    assert.ok(record, "expected a completed run record");
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1, "a connector-reported failure with no error object must not start a second attempt");
+    assert.equal(record.terminalReason, "connector_reported_failed");
+    assert.equal(record.connectorError, null);
+    assert.equal(record.recordsEmitted, 0);
+
+    const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(attempts.length, 1, "a connector-reported failure must not be retried automatically, with or without an error object");
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);
@@ -2362,29 +2643,32 @@ rl.on('line', (line) => {
 });
 
 test("scheduler does not retry connector-declared non-retryable failures", async () => {
-  const manifest = {
-    connector_id: "scheduler-nonretryable-terminal-error",
-    display_name: "Scheduler Nonretryable Terminal Error Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-nonretryable-terminal-error",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-nonretryable-terminal-error",
+      display_name: "Scheduler Nonretryable Terminal Error Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-nonretryable-terminal-error",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-nonretryable-terminal-error" }
+  );
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-nonretryable-terminal-error-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   const attemptsPath = join(tmpDir, "attempts.log");
@@ -3938,11 +4222,11 @@ test("scheduler records one not-ready skip for automatic runs when runtime prere
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-not-ready-test",
     connector_key: "scheduler-not-ready-test",
-  };
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -4007,11 +4291,11 @@ test("scheduler emits a fresh not-ready skip when readiness reason changes", asy
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-not-ready-changing-test",
     connector_key: "scheduler-not-ready-changing-test",
-  };
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -4074,7 +4358,7 @@ test("scheduler default readiness checker skips missing manifest-declared extern
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-missing-tool-test",
     connector_key: "scheduler-missing-tool-test",
@@ -4090,7 +4374,7 @@ test("scheduler default readiness checker skips missing manifest-declared extern
         },
       ],
     },
-  };
+  });
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-missing-tool-"));
   const { attemptsPath, connectorPath } = writeLoggingConnector(tmpDir);
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
@@ -4149,7 +4433,7 @@ test("scheduler default readiness checker probes a manifest-declared executable_
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-slackdump-bin-test",
     connector_key: "scheduler-slackdump-bin-test",
@@ -4170,7 +4454,7 @@ test("scheduler default readiness checker probes a manifest-declared executable_
         },
       ],
     },
-  };
+  });
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-slackdump-bin-"));
   const fakeSlackdumpPath = join(tmpDir, "mounted-slackdump");
   writeFileSync(fakeSlackdumpPath, '#!/bin/sh\n[ "$1" = "version" ] || exit 2\nexit 0\n', "utf8");
@@ -4214,6 +4498,7 @@ test("scheduler default readiness checker probes a manifest-declared executable_
 
     scheduler.start();
     await waitFor(() => readAttempts(attemptsPath).length === 1, 5000);
+    await waitFor(() => scheduler.getHistory().length > 0, 5000);
     scheduler.stop();
   } finally {
     if (previousSlackdumpBin === undefined) {
@@ -4311,14 +4596,14 @@ test("scheduler default readiness checker does not treat browser bindings as rea
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-browser-not-ready-test",
     connector_key: "scheduler-browser-not-ready-test",
     runtime_requirements: {
       bindings: { browser: { required: true }, network: { required: true } },
     },
-  };
+  });
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-browser-not-ready-"));
   const { attemptsPath, connectorPath } = writeLoggingConnector(tmpDir);
   const previousRemoteCdp = process.env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL;
@@ -4421,14 +4706,14 @@ test("scheduler default readiness checker treats PDPP_NEKO_CDP_HTTP_URL as manag
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-browser-neko-cdp-ready-test",
     connector_key: "scheduler-browser-neko-cdp-ready-test",
     runtime_requirements: {
       bindings: { browser: { required: true }, network: { required: true } },
     },
-  };
+  });
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-browser-neko-cdp-"));
   const { attemptsPath, connectorPath } = writeLoggingConnector(tmpDir);
   const previousRemoteCdp = process.env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL;
@@ -4519,14 +4804,14 @@ test("scheduler default readiness checker treats PDPP_NEKO_MANAGED_CONNECTORS as
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-browser-neko-managed-ready-test",
     connector_key: "scheduler-browser-neko-managed-ready-test",
     runtime_requirements: {
       bindings: { browser: { required: true }, network: { required: true } },
     },
-  };
+  });
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-browser-neko-managed-"));
   const { attemptsPath, connectorPath } = writeLoggingConnector(tmpDir);
   const previousRemoteCdp = process.env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL;
@@ -4613,22 +4898,26 @@ test("scheduler default readiness checker treats PDPP_NEKO_MANAGED_CONNECTORS as
 });
 
 test("scheduler marks connector as needs-human when automatic run triggers interaction", async () => {
-  const manifest = {
-    connector_id: "scheduler-interaction-test",
-    display_name: "Interaction Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-interaction-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: ["otp"] },
+      connector_id: "scheduler-interaction-test",
+      display_name: "Interaction Test Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-interaction-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-interaction-test" }
+  );
 
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-interaction-"));
   const connectorPath = join(tmpDir, "connector.mjs");
@@ -4738,11 +5027,11 @@ test("scheduler backoff skip derives next_attempt_at from history when last_run_
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-backoff-1970-regression",
     connector_key: "scheduler-backoff-1970-regression",
-  };
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -4861,11 +5150,11 @@ test("scheduler backoff skip uses gave_up phrasing once health-state crosses blo
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-backoff-blocked-msg",
     connector_key: "scheduler-backoff-blocked-msg",
-  };
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -4963,11 +5252,11 @@ test("scheduler does not re-emit persisted backoff transition markers on restart
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
-  const manifest = {
+  const manifest = withFixtureSourceDeclaration({
     ...spotifyManifest,
     connector_id: "scheduler-backoff-restart-noise",
     connector_key: "scheduler-backoff-restart-noise",
-  };
+  });
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;

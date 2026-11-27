@@ -86,13 +86,17 @@ export function definitionFromProfile(profile: CollectionProfile, release: Insta
   }
 
   const definition: LocalCollectorDefinition = {
-    connector_id: profile.connector_id,
+    // The profile's own `connector_id` is not used: signed artifacts that are
+    // already published still declare a legacy spelling (`claude_code`) there,
+    // and the server accepts only the manifest key. The key is also what the
+    // collector sends on the wire.
+    connector_id: profile.connector_key,
     // The runner never resolves this for a managed connector — the absolute
     // entrypoint does. It is carried so a managed definition and a vendored
     // one remain comparable, which is what makes the migration checkable.
     entry: profile.connector_key,
     bindings: Object.freeze(bindings),
-    protocol_capabilities: Object.freeze([]),
+    protocol_capabilities: Object.freeze([...(profile.protocol_capabilities ?? [])]),
     streams: Object.freeze(streams),
   };
 

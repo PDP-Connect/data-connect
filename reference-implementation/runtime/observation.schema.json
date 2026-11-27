@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/observation.schema.json",
+  "title": "Collection Profile OBSERVATION message",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 5.10 (the connector OBSERVATION message) and Section 3.8 (the manifest diagnostic_descriptors member, under $defs). The schema does not check that element_expectation.final is one of states_seen, that ids are unique within a run or a descriptor list, or that a fact names a declared id; the runtime checks those.",
+  "$ref": "#/$defs/observation",
+  "$defs": {
+    "descriptorId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "observationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+    },
+    "evidenceRef": {
+      "description": "A local artifact reference: printable ASCII without spaces, never a URL.",
+      "type": "string",
+      "pattern": "^(?!.*://)[!-~]{1,256}$"
+    },
+    "elementState": {
+      "enum": [
+        "matched",
+        "absent",
+        "hidden",
+        "disabled",
+        "ambiguous"
+      ]
+    },
+    "resolves": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/observationId"
+      },
+      "minItems": 1,
+      "maxItems": 16
+    },
+    "observation": {
+      "description": "One connector fact. Runtime-only fact types (credential_submission, rule_match, connector_defect) are not valid here.",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "fact",
+        "attrs"
+      ],
+      "properties": {
+        "type": {
+          "const": "OBSERVATION"
+        },
+        "id": {
+          "$ref": "#/$defs/observationId"
+        },
+        "fact": {
+          "enum": [
+            "element_expectation",
+            "wait_expired",
+            "provider_message"
+          ]
+        },
+        "step": {
+          "$ref": "#/$defs/descriptorId"
+        },
+        "attrs": {
+          "type": "object"
+        },
+        "evidence_ref": {
+          "$ref": "#/$defs/evidenceRef"
+        },
+        "resolves": {
+          "$ref": "#/$defs/resolves"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "$ref": "#/$defs/elementExpectation"
+        },
+        {
+          "$ref": "#/$defs/waitExpired"
+        },
+        {
+          "$ref": "#/$defs/providerMessage"
+        }
+      ]
+    },
+    "elementExpectation": {
+      "type": "object",
+      "required": [
+        "step"
+      ],
+      "properties": {
+        "fact": {
+          "const": "element_expectation"
+        },
+        "step": {
+          "$ref": "#/$defs/descriptorId"
+        },
+        "attrs": {
+          "type": "object",
+          "required": [
+            "expectation",
+            "states_seen",
+            "final"
+          ],
+          "properties": {
+            "expectation": {
+              "$ref": "#/$defs/descriptorId"
+            },
+            "states_seen": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/elementState"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "final": {
+              "$ref": "#/$defs/elementState"
+            },
+            "fallback_used": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "waitExpired": {
+      "type": "object",
+      "required": [
+        "step"
+      ],
+      "properties": {
+        "fact": {
+          "const": "wait_expired"
+        },
+        "step": {
+          "$ref": "#/$defs/descriptorId"
+        },
+        "attrs": {
+          "type": "object",
+          "required": [
+            "awaited",
+            "budget_ms"
+          ],
+          "properties": {
+            "awaited": {
+              "$ref": "#/$defs/descriptorId"
+            },
+            "budget_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400000
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "providerMessage": {
+      "type": "object",
+      "properties": {
+        "fact": {
+          "const": "provider_message"
+        },
+        "attrs": {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "auth_failure",
+                "other"
+              ]
+            },
+            "rule": {
+              "$ref": "#/$defs/descriptorId"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "diagnosticDescriptors": {
+      "description": "The manifest diagnostic_descriptors member (Section 3.8).",
+      "type": "object",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/descriptorId"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "expectations": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "step"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/descriptorId"
+              },
+              "step": {
+                "$ref": "#/$defs/descriptorId"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/descriptorId"
+              },
+              "kind": {
+                "enum": [
+                  "auth"
+                ]
+              },
+              "step": {
+                "$ref": "#/$defs/descriptorId"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

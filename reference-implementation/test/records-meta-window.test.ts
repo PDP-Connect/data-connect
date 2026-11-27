@@ -48,6 +48,7 @@ import {
   queryRecords as queryRecordsUntyped,
 } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // `meta` is attached to the response object mutably after the base object
 // literal is constructed and returned, so checkJs:false inference over
@@ -113,67 +114,73 @@ const INSTANCE_B = "cin_window_account_b";
 
 // A stream whose logical time lives in `received_at` (consent_time_field) and
 // whose `amount` field is range-filterable, so a filter can narrow the corpus.
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Meta-window Test Connector",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: {
-        aggregations: { count: true },
-        range_filters: { amount: ["gte", "lte"], received_at: ["gte", "lte"] },
-      },
-      schema: {
-        properties: {
-          amount: { type: "integer" },
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Meta-window Test Connector",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: {
+          aggregations: { count: true },
+          range_filters: { amount: ["gte", "lte"], received_at: ["gte", "lte"] },
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
+        schema: {
+          properties: {
+            amount: { type: "integer" },
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 // A second connector whose stream declares NO consent_time_field, to prove the
 // total-without-timestamps honesty rule.
 const NO_TIME_CONNECTOR_ID = "meta-window-no-time";
 const NO_TIME_INSTANCE = "cin_window_no_time";
-const noTimeManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: NO_TIME_CONNECTOR_ID,
-  display_name: "No-time Test Connector",
-  manifest_uri: `https://sources.example/${NO_TIME_CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
-          subject: { type: "string" },
+const noTimeManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: NO_TIME_CONNECTOR_ID,
+    display_name: "No-time Test Connector",
+    manifest_uri: `https://sources.example/${NO_TIME_CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject"],
+          type: "object",
         },
-        required: ["id", "subject"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${NO_TIME_CONNECTOR_ID}` }
+);
 
 const grant = {
   streams: [{ fields: ["id", "subject", "amount", "received_at"], name: STREAM }],

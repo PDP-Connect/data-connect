@@ -30,9 +30,9 @@
 import type { AxisChip, EvidenceTone } from "@pdpp/display";
 import { formatCoverageAxis } from "@pdpp/display";
 import type { ForwardDispositionSummary } from "./connection-evidence.ts";
-import { formatForwardDisposition } from "./connection-evidence.ts";
+import { formatForwardDisposition, withCoverageAsOf } from "./connection-evidence.ts";
 import { dispositionForInstallState } from "./connector-implementation.ts";
-import type { RefCollectionReportEntry } from "./ref-client.ts";
+import type { RefCollectionReportEntry, RefCoverageAsOf } from "./ref-client.ts";
 
 export interface StreamCollectionFacts {
   /**
@@ -148,7 +148,9 @@ export function indexCollectionReportByStream(
  */
 export function collectionReportHasOpenGaps(report: readonly RefCollectionReportEntry[] | null | undefined): boolean {
   return (report ?? []).some((entry) => {
-    if (entry.coverage_condition !== "complete") {
+    // A connector-reported collection is not an open gap; the report says so.
+    const reportedOnly = entry.coverage_reported_collected === true && entry.coverage_condition === "unknown";
+    if (entry.coverage_condition !== "complete" && !reportedOnly) {
       return true;
     }
     if (entry.pending_detail_gaps > 0) {
@@ -292,11 +294,26 @@ export function formatStreamCollectionFacts(
      * happen, so the reference's disposition is replaced by the install blocker.
      */
     readonly connectorNotInstalled?: boolean;
+    /** The run the connection's local coverage describes (`coverage_as_of`). */
+    readonly coverageAsOf?: RefCoverageAsOf | null;
   } = {}
 ): StreamCollectionFacts {
-  const coverage = formatCoverageAxis(entry.coverage_condition);
+  const reportedOnly = entry.coverage_reported_collected === true && entry.coverage_condition === "unknown";
+  const coverage = withCoverageAsOf(
+    reportedOnly
+      ? {
+          ...formatCoverageAxis(entry.coverage_condition),
+          label: "Coverage · reported collected",
+          title: "The connector reports it collected this stream. PDP Connect has not independently checked it.",
+          tone: "neutral" as const,
+          value: "reported collected",
+        }
+      : formatCoverageAxis(entry.coverage_condition),
+    entry.coverage_condition,
+    options.coverageAsOf
+  );
   const disposition = dispositionForInstallState(
-    formatForwardDisposition(entry.forward_disposition),
+    formatForwardDisposition(entry.forward_disposition, { coverageReportedCollected: reportedOnly }),
     options.connectorNotInstalled === true
   );
   const counts = buildCountsLine(entry);

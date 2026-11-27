@@ -20,6 +20,7 @@ import { ingestRecord } from "../server/records.ts";
 import { reconcileSearchIndexDirtyScope, runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { configureSemanticBackend, makeStubBackend } from "../server/search-semantic.ts";
 import { isSearchIndexScopeDirty, listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function target(connectorId: string, connectorInstanceId: string) {
   return { connector_id: connectorId, connector_instance_id: connectorInstanceId };
@@ -35,28 +36,31 @@ function record(stream: string, key: string, subject: string) {
 }
 
 function manifestWithSemanticFields(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        query: { search: { lexical_fields: ["subject"], semantic_fields: ["subject"] } },
-        schema: {
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          query: { search: { lexical_fields: ["subject"], semantic_fields: ["subject"] } },
+          schema: {
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 test("a scope whose stream declares semantic_fields is NOT cleared when no semantic backend is configured", async () => {
@@ -160,28 +164,33 @@ test("a scope whose stream does NOT declare semantic_fields clears normally with
     configureSemanticBackend(null);
 
     const connectorId = "inv-lexical-only-no-semantic-backend";
-    await registerConnector({
-      capabilities: { human_interaction: [] },
-      connector_id: connectorId,
-      display_name: connectorId,
-      manifest_uri: `https://sources.example/${connectorId}`,
-      protocol_version: "0.1.0",
-      streams: [
+    await registerConnector(
+      withFixtureSourceDeclaration(
         {
-          name: "items",
-          primary_key: ["id"],
-          query: { search: { lexical_fields: ["subject"] } }, // no semantic_fields
-          schema: {
-            properties: { id: { type: "string" }, subject: { type: "string" } },
-            required: ["id", "subject"],
-            type: "object",
-          },
-          selection: { fields: true, resources: true },
-          semantics: "mutable_state",
+          capabilities: { human_interaction: [] },
+          connector_id: connectorId,
+          display_name: connectorId,
+          manifest_uri: `https://sources.example/${connectorId}`,
+          protocol_version: "0.1.0",
+          streams: [
+            {
+              name: "items",
+              primary_key: ["id"],
+              query: { search: { lexical_fields: ["subject"] } }, // no semantic_fields
+              schema: {
+                properties: { id: { type: "string" }, subject: { type: "string" } },
+                required: ["id", "subject"],
+                type: "object",
+              },
+              selection: { fields: true, resources: true },
+              semantics: "mutable_state",
+            },
+          ],
+          version: "0.1.0",
         },
-      ],
-      version: "0.1.0",
-    });
+        { sourceId: `https://sources.example/${connectorId}` }
+      )
+    );
     const connectorInstanceId = "cin_lexical_only";
 
     await ingestRecord(target(connectorId, connectorInstanceId), record("items", "k1", "lexical only"));

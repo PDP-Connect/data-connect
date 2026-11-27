@@ -6,35 +6,28 @@
  *
  * **Status.** The published collector does not use {@link obtainManagedConnectors}.
  * It installs through `collection-profiles.ts`, which delegates fetch and
- * signature verification to data-connectors' installer core. That core now
- * has the OCI and Sigstore path the paragraphs below describe as missing.
- * The verifier in this directory is kept, with its tests, until an owner
- * decides whether to remove it.
+ * signature verification to data-connectors' installer core, which has the
+ * OCI and Sigstore path. The verifier in this directory is kept, with its
+ * tests, until an owner decides whether to remove it.
  *
  * One call, {@link obtainManagedConnectors}, walks a pinned lock to a set of
  * definitions the existing runner seam accepts: resolve a pinned digest,
  * verify its signature against host policy, install to a content-addressed
  * cache, and hand the installed artifact to the runner.
  *
- * **Relationship to `@pdpp/connector-manager`.** That package exists on
- * data-connectors#97 (`packages/connector-installer-core`, published name
- * `@pdpp/connector-manager`) and is where this logic belongs. It does not
- * export it yet: its surface today is the incumbent tarball installer —
- * `loadConnectorIndex`, `generateLock`, `installFromLock`, `verifyInstalled`
- * and friends — and it contains no OCI, ORAS or Cosign code at all. #97's OCI
- * work is publisher-side: `scripts/build-connector-oci-artifact.mjs`,
- * `scripts/verify-connector-oci-artifact.mjs` and the publish workflow. The
- * manager's *grow* half is unwritten.
- *
- * So this module is written against the artifact contract rather than against
- * an API that does not exist, and it is shaped to be deleted: every step is a
- * named export with an injected dependency, so when the manager grows
- * `resolve`/`verify`/`install`, this becomes a thin adapter over those calls
- * and the runner seam does not move again. What must not happen is the runner
+ * **Relationship to `@pdpp/connector-manager`.** That package is
+ * data-connectors' `packages/connector-installer-core` (published here as
+ * `@opendatalabs/data-connectors-tools/installer-core`) and is where this logic
+ * belongs. It no longer has the tarball installer: it is OCI-only, and its
+ * `fetchCatalog`, `fetchResolvedArtifact`, `installFromLock` and
+ * `verifyInstalled` resolve a pinned digest, verify its Sigstore signature,
+ * check every blob and install a signed Collection Profile. It still does not
+ * export the {@link ConnectorManager} shape below, so this module stays
+ * written against the artifact contract and is shaped to be deleted: every step
+ * is a named export with an injected dependency, so a swap to the core is a
+ * substitution rather than a rewrite. What must not happen is the runner
  * growing a dependency on a shape only this repo knows — hence
- * {@link ConnectorManager}, which is the interface the manager is expected to
- * satisfy, stated here so the eventual swap is a substitution rather than a
- * rewrite.
+ * {@link ConnectorManager}, the interface the core is expected to satisfy.
  */
 
 import type { ConnectorLock, PinnedConnector } from "./artifact-contract.ts";

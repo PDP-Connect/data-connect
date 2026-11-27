@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/codex",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/codex",
+		"display": {
+			"name": "OpenAI Codex CLI"
+		}
+	},
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.0",
+	"version": "0.3.15",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
-		"icon": "icons/codex.svg",
+		"icon": "icon.svg",
 		"background_color": "#10A37F"
 	},
 	"runtime_requirements": {
@@ -619,41 +625,6 @@
 			"incremental": false,
 			"required": false,
 			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "device_heartbeat"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"description": "Safe coverage status for known Codex local stores, including excluded auth-adjacent stores without payloads or raw absolute paths.",
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"store": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string"
-					},
-					"reason": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
-					}
-				},
-				"required": ["id", "store", "status", "reason"]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "device_heartbeat"
 		},

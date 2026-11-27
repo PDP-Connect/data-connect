@@ -3,15 +3,17 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
+import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.ts";
 import {
-  browserEnrollmentSupport,
   buildConnectionSetupPlan,
   classifyConnectorIntentModality,
   classifyConnectorSetupModality,
-  STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS,
+  isLocalCollectorProven,
+  isProviderAuthLifecycleProven,
+  isStaticSecretLiveProven,
 } from "../server/connection-setup-plan.ts";
 
 function manifest(
@@ -29,18 +31,27 @@ function manifest(
 
 // biome-ignore lint/suspicious/noExplicitAny: matches the looseness of the JSON-import-attribute form this replaces.
 function readShippedPolyfillManifest(file: string): any {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  const entry = readShippedManifests().find((candidate) => candidate.file === file);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${file}`);
   }
   return entry.manifest;
 }
 
-function staticSecretManifest(connectorId: string, credentialKind = "api_key"): ConnectorManifestLike {
+const PROVEN_LOCAL_COLLECTOR: Partial<ConnectorManifestLike> = {
+  capabilities: { proven: { local_collector: true } },
+};
+
+function staticSecretManifest(
+  connectorId: string,
+  credentialKind = "api_key",
+  liveProven = false
+): ConnectorManifestLike {
   return manifest(
     connectorId,
     { network: { required: true } },
     {
+      ...(liveProven ? { capabilities: { proven: { static_secret_live: { proven: true } } } } : {}),
       setup: {
         credential_capture: {
           fields: [
@@ -65,7 +76,8 @@ function staticSecretManifest(connectorId: string, credentialKind = "api_key"): 
 test("setup planner supports proven local collectors without creating active connections", () => {
   const plan = buildConnectionSetupPlan({
     connectorKey: "codex",
-    manifest: manifest("codex", { filesystem: { required: true } }),
+    manifest: manifest("codex", { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
+    proofProvenance: "registered_catalog",
   });
   assert.equal(plan.connectorModality, "local_collector");
   assert.equal(plan.setupModality, "local_collector");
@@ -81,12 +93,13 @@ test("setup planner supports proven local collectors without creating active con
 test("setup planner supports URL-shaped local collector identifiers", () => {
   const plan = buildConnectionSetupPlan({
     connectorKey: "https://registry.pdpp.dev/connectors/claude-code",
-    manifest: manifest("claude-code", { filesystem: { required: true } }),
+    manifest: manifest("claude-code", { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
+    proofProvenance: "registered_catalog",
   });
   assert.equal(plan.connectorKey, "claude-code");
   assert.equal(plan.supportState, "supported");
   assert.equal(plan.catalogDisposition, "local_collector_enroll");
-  assert.equal(plan.enrollmentKey, "claude_code");
+  assert.equal(plan.enrollmentKey, "claude-code", "the enrollment key is the connector key itself");
 });
 
 test("setup planner proof-gates filesystem connectors outside the proven enrollment set", () => {
@@ -151,6 +164,7 @@ test("setup planner supports manual/upload connectors that declare an import env
 
 test("setup planner keeps browser-bound connectors proof-gated before live proof", () => {
   const amazon = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
     connectorKey: "amazon",
     manifest: manifest("amazon", { browser: { required: true }, network: { required: true } }),
   });
@@ -165,6 +179,7 @@ test("setup planner keeps browser-bound connectors proof-gated before live proof
   assert.equal(amazon.runbookPath, null);
 
   const chase = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
     connectorKey: "chase",
     manifest: manifest("chase", { browser: { required: true } }),
   });
@@ -172,37 +187,31 @@ test("setup planner keeps browser-bound connectors proof-gated before live proof
   assert.equal(chase.enrollmentKey, "chase");
 });
 
-test("setup planner offers browser setup by browserEnrollmentSupport, not by production readiness", () => {
-  // acme-shop is a catalog-installed connector that no bundled key list names.
-  const acme = buildConnectionSetupPlan({
-    connectorKey: "acme-shop",
-    manifest: manifest("acme-shop", { browser: { required: true } }),
-  });
-  assert.equal(acme.catalogDisposition, "browser_collector_manual");
-  assert.equal(acme.nextStepKind, "enroll_browser_collector");
-  assert.equal(acme.enrollmentKey, "acme-shop");
-
-  const scaffold = buildConnectionSetupPlan({
-    connectorKey: "anthropic",
-    manifest: manifest("anthropic", { browser: { required: true } }),
-  });
-  assert.equal(scaffold.catalogDisposition, "browser_bound_runbook");
-  assert.equal(scaffold.nextStepKind, "manual_runbook");
-  assert.equal(scaffold.enrollmentKey, undefined);
-
+test("setup planner offers browser setup only on the readiness verdict, never by connector key", () => {
+  // The verdict is the server-owned readiness projection's `connect`. The
+  // planner reads nothing else: not the key, the tier, or a roster.
   for (const key of ["acme-shop", "anthropic", "amazon", "doordash", "reddit"]) {
     const keyManifest = manifest(key, { browser: { required: true } });
-    const plan = buildConnectionSetupPlan({ connectorKey: key, manifest: keyManifest });
-    assert.equal(
-      plan.catalogDisposition === "browser_collector_manual",
-      browserEnrollmentSupport(key, keyManifest).canAddAccount,
-      key
-    );
+    const runnable = buildConnectionSetupPlan({
+      browserEnrollmentRunnable: true,
+      connectorKey: key,
+      manifest: keyManifest,
+    });
+    assert.equal(runnable.catalogDisposition, "browser_collector_manual", key);
+    assert.equal(runnable.nextStepKind, "enroll_browser_collector", key);
+    assert.equal(runnable.enrollmentKey, key, key);
+
+    for (const notRunnable of [{ browserEnrollmentRunnable: false }, {}]) {
+      const plan = buildConnectionSetupPlan({ connectorKey: key, manifest: keyManifest, ...notRunnable });
+      assert.equal(plan.catalogDisposition, "browser_bound_runbook", key);
+      assert.equal(plan.nextStepKind, "manual_runbook", key);
+      assert.equal(plan.enrollmentKey, undefined, key);
+    }
   }
 });
 
 test("setup planner marks unproven static-secret connectors with a real credential_capture as experimental, not hidden", () => {
-  // 'mailbox' is synthetic and absent from STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS,
+  // 'mailbox' is synthetic and its manifest declares no live proof,
   // but its manifest declares a real credential_capture block — the same shape
   // Steam/Jellyfin/Apple Contacts declare — so the generic capture form is
   // reachable today. This must surface as an explicit opt-in, not "supported"
@@ -256,31 +265,171 @@ test("GroupMe-shaped manual_action connector with no credential_capture stays un
   assert.notEqual(plan.catalogDisposition, "static_secret_experimental");
 });
 
-test("setup planner marks live-proven static-secret connectors as supported", () => {
-  // Live proof recorded 2026-06-10T22:55Z: env-free container, store-backed runs.
-  //   gmail  run_1781131328336 succeeded
-  //   github run_1781131195649 succeeded + run_1781131489458 scheduled/unattended succeeded
-  //   slack  run_1781131204868 succeeded
-  for (const connectorKey of STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS) {
+// The proof set the shipped manifests intend. A shipped manifest that loses (or
+// gains) a claim changes these lists and fails here, instead of dropping out of
+// a loop that derives its own expectations from the same data.
+const SHIPPED_STATIC_SECRET_LIVE_PROVEN = ["github", "gmail", "slack", "ynab"];
+const SHIPPED_LOCAL_COLLECTOR_PROVEN = [
+  "apple_photos",
+  "claude_code",
+  "codex",
+  "google_messages",
+  "google_takeout",
+  "imessage",
+];
+const SHIPPED_PROVIDER_AUTH_PROVEN = ["google_calendar", "google_contacts", "google_maps_data_portability"];
+
+// Deployment config that satisfies every shipped provider-authorization manifest.
+const SHIPPED_DEPLOYMENT_ENV = {
+  GOOGLE_DATAPORTABILITY_CLIENT_ID: "test-client-id",
+  GOOGLE_DATAPORTABILITY_CLIENT_SECRET: "test-client-secret",
+  GOOGLE_DATAPORTABILITY_REDIRECT_URI: "https://example.test/callback",
+  GOOGLE_OAUTH_CLIENT_ID: "test-client-id",
+  GOOGLE_OAUTH_CLIENT_SECRET: "test-client-secret",
+};
+
+function shippedKeysClaiming(claims: (manifest: ConnectorManifestLike) => boolean): string[] {
+  return readShippedManifests()
+    .filter((entry) => claims(entry.manifest as ConnectorManifestLike))
+    .map((entry) => entry.file.replace(/\.json$/, ""))
+    .sort();
+}
+
+test("the shipped manifests claim exactly the intended proof set", () => {
+  assert.deepEqual(
+    shippedKeysClaiming((m) => isStaticSecretLiveProven(m, "registered_catalog")),
+    SHIPPED_STATIC_SECRET_LIVE_PROVEN
+  );
+  assert.deepEqual(
+    shippedKeysClaiming((m) => isLocalCollectorProven(m, "registered_catalog")),
+    SHIPPED_LOCAL_COLLECTOR_PROVEN
+  );
+  assert.deepEqual(
+    shippedKeysClaiming((m) => isProviderAuthLifecycleProven(m, "registered_catalog")),
+    SHIPPED_PROVIDER_AUTH_PROVEN
+  );
+});
+
+test("each shipped proof claim yields a supported plan from the shipped manifest itself", () => {
+  // Live proof recorded 2026-06-10: env-free container, store-backed runs
+  // (gmail, github, slack; ynab store path). The plan is built from the
+  // manifest as shipped, not a synthesized stand-in.
+  const expected: Record<string, string> = {};
+  for (const key of SHIPPED_STATIC_SECRET_LIVE_PROVEN) expected[key] = "static_secret_connect";
+  for (const key of SHIPPED_LOCAL_COLLECTOR_PROVEN) expected[key] = "local_collector_enroll";
+  for (const key of SHIPPED_PROVIDER_AUTH_PROVEN) expected[key] = "provider_auth_connect";
+  for (const [file, disposition] of Object.entries(expected)) {
+    const shipped = readShippedPolyfillManifest(`${file}.json`) as ConnectorManifestLike;
     const plan = buildConnectionSetupPlan({
-      connectorKey,
-      manifest: staticSecretManifest(connectorKey, "app_password"),
+      connectorKey: canonicalConnectorKey(file),
+      deploymentEnv: SHIPPED_DEPLOYMENT_ENV,
+      manifest: shipped,
+      proofProvenance: "registered_catalog",
     });
-    assert.equal(plan.connectorModality, "api_network", `${connectorKey}: connectorModality`);
-    assert.equal(plan.setupModality, "static_secret", `${connectorKey}: setupModality`);
-    assert.equal(plan.supportState, "supported", `${connectorKey}: supportState`);
-    assert.equal(plan.catalogDisposition, "static_secret_connect", `${connectorKey}: catalogDisposition`);
-    assert.equal(plan.nextStepKind, "capture_static_secret", `${connectorKey}: nextStepKind`);
-    assert.equal(plan.ownerAgentIntent.status, "supported", `${connectorKey}: ownerAgentIntent.status`);
-    assert.equal(plan.ownerAgentIntent.method, "POST", `${connectorKey}: ownerAgentIntent.method`);
-    assert.equal(
-      plan.ownerAgentIntent.nextStepKind,
-      "capture_static_secret",
-      `${connectorKey}: ownerAgentIntent.nextStepKind`
-    );
-    assert.equal(plan.proofGate, null, `${connectorKey}: proofGate`);
-    assert.equal(plan.runbookPath, null, `${connectorKey}: runbookPath`);
+    assert.equal(plan.catalogDisposition, disposition, `${file}: catalogDisposition`);
+    assert.equal(plan.supportState, "supported", `${file}: supportState`);
+    assert.equal(plan.proofGate, null, `${file}: proofGate`);
   }
+});
+
+test("the same shipped claims earn nothing when no server-owned source vouches for the manifest", () => {
+  // A manifest that arrives from anywhere else (a developer-local folder, a
+  // client-supplied object, a self-description) may assert any proof. The
+  // planner reads the claim only when the caller names where the server read
+  // the manifest from.
+  const claimants = new Set([
+    ...SHIPPED_STATIC_SECRET_LIVE_PROVEN,
+    ...SHIPPED_LOCAL_COLLECTOR_PROVEN,
+    ...SHIPPED_PROVIDER_AUTH_PROVEN,
+  ]);
+  for (const entry of readShippedManifests().filter((candidate) => claimants.has(candidate.file.replace(/\.json$/, "")))) {
+    const shipped = entry.manifest as ConnectorManifestLike;
+    const key = canonicalConnectorKey(entry.file.replace(/\.json$/, ""));
+    for (const proofProvenance of [undefined, null] as const) {
+      const plan = buildConnectionSetupPlan({
+        connectorKey: key,
+        deploymentEnv: SHIPPED_DEPLOYMENT_ENV,
+        manifest: shipped,
+        ...(proofProvenance === undefined ? {} : { proofProvenance }),
+      });
+      assert.notEqual(plan.supportState, "supported", `${key}: an unattested manifest is never supported`);
+      assert.notEqual(plan.proofGate, null, `${key}: an unattested manifest stays proof-gated or unsupported`);
+    }
+  }
+});
+
+test("the proof predicates ignore a claim without a named provenance", () => {
+  const claimed: ConnectorManifestLike = {
+    capabilities: {
+      proven: {
+        local_collector: true,
+        provider_auth_lifecycle: true,
+        static_secret_live: { proven: true },
+      },
+    },
+  };
+  for (const provenance of [undefined, null]) {
+    assert.equal(isLocalCollectorProven(claimed, provenance), false);
+    assert.equal(isProviderAuthLifecycleProven(claimed, provenance), false);
+    assert.equal(isStaticSecretLiveProven(claimed, provenance), false);
+  }
+  for (const provenance of ["registered_catalog", "server_pinned_profile"] as const) {
+    assert.equal(isLocalCollectorProven(claimed, provenance), true);
+    assert.equal(isProviderAuthLifecycleProven(claimed, provenance), true);
+    assert.equal(isStaticSecretLiveProven(claimed, provenance), true);
+  }
+});
+
+test("proof claims come from the manifest, so a connector outside any build-time list gets the same plan", () => {
+  const key = "catalog-only-source";
+  const localCollector = buildConnectionSetupPlan({
+    connectorKey: key,
+    manifest: manifest(key, { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
+    proofProvenance: "registered_catalog",
+  });
+  assert.equal(localCollector.catalogDisposition, "local_collector_enroll");
+  assert.equal(localCollector.supportState, "supported");
+
+  const staticSecret = buildConnectionSetupPlan({
+    connectorKey: key,
+    manifest: staticSecretManifest(key, "api_key", true),
+    proofProvenance: "registered_catalog",
+  });
+  assert.equal(staticSecret.catalogDisposition, "static_secret_connect");
+  assert.equal(staticSecret.supportState, "supported");
+  assert.equal(staticSecret.proofGate, null);
+
+  const unproven = buildConnectionSetupPlan({ connectorKey: key, manifest: staticSecretManifest(key) });
+  assert.equal(unproven.catalogDisposition, "static_secret_experimental");
+  assert.equal(unproven.proofGate, "static_secret_live_proof_missing");
+});
+
+test("a proof claim on a different connector's manifest does not leak by key", () => {
+  // The claim is read from the manifest passed in, not looked up by key: the
+  // same key with an unproven manifest stays proof-gated.
+  const plan = buildConnectionSetupPlan({
+    connectorKey: "codex",
+    manifest: manifest("codex", { filesystem: { required: true } }),
+  });
+  assert.equal(plan.catalogDisposition, "local_collector_unproven");
+});
+
+test("a provider-authorization connector outside any build-time list is lifecycle-proven by its manifest", () => {
+  const providerManifest = {
+    ...manifest("fitness-oauth", { network: { required: true } }),
+    capabilities: {
+      auth: { deployment_config: ["FITNESS_OAUTH_CLIENT_ID"], kind: "oauth" },
+      proven: { provider_auth_lifecycle: true },
+    },
+  };
+  const plan = buildConnectionSetupPlan({
+    connectorKey: "fitness-oauth",
+    deploymentEnv: { FITNESS_OAUTH_CLIENT_ID: "test-client-id" },
+    manifest: providerManifest,
+    proofProvenance: "registered_catalog",
+  });
+  assert.equal(plan.catalogDisposition, "provider_auth_connect");
+  assert.equal(plan.nextStepKind, "open_provider_auth");
 });
 
 test("YNAB static-secret setup supports owner-session capture route", () => {
@@ -288,7 +437,8 @@ test("YNAB static-secret setup supports owner-session capture route", () => {
   // catalog picker when YNAB was not in the live-proven roster. Verify the fix.
   const plan = buildConnectionSetupPlan({
     connectorKey: "ynab",
-    manifest: staticSecretManifest("ynab", "personal_access_token"),
+    manifest: staticSecretManifest("ynab", "personal_access_token", true),
+    proofProvenance: "registered_catalog",
   });
   assert.equal(plan.connectorModality, "api_network");
   assert.equal(plan.setupModality, "static_secret");
@@ -305,9 +455,10 @@ test("setup planner treats hybrid filesystem static-secret connectors as credent
   const plan = buildConnectionSetupPlan({
     connectorKey: "slack",
     manifest: {
-      ...staticSecretManifest("slack", "sealed_bundle"),
+      ...staticSecretManifest("slack", "sealed_bundle", true),
       runtime_requirements: { bindings: { filesystem: { required: true }, network: { required: true } } },
     },
+    proofProvenance: "registered_catalog",
   });
   assert.equal(plan.connectorModality, "local_collector");
   assert.equal(plan.setupModality, "static_secret");
@@ -355,6 +506,7 @@ test("setup planner distinguishes provider app readiness from owner authorizatio
   const blocked = buildConnectionSetupPlan({
     connectorKey: "fitness-oauth",
     manifest: providerManifest,
+    proofProvenance: "registered_catalog",
   });
   assert.equal(blocked.connectorModality, "api_network");
   assert.equal(blocked.setupModality, "provider_authorization");
@@ -384,6 +536,7 @@ test("setup planner distinguishes provider app readiness from owner authorizatio
       FITNESS_OAUTH_CLIENT_SECRET: "test-client-secret",
     },
     manifest: providerManifest,
+    proofProvenance: "registered_catalog",
   });
   assert.equal(readyButUnproven.deploymentReadiness.state, "ready");
   assert.equal(readyButUnproven.supportState, "proof_gated");
@@ -465,7 +618,7 @@ const EXPERIMENTAL_WAVE_0807_MANIFEST_FIXTURES = ["steam", "jellyfin", "apple_co
 test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) surface as experimental opt-in, not hidden", async () => {
   for (const connectorId of EXPERIMENTAL_WAVE_0807_MANIFEST_FIXTURES) {
     const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
-    const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest });
+    const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest, proofProvenance: "registered_catalog" });
     assert.equal(plan.setupModality, "static_secret", `${connectorId}: setupModality`);
     assert.equal(plan.supportState, "experimental", `${connectorId}: supportState`);
     assert.equal(plan.catalogDisposition, "static_secret_experimental", `${connectorId}: catalogDisposition`);
@@ -478,11 +631,11 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) surfa
 test("iMessage is a supported local_collector_enroll connector, not proof-gated", async () => {
   // iMessage reads chat.db via node:sqlite (no native module), so it ships in
   // the published @pdpp/local-collector bundle like Claude Code/Codex and is
-  // registered in SUPPORTED_LOCAL_COLLECTOR_CONNECTORS — the enroll path
+  // declared proven in its manifest — the enroll path
   // must reflect that, not the older filesystem-shaped-but-unproven state.
   const connectorId = "imessage";
   const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
-  const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest });
+  const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest, proofProvenance: "registered_catalog" });
   assert.equal(plan.connectorModality, "local_collector", `${connectorId}: connectorModality`);
   assert.equal(plan.catalogDisposition, "local_collector_enroll", `${connectorId}: catalogDisposition`);
   assert.equal(plan.nextStepKind, "enroll_local_collector", `${connectorId}: nextStepKind`);
@@ -494,14 +647,14 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
   // Google Takeout reads an already-extracted GOOGLE_TAKEOUT_DIR from the
   // local filesystem it runs on — exactly the local-collector shape, not a
   // browser-upload or provider-API connector. It is now bundled into
-  // @pdpp/local-collector (SUPPORTED_LOCAL_COLLECTOR_CONNECTORS), so it must
+  // @pdpp/local-collector (its manifest claims `proven.local_collector`), so it must
   // classify as the proven, actionable disposition, not the unproven
   // `local_collector_unproven` disposition a filesystem-shaped connector
   // gets before it ships in that bundle (see the synthetic-manifest test
   // above asserting that disposition directly).
   const connectorId = "google_takeout";
   const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
-  const plan = buildConnectionSetupPlan({ connectorKey: "google-takeout", manifest: shippedManifest });
+  const plan = buildConnectionSetupPlan({ connectorKey: "google-takeout", manifest: shippedManifest, proofProvenance: "registered_catalog" });
   assert.equal(plan.connectorModality, "local_collector");
   assert.equal(plan.catalogDisposition, "local_collector_enroll");
   assert.equal(plan.supportState, "supported");
@@ -510,7 +663,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
 
 test("Apple Photos and Google Messages are supported local_collector_enroll connectors, not proof-gated", async () => {
   // Both now ship in the published @pdpp/local-collector bundle
-  // (LOCAL_COLLECTOR_DEFINITIONS + SUPPORTED_LOCAL_COLLECTOR_CONNECTORS +
+  // (LOCAL_COLLECTOR_DEFINITIONS + a `proven.local_collector` claim +
   // tsconfig.build.json packaging), so Add Source must surface the guided
   // enroll path, not the proof-gated "classified but not advertised" state.
   // Real device/account proof (a macOS Photos.app export; a gmcli-paired
@@ -522,7 +675,7 @@ test("Apple Photos and Google Messages are supported local_collector_enroll conn
   ];
   for (const [connectorId, connectorKey] of cases) {
     const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
-    const plan = buildConnectionSetupPlan({ connectorKey, manifest: shippedManifest });
+    const plan = buildConnectionSetupPlan({ connectorKey, manifest: shippedManifest, proofProvenance: "registered_catalog" });
     assert.equal(plan.connectorModality, "local_collector", `${connectorId}: connectorModality`);
     assert.equal(plan.catalogDisposition, "local_collector_enroll", `${connectorId}: catalogDisposition`);
     assert.equal(plan.nextStepKind, "enroll_local_collector", `${connectorId}: nextStepKind`);
@@ -537,12 +690,12 @@ test("wave-0807 GroupMe manifest is a static-secret experimental connector, not 
   // for the experimental static-secret path — a deliberate change from the
   // earlier manual_action/no-credential_capture shape this test used to
   // assert against. Counterweight: GroupMe is not (and must not silently
-  // become) a member of STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS, so it must
+  // become) a connector whose manifest declares live proof, so it must
   // land on the unproven "experimental" branch, never the fully-supported
   // "static_secret_connect"/supported branch that live-proven connectors get.
   const groupmeManifest = readShippedPolyfillManifest("groupme.json");
   assert.equal(
-    STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS.includes("groupme" as never),
+    isStaticSecretLiveProven(groupmeManifest, "registered_catalog"),
     false,
     "GroupMe must not be added to the live-proven roster without a real dated live env-free run"
   );
@@ -566,6 +719,7 @@ test("wave-0807 Google Calendar/Contacts keep the deployment-app vs owner-accoun
       connectorKey: connectorId,
       deploymentEnv: {},
       manifest: shippedManifest,
+      proofProvenance: "registered_catalog",
     });
     assert.equal(blocked.setupModality, "provider_authorization", `${connectorId}: setupModality`);
     assert.equal(
@@ -583,12 +737,31 @@ test("wave-0807 Google Calendar/Contacts keep the deployment-app vs owner-accoun
         GOOGLE_OAUTH_CLIENT_SECRET: "test-client-secret",
       },
       manifest: shippedManifest,
+      proofProvenance: "registered_catalog",
     });
     assert.equal(configured.deploymentReadiness.state, "ready", `${connectorId}: deployment app configured`);
-    // Per-owner authorization is still unproven independent of deployment
-    // config — the two facts stay distinct, exactly as designed.
-    assert.equal(configured.supportState, "proof_gated", `${connectorId}: owner authorization still unproven`);
-    assert.equal(configured.catalogDisposition, "provider_auth_proof_gated", `${connectorId}: catalogDisposition`);
+    // The shipped manifest claims the provider-authorization lifecycle is
+    // proven, so a configured deployment is connectable.
+    assert.equal(configured.supportState, "supported", `${connectorId}: manifest claims lifecycle proof`);
+    assert.equal(configured.catalogDisposition, "provider_auth_connect", `${connectorId}: catalogDisposition`);
+
+    // The proof is the manifest's claim, independent of deployment config:
+    // without the claim the same deployment stays proof-gated.
+    const withoutClaim = buildConnectionSetupPlan({
+      configuredProviderAuthConnectorKeys: [connectorId],
+      connectorKey: connectorId,
+      deploymentEnv: {
+        GOOGLE_OAUTH_CLIENT_ID: "test-client-id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "test-client-secret",
+      },
+      manifest: {
+        ...shippedManifest,
+        capabilities: { ...shippedManifest.capabilities, proven: {} },
+      },
+      proofProvenance: "registered_catalog",
+    });
+    assert.equal(withoutClaim.supportState, "proof_gated", `${connectorId}: no claim, owner authorization unproven`);
+    assert.equal(withoutClaim.catalogDisposition, "provider_auth_proof_gated", `${connectorId}: catalogDisposition`);
   }
 });
 
@@ -597,4 +770,133 @@ test("classifyConnectorIntentModality preserves filesystem over browser over net
   assert.equal(classifyConnectorIntentModality(manifest("x", { browser: {}, network: {} })), "browser_bound");
   assert.equal(classifyConnectorIntentModality(manifest("x", { browser: {}, filesystem: {} })), "local_collector");
   assert.equal(classifyConnectorIntentModality(null), "unknown");
+});
+
+function customManifest(
+  connectorId: string,
+  bindings: Readonly<Record<string, unknown>>,
+  extra: Partial<ConnectorManifestLike> = {}
+): ConnectorManifestLike {
+  return {
+    connector_id: connectorId,
+    connector_key: connectorId,
+    display_name: "A Third-Party Connector",
+    runtime_requirements: { bindings },
+    ...extra,
+  };
+}
+
+test("counterweight: a custom third-party connector_id, unknown to every shipped manifest, still classifies purely from its own manifest traits", () => {
+  const thirdPartyId = "acme-widgets-tracker";
+  assert.ok(
+    !readShippedManifests().some(({ manifest }) => (manifest as { connector_key?: unknown }).connector_key === thirdPartyId),
+    "test fixture collided with a real shipped connector key"
+  );
+
+  // A third-party filesystem connector that declares the exact same proof
+  // trait a first-party one would (capabilities.proven.local_collector) must
+  // be treated identically to a first-party proven connector — proving the
+  // RI reads the trait, not a hardcoded id.
+  const provenLocalCollector = buildConnectionSetupPlan({
+    connectorKey: thirdPartyId,
+    manifest: customManifest(
+      thirdPartyId,
+      { filesystem: { required: true } },
+      { capabilities: { proven: undefined } as never }
+    ),
+  });
+  assert.equal(provenLocalCollector.connectorModality, "local_collector");
+  assert.equal(
+    provenLocalCollector.supportState,
+    "proof_gated",
+    "an unproven third-party filesystem connector must stay proof-gated, exactly like an unproven first-party one"
+  );
+
+  // A third-party browser-bound connector: classification must come from
+  // runtime_requirements.bindings.browser, not from a connector list.
+  const browserBound = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
+    connectorKey: thirdPartyId,
+    manifest: customManifest(thirdPartyId, { browser: { required: true } }),
+  });
+  assert.equal(browserBound.connectorModality, "browser_bound");
+  // The server's readiness verdict, not the key, offers browser setup; given
+  // the same verdict it offers it exactly as it would for a bundled connector.
+  assert.equal(browserBound.catalogDisposition, "browser_collector_manual");
+
+  // A third-party static-secret connector with a real credential_capture
+  // block reaches the same generic experimental path a first-party
+  // connector without a live-proof entry would — proving the classifier
+  // reads setup.credential_capture, not capabilities.proven.static_secret_live
+  // membership.
+  const staticSecret = buildConnectionSetupPlan({
+    connectorKey: thirdPartyId,
+    manifest: customManifest(
+      thirdPartyId,
+      { network: { required: true } },
+      {
+        setup: {
+          credential_capture: {
+            fields: [
+              {
+                env: ["ACME_WIDGETS_API_KEY"],
+                label: "API key",
+                name: "secret",
+                required: true,
+                secret: true,
+                type: "password",
+              },
+            ],
+            kind: "api_key",
+            label: "Acme Widgets API key",
+          },
+          modality: "static_secret",
+        },
+      }
+    ),
+  });
+  assert.equal(staticSecret.setupModality, "static_secret");
+  assert.equal(staticSecret.supportState, "experimental");
+  assert.equal(staticSecret.catalogDisposition, "static_secret_experimental");
+
+  // canonicalConnectorKey carries no connector list, so the third-party id
+  // resolves to its key in URL form and bare form alike.
+  assert.equal(canonicalConnectorKey(`https://registry.pdpp.dev/connectors/${thirdPartyId}`), thirdPartyId);
+  assert.equal(canonicalConnectorKey(thirdPartyId), thirdPartyId);
+  assert.equal(isConnectorKey(thirdPartyId), true);
+});
+
+test("classifyConnectorSetupModality never special-cases a specific connector id", () => {
+  // A first-party-shaped id and a third-party id with byte-identical
+  // manifests (same bindings, same setup block) must classify identically.
+  // If this ever fails, some branch in classifyConnectorSetupModality started
+  // keying off the id rather than the manifest shape.
+  const bindings = { network: { required: true } };
+  const firstPartyLike = classifyConnectorSetupModality(
+    "gmail",
+    customManifest("gmail", bindings, {
+      setup: {
+        credential_capture: {
+          fields: [{ env: ["X_SECRET"], label: "x", name: "secret", required: true, secret: true, type: "password" }],
+          kind: "app_password",
+          label: "x",
+        },
+        modality: "static_secret",
+      },
+    })
+  );
+  const thirdPartyLike = classifyConnectorSetupModality(
+    "totally-unrelated-vendor",
+    customManifest("totally-unrelated-vendor", bindings, {
+      setup: {
+        credential_capture: {
+          fields: [{ env: ["X_SECRET"], label: "x", name: "secret", required: true, secret: true, type: "password" }],
+          kind: "app_password",
+          label: "x",
+        },
+        modality: "static_secret",
+      },
+    })
+  );
+  assert.equal(firstPartyLike, thirdPartyLike);
 });

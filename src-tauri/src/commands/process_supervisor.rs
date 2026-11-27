@@ -93,6 +93,13 @@ fn set_case_insensitive_environment_value(
     environment.insert(key, value);
 }
 
+/// The group grace used by both Desktop Quit and Unix shutdown.
+pub(crate) const DESKTOP_PROCESS_GROUP_GRACE: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const PARENT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(8);
+#[cfg(unix)]
+static PARENT_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
 #[cfg(unix)]
 type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
 
@@ -319,13 +326,40 @@ fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
         thread::Builder::new()
             .name("sidecar-signal-handler".to_string())
             .spawn(move || {
-                if let Some(signal) = signals.forever().next() {
-                    if let Ok(process_groups) = signal_registry.lock() {
-                        for process_group in process_groups.iter().copied() {
-                            signal_process_group_direct(process_group as u32, libc::SIGKILL);
-                        }
-                    }
+                let first_signal = signals.forever().next();
+                if let Some(signal) = first_signal {
+                    // We are on the iterator's thread, not in a signal callback.
+                    PARENT_SHUTTING_DOWN.store(true, Ordering::Release);
+                    let started = Instant::now();
+                    let mut term_sent = false;
+                    drive_parent_shutdown(
+                        signal == libc::SIGHUP,
+                        || started.elapsed(),
+                        || signals.pending().next().is_some(),
+                        thread::sleep,
+                        |force| {
+                            // A group ID must remain registered while signalled.
+                            let groups = match signal_registry.try_lock() {
+                                Ok(groups) => groups,
+                                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                                Err(std::sync::TryLockError::WouldBlock) => return false,
+                            };
+                            if groups.is_empty() {
+                                return true;
+                            }
+                            if force || !term_sent {
+                                let child_signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+                                for group in groups.iter().copied() {
+                                    signal_process_group_direct(group as u32, child_signal);
+                                }
+                                term_sent = true;
+                            }
+                            force
+                        },
+                    );
                     let _ = signal_hook::low_level::emulate_default_handler(signal);
+                    // A competing handler must not keep the parent alive.
+                    unsafe { libc::_exit(128 + signal) }
                 }
             })
             .map_err(|error| format!("failed to start shutdown signal handler: {error}"))?;
@@ -338,6 +372,89 @@ fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
 }
 
 #[cfg(unix)]
+fn drive_parent_shutdown(
+    mut force: bool,
+    mut elapsed: impl FnMut() -> Duration,
+    mut repeated_signal: impl FnMut() -> bool,
+    mut sleep: impl FnMut(Duration),
+    mut step: impl FnMut(bool) -> bool,
+) {
+    const POLL: Duration = Duration::from_millis(20);
+    loop {
+        let now = elapsed();
+        force |= repeated_signal() || now >= DESKTOP_PROCESS_GROUP_GRACE;
+        if step(force) || now >= PARENT_SHUTDOWN_BUDGET {
+            break;
+        }
+        let deadline = if force {
+            PARENT_SHUTDOWN_BUDGET
+        } else {
+            DESKTOP_PROCESS_GROUP_GRACE
+        };
+        sleep(POLL.min(deadline.saturating_sub(now)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod parent_shutdown_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn simulate(
+        drain_at: Option<Duration>,
+        repeat_at: Option<Duration>,
+        locked: bool,
+    ) -> (Duration, Vec<(Duration, bool)>) {
+        let now = Cell::new(Duration::ZERO);
+        let mut actions = Vec::new();
+        drive_parent_shutdown(
+            false,
+            || now.get(),
+            || repeat_at.is_some_and(|at| now.get() >= at),
+            |delta| now.set(now.get() + delta),
+            |force| {
+                if locked {
+                    return false;
+                }
+                if drain_at.is_some_and(|at| now.get() >= at) {
+                    return true;
+                }
+                if actions.is_empty() || force {
+                    actions.push((now.get(), force));
+                }
+                force
+            },
+        );
+        (now.get(), actions)
+    }
+
+    #[test]
+    fn parent_signal_gives_a_draining_group_term_only() {
+        let drained = Duration::from_millis(40);
+        assert_eq!(
+            simulate(Some(drained), None, false),
+            (drained, vec![(Duration::ZERO, false)])
+        );
+    }
+
+    #[test]
+    fn parent_signal_escalates_after_grace_or_a_second_signal() {
+        let repeat = Duration::from_millis(40);
+        for (second, expected) in [(None, DESKTOP_PROCESS_GROUP_GRACE), (Some(repeat), repeat)] {
+            assert_eq!(
+                simulate(None, second, false),
+                (expected, vec![(Duration::ZERO, false), (expected, true)])
+            );
+        }
+    }
+
+    #[test]
+    fn parent_signal_stops_waiting_if_the_registry_stays_busy() {
+        assert_eq!(simulate(None, None, true), (PARENT_SHUTDOWN_BUDGET, vec![]));
+    }
+}
+
+#[cfg(unix)]
 fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
     let registry = PROCESS_GROUP_REGISTRY
         .get()
@@ -345,10 +462,13 @@ fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
         .ok_or_else(|| {
             SupervisorError::Message("parent signal handlers are not installed".to_string())
         })?;
-    registry
+    let mut groups = registry
         .lock()
-        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?
-        .insert(process_group as libc::pid_t);
+        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?;
+    if PARENT_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return Err(SupervisorError::Message("parent is shutting down".to_string()));
+    }
+    groups.insert(process_group as libc::pid_t);
     Ok(())
 }
 
@@ -1368,6 +1488,8 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         match register_process_group(child.id()) {
             Ok(()) => Some(child.id() as libc::pid_t),
             Err(error) => {
+                // This unregistered group still has its original unreaped leader.
+                signal_process_group_direct(child.id(), libc::SIGKILL);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error);

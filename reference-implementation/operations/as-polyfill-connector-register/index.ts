@@ -33,8 +33,14 @@ export interface AsPolyfillConnectorRegisterDependencies {
    * whether or not that version is still current; null when none was recorded.
    */
   getAcceptedDeclarationDigest: (connectorId: string, version: string) => Promise<string | null> | string | null;
-  /** Produces the exact representation `registerConnector` persists, and its storage key. */
-  normalizeManifestForStorage: (manifest: Record<string, unknown>) => {
+  /**
+   * Produces the exact representation `registerConnector` persists, and its storage key. `context` carries
+   * the declaration already retained for the connector, when there is one.
+   */
+  normalizeManifestForStorage: (
+    manifest: Record<string, unknown>,
+    context: { retainedSourceDeclaration?: unknown }
+  ) => {
     connectorId: string;
     storedManifest: Record<string, unknown>;
   };
@@ -100,7 +106,13 @@ export async function executeAsPolyfillConnectorRegister(
   // equivocation and the previously accepted content is retained. Same
   // content is an idempotent re-registration; a new version is a new key.
   deps.validateManifest(manifest as Record<string, unknown>);
-  const { connectorId, storedManifest } = deps.normalizeManifestForStorage(manifest as Record<string, unknown>);
+  // The candidate is projected under the identity the stored row already holds, exactly as registerConnector
+  // does. Without it, a manifest that names no source would be refused on the fresh path.
+  const retained = await acceptedManifestFor(deps, connectorKey);
+  const { connectorId, storedManifest } = deps.normalizeManifestForStorage(
+    manifest as Record<string, unknown>,
+    retained?.source_declaration === undefined ? {} : { retainedSourceDeclaration: retained.source_declaration }
+  );
   const version = storedManifest.version;
   const incomingDigest = deps.declarationDigest(storedManifest);
   let acceptedDigest: string | null = null;

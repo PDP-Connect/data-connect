@@ -320,6 +320,22 @@ ENV NODE_ENV=production \
     PDPP_RECONCILE_POLYFILL_MANIFESTS=1 \
     PDPP_REFERENCE_REVISION=${PDPP_REFERENCE_REVISION}
 
+# cloudflared: the cloudflare-named reachability provider runs it from PATH.
+# Pinned by release and by per-architecture SHA-256 from the release notes.
+ARG TARGETARCH
+ARG CLOUDFLARED_VERSION=2026.11.0
+ARG CLOUDFLARED_SHA256_AMD64=51f7c68b57ed7269164075d7e789efce5b59355982f06392deeb037d982a51fd
+ARG CLOUDFLARED_SHA256_ARM64=abe54a006acf9faf2d19ee9d953cb0d0804e92f59c5382a162e57b84d086f56f
+RUN case "${TARGETARCH}" in \
+      amd64) sha="${CLOUDFLARED_SHA256_AMD64}" ;; \
+      arm64) sha="${CLOUDFLARED_SHA256_ARM64}" ;; \
+      *) echo "no cloudflared build pinned for TARGETARCH='${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TARGETARCH}" \
+    && echo "${sha}  /usr/local/bin/cloudflared" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/cloudflared
+
 # /app: the reference-browser layout (full source tree with built dist/
 # output), which is exactly what core-supervisor.ts's
 # `node /app/reference-implementation/server/index.ts` (cwd /app) needs.

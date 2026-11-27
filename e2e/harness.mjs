@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { once } from "node:events"
 import { setTimeout as delay } from "node:timers/promises"
+import { requireDiskFloor } from "../scripts/reachability/disk-floor.mjs"
 import {
   assertLoopbackOnly,
   MARKER,
@@ -49,8 +50,15 @@ export function cleanEnvironment(env = process.env) {
         "LC_ALL",
         "TEST_TMPDIR",
         "PLAYWRIGHT_BROWSERS_PATH",
+        "PLAYWRIGHT_EXECUTABLE_PATH",
       ].includes(name)
     )
+  )
+}
+
+function diskWaiverEnvironment(env = process.env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => name.startsWith("PDPP_LOCAL_DISK_"))
   )
 }
 
@@ -249,9 +257,16 @@ async function waitReady(url, child, signal) {
   }
 }
 
+const reachabilityModes = new Map([
+  ["--reachability-setup", "setup"],
+  ["--reachability", "unknown"],
+])
+
 async function startStack({ root, launch, signal }, args) {
+  const reachabilityMode = reachabilityModes.get(args.find(arg => reachabilityModes.has(arg)))
+  args = args.filter(arg => !reachabilityModes.has(arg))
   const data = join(root, "data")
-  await mkdir(data)
+  await mkdir(data, { mode: 0o700 })
   const nonce = randomBytes(24).toString("hex")
   const password = randomBytes(32).toString("hex")
   await writeFile(join(data, MARKER), nonce, { mode: 0o600 })
@@ -274,9 +289,11 @@ async function startStack({ root, launch, signal }, args) {
     AS_PORT: String(asPort),
     RS_PORT: String(rsPort),
   }
-  const reference = launch(["--import", "tsx", "server/index.ts"], {
+  const reference = launch(["--import", "tsx", ...(reachabilityMode ? [join(repo, "scripts/reachability/reference-fixture.mjs"), reachabilityMode] : ["server/index.ts"])], {
     cwd: join(repo, "reference-implementation"),
-    extraEnv: shared,
+    // cleanEnvironment drops the local disk waiver; the fixture applies the same
+    // floor check, so hand it the waiver the harness already honoured.
+    extraEnv: { ...shared, ...diskWaiverEnvironment() },
   })
   console.log(
     `Reference startup: ${await waitReady(`${shared.PDPP_AS_URL}/.well-known/oauth-authorization-server`, reference, signal)}s`
@@ -291,6 +308,9 @@ async function startStack({ root, launch, signal }, args) {
   const consoleOptions = {
     cwd: join(repo, "apps/console"),
     extraEnv: { ...shared, NEXT_TELEMETRY_DISABLED: "1" },
+  }
+  if (reachabilityMode) {
+    await requireDiskFloor(process.env, repo, 110_000_000_000)
   }
   const buildStarted = performance.now()
   const build = launch([next, "build", "--webpack"], consoleOptions)
@@ -356,14 +376,17 @@ export async function runInSandbox(args, wrapper = SANDBOX) {
     throw new Error(
       `${wrapper[0]} is missing, and the E2E harness supports no other isolation. No servers started.`
     )
+  const ownedRoot = wrapper === SANDBOX && args.some(arg => reachabilityModes.has(arg))
   const child = spawn(
     wrapper[0],
-    [...wrapper.slice(1), process.execPath, ...args],
+    ownedRoot
+      ? ["--isolate", "cgroup", "--", process.execPath, join(here, "owned-root-sandbox.mjs"), "--", process.execPath, ...args]
+      : [...wrapper.slice(1), process.execPath, ...args],
     {
       detached: true,
       stdio: ["ignore", "inherit", "inherit", "pipe"],
       // Fail before any launch if cgroup or bwrap enforcement is missing.
-      env: { ...process.env, TEST_SANDBOX_REQUIRE: "1" },
+      env: { ...process.env, TEST_SANDBOX_REQUIRE: "1", ...(ownedRoot ? { TEST_SANDBOX_NET: "host" } : {}) },
     }
   )
   const channel = child.stdio[3]

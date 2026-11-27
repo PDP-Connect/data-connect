@@ -1,14 +1,16 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/google_takeout",
+		"display": {
+			"name": "Google Takeout"
+		}
+	},
 	"connector_key": "google-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-	"version": "0.1.0",
+	"version": "0.1.22",
 	"display_name": "Google Takeout",
-	"brand": {
-		"icon": "icons/google_takeout.svg",
-		"background_color": "#FBBC05"
-	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
@@ -306,45 +308,8 @@
 			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"description": "Safe coverage status for known Google Takeout local stores.",
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"store": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string"
-					},
-					"reason": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
-					}
-				},
-				"required": ["id", "store", "status", "reason"]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"required": false,
-			"coverage_policy": "inventory_only",
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "device_heartbeat"
-		}
-	],
+			}
+		],
 	"reason_display_messages": {
 		"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
 		"history_not_found": "We couldn't find any history to import",

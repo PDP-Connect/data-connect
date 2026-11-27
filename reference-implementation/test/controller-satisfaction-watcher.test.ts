@@ -23,7 +23,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import type { ActiveRunRecord, ScheduleRecord, SchedulerStore } from "../server/stores/scheduler-store.ts";
 
-const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/self-heal-test";
+const CONNECTOR_ID = "self-heal-test";
 const INSTANCE_ID = "cin_self_heal";
 const OWNER_A = "owner_self_heal_a";
 const OWNER_B = "owner_self_heal_b";

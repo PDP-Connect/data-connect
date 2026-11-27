@@ -1,0 +1,468 @@
+{
+  "source": "PDP-Connect/data-connectors@40a78779bec1fb24aa739650fdf3ea0c3275dd09",
+  "connectors": {
+    "anthropic": {
+      "version": "0.2.67",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "host_download_capture",
+            "host_archive_extraction",
+            "host_archive_entry_chunk_read"
+          ]
+        }
+      }
+    },
+    "anthropic_live": {
+      "version": "0.3.17",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation"
+          ]
+        }
+      }
+    },
+    "character_ai": {
+      "version": "0.1.9",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ],
+          "constraints": {
+            "hosts": [
+              "https://character.ai",
+              "https://neo.character.ai"
+            ]
+          }
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "chatgpt": {
+      "version": "0.3.15",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    },
+    "discord_browser": {
+      "version": "0.1.20",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "facebook": {
+      "version": "0.1.12",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    },
+    "github_browser": {
+      "version": "0.3.20",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "host_http_request"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation",
+            "page_content_read",
+            "page_condition_wait",
+            "host_http_request"
+          ]
+        }
+      }
+    },
+    "icloud_notes": {
+      "version": "0.1.47",
+      "bindings": {
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "instinct": {
+      "version": "0.1.10",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "linkedin": {
+      "version": "0.3.44",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "meta": {
+      "version": "0.4.43",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    },
+    "mountain_project": {
+      "version": "0.1.2",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ],
+          "constraints": {
+            "hosts": [
+              "https://www.mountainproject.com"
+            ]
+          }
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "muse": {
+      "version": "0.1.12",
+      "bindings": {
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    },
+    "oura_browser": {
+      "version": "0.1.53",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch",
+            "host_http_request"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation",
+            "host_http_request"
+          ]
+        }
+      }
+    },
+    "perplexity": {
+      "version": "0.1.10",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ],
+          "constraints": {
+            "hosts": [
+              "https://www.perplexity.ai"
+            ]
+          }
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation"
+          ],
+          "constraints": {
+            "navigate": [
+              "https://www.perplexity.ai"
+            ]
+          }
+        }
+      }
+    },
+    "polar_flow": {
+      "version": "0.1.1",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ],
+          "constraints": {
+            "hosts": [
+              "https://flow.polar.com",
+              "https://sleep-api.flow.polar.com"
+            ]
+          }
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "reddit": {
+      "version": "0.4.8",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "slack_browser": {
+      "version": "0.1.4",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation"
+          ]
+        }
+      }
+    },
+    "spotify": {
+      "version": "0.1.59",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation"
+          ]
+        }
+      }
+    },
+    "strava_browser": {
+      "version": "0.1.48",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch",
+            "host_http_request"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation",
+            "host_http_request"
+          ]
+        }
+      }
+    },
+    "tiktok": {
+      "version": "0.3.15",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "whatsapp_web": {
+      "version": "0.1.10",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    },
+    "x_browser": {
+      "version": "0.1.20",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_script_evaluation",
+            "page_navigation"
+          ]
+        }
+      }
+    },
+    "youtube": {
+      "version": "0.2.49",
+      "bindings": {
+        "network": {
+          "required": true,
+          "features": [
+            "same_origin_page_fetch"
+          ]
+        },
+        "browser": {
+          "required": true,
+          "features": [
+            "page_navigation",
+            "page_script_evaluation",
+            "page_condition_wait"
+          ]
+        }
+      }
+    }
+  }
+}

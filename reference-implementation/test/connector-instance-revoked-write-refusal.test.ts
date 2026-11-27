@@ -36,6 +36,7 @@ import {
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const DEDICATED_POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
@@ -67,27 +68,30 @@ function recordEnvelope(id: string) {
 }
 
 function manifest() {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: CONNECTOR_ID,
-    display_name: "Revoked Write Refusal Probe Connector",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: STREAM,
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" }, value: { type: ["string", "null"] } },
-          required: ["id"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: CONNECTOR_ID,
+      display_name: "Revoked Write Refusal Probe Connector",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: STREAM,
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" }, value: { type: ["string", "null"] } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}` }
+  );
 }
 
 // ---------------------------------------------------------------------------

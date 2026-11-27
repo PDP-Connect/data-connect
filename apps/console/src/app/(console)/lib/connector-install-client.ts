@@ -20,6 +20,11 @@ import {
   parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
+import {
+  type ConnectorReadiness,
+  parseConnectorReadinessResponse,
+  selectConnectorReadiness,
+} from "./connector-readiness-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
 import {
   isConnectorInstallRouteUnavailableError,
@@ -103,6 +108,18 @@ export async function listConnectorInstallStatus(): Promise<ConnectorInstallStat
 export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[]> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/local-sources");
   return [...parseConnectorLocalSourcesResponse(payload)];
+}
+
+/**
+ * The server's browser-setup verdict for one connector, or null when the
+ * response holds none for it. The endpoint answers for many connectors, so the
+ * entry is chosen by its key, never by position.
+ */
+export async function getConnectorReadiness(connectorId: string): Promise<ConnectorReadiness | null> {
+  const payload = await connectorInstallFetch(
+    `/v1/owner/connector-install/readiness?connector_id=${encodeURIComponent(connectorId)}`
+  );
+  return selectConnectorReadiness(parseConnectorReadinessResponse(payload), connectorId);
 }
 
 /**

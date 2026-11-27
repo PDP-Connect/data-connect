@@ -27,6 +27,7 @@ const TOP_LEVEL_REGEX_11 = /retry_after_seconds/;
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -100,7 +101,7 @@ function makeManifest({ connectorIdSuffix, refreshPolicy }: { connectorIdSuffix:
     streams: unknown[];
     capabilities?: { refresh_policy: unknown };
   } = {
-    connector_id: `https://registry.pdpp.test/connectors/refresh-policy-${connectorIdSuffix}`,
+    connector_id: `refresh-policy-${connectorIdSuffix}`,
     display_name: "Refresh policy fixture",
     protocol_version: "0.1.0",
     runtime_requirements: { bindings: { network: { required: true } } },
@@ -123,10 +124,13 @@ function makeManifest({ connectorIdSuffix, refreshPolicy }: { connectorIdSuffix:
     ],
     version: "0.1.0",
   };
+  const declaredManifest = withFixtureSourceDeclaration(manifest, {
+    sourceId: `https://registry.pdpp.test/connectors/refresh-policy-${connectorIdSuffix}`,
+  });
   if (refreshPolicy !== undefined) {
-    manifest.capabilities = { refresh_policy: refreshPolicy };
+    declaredManifest.capabilities = { refresh_policy: refreshPolicy };
   }
-  return manifest;
+  return declaredManifest;
 }
 
 test("manifest without capabilities still registers (refresh_policy is optional)", async () => {

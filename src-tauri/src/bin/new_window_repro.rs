@@ -8,7 +8,7 @@
 //! prior rounds failed:
 //!
 //! ROUND 1 (a plain `<a target="_blank" rel="noopener">` anchor, tested via
-//! `on_new_window`) was tested by Tim with a real pointer click and did NOT
+//! `on_new_window`) was tested by hand with a real pointer click and did NOT
 //! reach the handler -- WebKitGTK evidently does not route target=_blank
 //! anchor activation through `on_new_window`.
 //!

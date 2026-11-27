@@ -13,12 +13,15 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
+import { createConnectorInstallService } from "../server/connector-install/index.ts";
+import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-06-01T00:00:00.000Z";
@@ -74,8 +77,17 @@ async function withServer(
   fn: (ctx: { asUrl: string; rsUrl: string }) => Promise<void>,
   options: { configuredProviderAuthConnectorKeys?: readonly string[] } = {}
 ): Promise<void> {
+  // Registration alone is not code availability: browser-bound connectors get a
+  // verified developer-local artifact (see `registerConnector`) and the host
+  // looks browser-capable. The signed catalog is stubbed empty; no network.
+  fixtures = createBrowserArtifactFixtures();
+  const restoreHost = setBrowserHostCapability(true);
   const server = await startServer({
     asPort: 0,
+    connectorInstallService: createConnectorInstallService({
+      ...installedConnectorManifestRegistration,
+      catalogLoader: async () => [],
+    }),
     ...(options.configuredProviderAuthConnectorKeys === undefined
       ? {}
       : { configuredProviderAuthConnectorKeys: options.configuredProviderAuthConnectorKeys }),
@@ -91,6 +103,9 @@ async function withServer(
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+    restoreHost();
+    fixtures?.close();
+    fixtures = null;
   }
 }
 
@@ -184,22 +199,108 @@ async function approveClientGrant(
 }
 
 function loadManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
   return entry.manifest as Record<string, unknown>;
 }
 
-async function registerConnector(asUrl: string, manifest: Record<string, unknown>): Promise<Record<string, unknown>> {
+function staticSecretManifest(connectorKey: string, tier: string, browserBound = false): Record<string, unknown> {
+  return {
+    capabilities: {
+      public_listing: { tier },
+    },
+    connector_id: `https://registry.pdpp.dev/connectors/${connectorKey}`,
+    connector_key: connectorKey,
+    display_name: `Synthetic ${connectorKey}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: {
+      bindings: {
+        ...(browserBound ? { browser: { required: true } } : {}),
+        network: { required: true },
+      },
+    },
+    setup: {
+      credential_capture: {
+        fields: [
+          {
+            env: [`${connectorKey.toUpperCase()}_SECRET`],
+            label: "Provider secret",
+            name: "secret",
+            required: true,
+            secret: true,
+            type: "password",
+          },
+        ],
+        kind: "api_key",
+        label: "Synthetic provider credentials",
+      },
+      modality: "static_secret",
+    },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
+function browserRunbookFixture(connectorKey: string): Record<string, unknown> {
+  return {
+    capabilities: { public_listing: { tier: "supported" } },
+    connector_id: `https://registry.pdpp.dev/connectors/${connectorKey}`,
+    connector_key: connectorKey,
+    display_name: `Synthetic ${connectorKey}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: {
+      bindings: {
+        browser: { required: true },
+        network: { required: true },
+      },
+    },
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  };
+}
+
+let fixtures: ReturnType<typeof createBrowserArtifactFixtures> | null = null;
+
+async function registerConnector(
+  asUrl: string,
+  manifest: Record<string, unknown>,
+  options: { publish?: boolean } = {}
+): Promise<Record<string, unknown>> {
+  const registered = options.publish === false ? manifest : ((await fixtures?.publish(manifest)) ?? manifest);
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(manifest),
+    body: JSON.stringify(registered),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
   const responseBody = await resp.text();
   assert.equal(resp.status, 201, `register ${manifest.connector_id} failed: ${resp.status} ${responseBody}`);
-  return manifest;
+  return registered;
 }
 
 interface SeedInstanceInput {
@@ -252,7 +353,8 @@ test("owner-agent bearer lists connector templates with related connection summa
       ...asRecord(listedUnprovenManifest.capabilities),
       public_listing: { tier: "preview" },
     };
-    await registerConnector(asUrl, listedUnprovenManifest);
+    // Registered only: no artifact is installed, so no browser setup is runnable.
+    await registerConnector(asUrl, listedUnprovenManifest, { publish: false });
     const amazonKey = canonicalConnectorKey(amazonManifest.connector_id);
     assert.ok(amazonKey, "amazon manifest must resolve a canonical connector key");
     await seedInstance({
@@ -322,16 +424,12 @@ test("owner-agent bearer lists connector templates with related connection summa
 
 test("owner-template projection separates browser owner-session setup from owner-agent REST support", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
-    await registerConnector(asUrl, loadManifest("chatgpt"));
+    await registerConnector(asUrl, staticSecretManifest("chatgpt", "supported", true));
     const browserManualManifest = loadManifest("chase");
     browserManualManifest.setup = undefined;
     await registerConnector(asUrl, browserManualManifest);
-    const browserRunbookManifest = loadManifest("doordash");
-    browserRunbookManifest.capabilities = {
-      ...asRecord(browserRunbookManifest.capabilities),
-      public_listing: { tier: "supported" },
-    };
-    await registerConnector(asUrl, browserRunbookManifest);
+    const browserRunbookManifest = browserRunbookFixture("doordash");
+    await registerConnector(asUrl, browserRunbookManifest, { publish: false });
 
     const ownerToken = await issueOwnerToken(asUrl);
     const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -379,7 +477,7 @@ test("owner-template setup plan offers a catalog-installed browser connector by 
     acmeManifest.display_name = "Acme Shop";
     acmeManifest.setup = undefined;
     acmeManifest.capabilities = { ...asRecord(acmeManifest.capabilities), public_listing: { tier: "preview" } };
-    await registerConnector(asUrl, acmeManifest);
+    await registerConnector(asUrl, withFixtureSourceDeclaration(acmeManifest));
 
     const ownerToken = await issueOwnerToken(asUrl);
     const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -485,7 +583,7 @@ test("client grant bearer cannot list owner connector templates", async () => {
     });
     const clientToken = await approveClientGrant(
       asUrl,
-      String(manifest.connector_id),
+      String(asRecord(manifest.source).id),
       "saved_tracks",
       "cin_spotify_template_auth"
     );
@@ -711,19 +809,13 @@ test("without PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT flag set, unproven connectors 
 });
 
 test("Development-tier connector stays unavailable even when legacy UAT exposure is enabled", async () => {
-  // Uses spotify (publicTier "development": hidden pending a credentialed
-  // proof run) as the development-tier fixture for this legacy-UAT-exposure
-  // gate. Venmo previously served this role, but it has since been promoted
-  // to publicTier "preview" -- see packages/polyfill-connectors/manifests/
-  // venmo.json's public_listing.rationale and source-setup-presentation.
-  // test.ts's "preview + browser_collector_manual (Venmo) is offered on
-  // /sources/add" -- so it no longer exercises the development-tier path
-  // this test targets.
+  // A synthetic development-tier static-secret manifest keeps this branch
+  // independent of the shipped connector catalog.
   const previous = process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT;
   try {
     delete process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT;
     await withServer(async ({ asUrl, rsUrl }) => {
-      await registerConnector(asUrl, loadManifest("spotify"));
+      await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
       const ownerToken = await issueOwnerToken(asUrl);
       const hidden = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
@@ -734,7 +826,7 @@ test("Development-tier connector stays unavailable even when legacy UAT exposure
 
     process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT = "1";
     await withServer(async ({ asUrl, rsUrl }) => {
-      await registerConnector(asUrl, loadManifest("spotify"));
+      await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
       const ownerToken = await issueOwnerToken(asUrl);
       const exposed = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
@@ -771,7 +863,7 @@ test("unproven with recognized modality but non-actionable plan is not UAT-expos
         ...asRecord(doorDashManifest.capabilities),
         public_listing: { tier: "development" },
       };
-      await registerConnector(asUrl, doorDashManifest);
+      await registerConnector(asUrl, doorDashManifest, { publish: false });
 
       const ownerToken = await issueOwnerToken(asUrl);
       const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -838,13 +930,8 @@ test("UAT allowlist: development connector exposed only when flag+key+valid-setu
   try {
     // Scenario table: all combinations of flag, allowlist, setup validity
     const scenarios = [
-      // spotify is the development-tier fixture (publicTier "development",
-      // setup modality static_secret — hidden pending a credentialed proof
-      // run). Venmo previously filled this role but is now publicTier
-      // "preview", so it is offered on its own merits and can no longer
-      // exercise the development-tier gate. This mirrors the same swap already
-      // made in "Development-tier connector stays unavailable even when legacy
-      // UAT exposure is enabled" above.
+      // Spotify is a stable connector key for a synthetic development-tier
+      // static-secret fixture. Its shipped listing tier can change independently.
       { connectorKey: "spotify", expectedExposed: false, label: "no flag, with allowlist", list: "", uat: false },
       { connectorKey: "spotify", expectedExposed: false, label: "flag ON, empty allowlist", list: "", uat: true },
       {
@@ -880,12 +967,12 @@ test("UAT allowlist: development connector exposed only when flag+key+valid-setu
       await withServer(async ({ asUrl, rsUrl }) => {
         // Register the connector to test
         if (scenario.connectorKey === "spotify") {
-          await registerConnector(asUrl, loadManifest("spotify"));
+          await registerConnector(asUrl, staticSecretManifest("spotify", "development"), { publish: false });
         }
         if (scenario.connectorKey === "doordash") {
           const m = loadManifest("doordash");
           m.capabilities = { ...asRecord(m.capabilities), public_listing: { tier: "development" } };
-          await registerConnector(asUrl, m);
+          await registerConnector(asUrl, m, { publish: false });
         }
         if (scenario.connectorKey === "steam") {
           await registerConnector(asUrl, loadManifest("steam"));
@@ -958,6 +1045,81 @@ test("allowlist parser: rejects malformed entries, admits valid connector keys",
       delete process.env.PDPP_UAT_CONNECTOR_ALLOWLIST;
     } else {
       process.env.PDPP_UAT_CONNECTOR_ALLOWLIST = priorEnv.allowlist;
+    }
+  }
+});
+
+// A browser-bound connector with stored credentials is still set up through the
+// owner's browser session, so its UAT exposure needs a runnable browser setup.
+// A connector that is not browser-bound has no such dependency.
+test("UAT exposure of a browser-bound credential connector requires runnable browser setup", async () => {
+  const priorEnv = {
+    allowlist: process.env.PDPP_UAT_CONNECTOR_ALLOWLIST,
+    uat: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT,
+  };
+  const developmentHeb = (): Record<string, unknown> => {
+    const manifest = loadManifest("heb");
+    return {
+      ...manifest,
+      capabilities: { ...asRecord(manifest.capabilities), public_listing: { tier: "development" } },
+    };
+  };
+  const scenarios = [
+    { exposed: true, label: "preview, package published", manifest: () => loadManifest("heb"), publish: true },
+    { exposed: false, label: "preview, no package", manifest: () => loadManifest("heb"), publish: false },
+    {
+      allowlist: "heb",
+      exposed: true,
+      label: "allowlisted development, package published",
+      manifest: developmentHeb,
+      publish: true,
+    },
+    {
+      allowlist: "heb",
+      exposed: false,
+      label: "allowlisted development, no package",
+      manifest: developmentHeb,
+      publish: false,
+    },
+    {
+      exposed: true,
+      key: "gmail",
+      label: "not browser-bound, unaffected by browser setup",
+      manifest: () => loadManifest("gmail"),
+      publish: false,
+    },
+  ];
+  try {
+    for (const scenario of scenarios) {
+      process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT = "1";
+      if (scenario.allowlist) {
+        process.env.PDPP_UAT_CONNECTOR_ALLOWLIST = scenario.allowlist;
+      } else {
+        delete process.env.PDPP_UAT_CONNECTOR_ALLOWLIST;
+      }
+      await withServer(async ({ asUrl, rsUrl }) => {
+        await registerConnector(asUrl, scenario.manifest(), { publish: scenario.publish });
+        const ownerToken = await issueOwnerToken(asUrl);
+        const { body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
+          headers: { Authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(
+          byConnector(body, scenario.key ?? "heb").uat_expose_unlisted_connectors,
+          scenario.exposed,
+          scenario.label
+        );
+      });
+    }
+  } finally {
+    for (const [name, value] of [
+      ["PDPP_UAT_CONNECTOR_ALLOWLIST", priorEnv.allowlist],
+      ["PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT", priorEnv.uat],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
     }
   }
 });

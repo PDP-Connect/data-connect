@@ -37,6 +37,7 @@ import {
 import { isPagedRequest, parseConnectorSummaryPageState } from "../components/connector-summary-pager.ts";
 import { LivePoller } from "../components/live-poller.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
+import { buildConnectorIconMap } from "../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { type ListResponse, listConnectorSummaries, listRuns, type RunSummary } from "../lib/ref-client.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
@@ -140,12 +141,12 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   const pageState = parseConnectorSummaryPageState(params);
   let runsResult: ListResponse<RunSummary>;
   let connectorsPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>>;
-  let connectorManifests: Awaited<ReturnType<typeof listConnectorManifests>>;
+  let connectorIcons: Awaited<ReturnType<typeof buildConnectorIconMap>>;
   try {
-    [runsResult, connectorsPage, connectorManifests] = await Promise.all([
+    [runsResult, connectorsPage, connectorIcons] = await Promise.all([
       listRuns(runListQuery(params)),
       fetchSyncsConnectorsPage(pageState),
-      listConnectorManifests().catch(() => []),
+      listConnectorManifests().catch(() => []).then((manifests) => buildConnectorIconMap(manifests, [])),
     ]);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
@@ -172,13 +173,6 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   });
 
   const liveRunCount = runsResult.data.filter(isLiveRun).length;
-  const connectorIcons = Object.fromEntries(
-    connectorManifests.flatMap((manifest) => [
-      [manifest.connector_id, manifest.icon] as const,
-      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-    ])
-  );
-
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={liveRunCount > 0} />

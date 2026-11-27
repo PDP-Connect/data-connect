@@ -1,0 +1,58 @@
+name: Browser stack bump
+
+# Dependabot cannot open one pull request that moves patchright, patchright-core
+# and playwright-core in all three folders (see .github/dependabot.yml), and CI,
+# the Docker image and the desktop app must launch one Chromium. This workflow
+# moves the three folders together and opens a single pull request.
+#
+# Pull requests opened with GITHUB_TOKEN do not start pull_request workflows,
+# so the version check runs here before the pull request is opened.
+# A Patchright-only release makes npm install fail, which stops the job before any pull request.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: bump the browser stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+
+      - name: Find the latest Patchright version
+        id: latest
+        run: echo "version=$(npm view patchright version)" >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite the manifests and lock files
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          node scripts/bump-browser-stack.mjs "$VERSION"
+          for dir in . pdpp-runtime playwright-runner; do
+            npm install --package-lock-only --ignore-scripts --prefix "$dir"
+          done
+
+      - name: Check that the lock files resolve one Patchright version
+        run: node scripts/check-patchright-version.mjs
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash scripts/open-browser-stack-pr.sh

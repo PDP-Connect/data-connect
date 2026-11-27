@@ -31,6 +31,7 @@
 
 import type { ConnectorSchedulePatch, ScheduleApi, ScheduleUpsertResult } from "../runtime/controller.ts";
 import { deriveRecommendedMode } from "../runtime/refresh-mode-derivation.ts";
+import { isLocalDeviceConnection } from "./connector-instance-placement.ts";
 
 const DEFAULT_INTERVAL_SECONDS = 3600;
 
@@ -53,6 +54,15 @@ export interface AutoEnrollConnectorRow {
 }
 
 export type AutoEnrollListConnectors = () => Promise<readonly AutoEnrollConnectorRow[]>;
+
+/** Exclude paired-device connections from server-owned startup schedules. */
+export function listServerRunnableConnectorInstanceIds(
+  instances: readonly { readonly connectorInstanceId: string; readonly sourceKind: string }[]
+): string[] {
+  return instances
+    .filter((instance) => !isLocalDeviceConnection(instance))
+    .map((instance) => instance.connectorInstanceId);
+}
 
 export interface AutoEnrollOptions {
   controller: AutoEnrollControllerLike;

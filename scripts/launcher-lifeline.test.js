@@ -24,6 +24,7 @@ import { writeLaunchScript } from "./ensure-reference-stack.js"
 
 const SERVER_SOURCE = `
 require("node:fs").writeFileSync(process.env.TEST_PID_FILE, String(process.pid))
+require("node:fs").writeFileSync(process.env.TEST_PID_FILE + ".launcher", process.env.PDPP_LAUNCHER_PID ?? "")
 setInterval(() => {}, 1000)
 `
 
@@ -128,6 +129,19 @@ describe("launch.mjs and the parent lifeline", () => {
           launcher.stdin.destroy()
 
           expect(await waitFor(() => !isLive(serverPid), 10_000)).toBe(true)
+        }
+      ), 30_000)
+
+    // A lease names the launcher's pid. On Linux the launcher execs into the
+    // server, so the server is not the launcher's child and cannot assume it.
+    it(`tells the ${name} server the pid its lease names`, () =>
+      withRunningServer(
+        stage,
+        { PDPP_PARENT_LIFELINE: "stdin" },
+        async ({ launcher, serverPid }) => {
+          const recorded = readFileSync(join(launcher.spawnargs[1], "..", "server.pid.launcher"), "utf8")
+          expect(recorded).toBe(String(launcher.pid))
+          if (process.platform === "linux") expect(serverPid).toBe(launcher.pid)
         }
       ), 30_000)
 

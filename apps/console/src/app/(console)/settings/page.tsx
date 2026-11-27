@@ -7,13 +7,14 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { AboutSection } from "./about-section.tsx"
+import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
 import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
-import { loadOwnerPasswordSource } from "./owner-password-data.ts"
+import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
 import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 
 export const metadata: Metadata = {
@@ -22,11 +23,15 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
-  const [hasLocalRevealProof, ownerSessions, ownerPasswordSource] =
+  // Desktop and vault-recovery settings write command files only the managed
+  // desktop host answers; on a server they would do nothing.
+  const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
+  const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
     await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
       loadOwnerSessionInventory(),
       loadOwnerPasswordSource(),
+      loadOwnerPasswordSet(),
     ])
 
   return (
@@ -43,10 +48,11 @@ export default async function SettingsPage() {
           <DeveloperModeSetting />
         </Section>
         <Section
-          description="Choose a local-only posture or configure a proxy you control. Remote access always keeps the Personal Server on loopback."
+          id="remote-access"
+          description="Use DataConnect from your phone, or let AI apps like ChatGPT reach it."
           title="Remote access"
         >
-          <RemoteAccessSetting />
+          <RemoteAccessSetting appVersion={identity.version} />
         </Section>
         {ownerPasswordSource ? (
           <Section
@@ -60,7 +66,8 @@ export default async function SettingsPage() {
           >
             <OwnerPasswordSetting
               canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
+              managedDesktop={managedDesktopHost}
+              passwordSet={ownerPasswordSet}
               source={ownerPasswordSource}
             />
           </Section>
@@ -76,6 +83,16 @@ export default async function SettingsPage() {
             />
           </Section>
         ) : null}
+        {ownerSessions.enabled ? (
+          <Section
+            description="Pair the DataConnect desktop app with this server. The desktop shows this server's console and signs in as you."
+            title="Attach a desktop app"
+          >
+            <DesktopPairingSetting />
+          </Section>
+        ) : null}
+        {managedDesktopHost ? (
+          <>
         <Section
           description="Control how DataConnect starts on this computer."
           title="Desktop"
@@ -88,6 +105,8 @@ export default async function SettingsPage() {
         >
           <RecoveryKeySetting />
         </Section>
+          </>
+        ) : null}
         <AboutSection identity={identity} />
       </main>
     </RecordroomShellWithPalette>

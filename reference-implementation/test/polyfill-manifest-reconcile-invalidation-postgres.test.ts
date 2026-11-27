@@ -43,6 +43,7 @@
  *     node --import tsx --test test/polyfill-manifest-reconcile-invalidation-postgres.test.ts
  */
 
+import { FIXTURE_PUBLISHER } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -91,7 +92,7 @@ if (POSTGRES_URL) {
       ...manifest,
       source_declaration: snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(manifest, {
         connectorImplementationId: MANIFEST_URI,
-        publisherId: "https://pdpp.dev/reference-implementation",
+        publisherId: FIXTURE_PUBLISHER,
         sourceId: MANIFEST_URI,
       }),
     };

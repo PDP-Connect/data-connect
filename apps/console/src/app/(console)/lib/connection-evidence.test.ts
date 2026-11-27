@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatCoverageAxis, formatFreshnessAxis, formatOutboxAxis } from "@pdpp/display";
+import { formatStreamCollectionFacts } from "./collection-report.ts";
 import {
   deriveAutoPausedBanner,
   deriveConnectionNextStep,
@@ -963,6 +964,63 @@ test("deriveConnectionStatusDisplay: healthy scheduled connection reads as a hea
   assert.equal(out.title.toLowerCase().includes("coverage"), true);
 });
 
+test("deriveConnectionStatusDisplay: a connector-reported collection is labelled as a report, not Healthy", () => {
+  const out = deriveConnectionStatusDisplay({
+    hasDurableProgress: true,
+    health: snapshot({
+      axes: { attention: "none", coverage: "unknown", freshness: "fresh", outbox: "idle" },
+      state: "unknown",
+      unknown_reasons: ["coverage_reported_collected"],
+    }),
+    localDeviceProgress: null,
+  });
+  assert.equal(out.label, "Collected, not independently checked");
+  assert.equal(out.tone, "neutral");
+  assert.match(out.title, /connector reports/i);
+});
+
+test("deriveConnectionStatusDisplay: the reported-collected reason does not hide other missing evidence", () => {
+  const out = deriveConnectionStatusDisplay({
+    hasDurableProgress: true,
+    health: snapshot({
+      axes: { attention: "none", coverage: "unknown", freshness: "unknown", outbox: "idle" },
+      state: "unknown",
+      unknown_reasons: ["coverage_reported_collected", "schedule_unavailable"],
+    }),
+    localDeviceProgress: null,
+  });
+  assert.equal(out.label, "Unknown");
+});
+
+test("formatProjectionFreshness does not call a connector-reported collection missing evidence", () => {
+  const out = formatProjectionFreshness(
+    snapshot({ state: "unknown", unknown_reasons: ["coverage_reported_collected"] })
+  );
+  assert.equal(out.unreliable, false);
+  assert.equal(out.detail, "");
+});
+
+test("summarizeAxisChips attributes a reported-collected coverage chip to the connector", () => {
+  const axes = snapshot({
+    axes: { attention: "none", coverage: "unknown", freshness: "fresh", outbox: "idle" },
+  }).axes;
+  const [coverage] = summarizeAxisChips(axes, { coverageReportedCollected: true });
+  assert.equal(coverage?.label, "Coverage · reported collected");
+  assert.equal(coverage?.tone, "neutral");
+  assert.match(coverage?.title ?? "", /connector reports/i);
+  // Without the cause flag the same axis stays the plain unknown chip.
+  const [plain] = summarizeAxisChips(axes);
+  assert.notEqual(plain?.label, "Coverage · reported collected");
+});
+
+test("formatForwardDisposition does not say coverage is established when it is only reported", () => {
+  const reported = formatForwardDisposition("complete", { coverageReportedCollected: true });
+  assert.equal(reported?.tone, "neutral");
+  assert.doesNotMatch(reported?.title ?? "", /Coverage is established/);
+  assert.match(reported?.title ?? "", /connector reports/i);
+  assert.match(formatForwardDisposition("complete")?.title ?? "", /Coverage is established/);
+});
+
 test("deriveConnectionStatusDisplay: stale-but-healthy connection does not claim its data is current (phase 2 lie fix)", () => {
   // An assisted scheduled connector can project `healthy` while its freshness
   // axis is `stale` (awaiting a scheduled refresh; see `stale_assisted_refresh`).
@@ -1809,7 +1867,7 @@ test("derivePrimaryRowAction keeps Sync now for an owner-syncable connector", ()
 });
 
 test("derivePrimaryRowAction never returns sync for a push-mode local-collector row", () => {
-  const action = derivePrimaryRowAction({ connectorId: "claude_code", hasLocalDeviceProgress: true });
+  const action = derivePrimaryRowAction({ connectorId: "claude-code", hasLocalDeviceProgress: true });
   assert.equal(action.kind, "device_wait");
   assert.notEqual(action.kind, "sync");
   if (action.kind === "device_wait") {
@@ -2347,4 +2405,66 @@ test("formatSourceHeartbeat reports unknown when the server derived no health", 
 
   assert.equal(chip.value, "unknown");
   assert.doesNotMatch(chip.label, /starting/, "an underived status is not evidence of life");
+});
+
+// Local coverage is a fact about one run, never a present-tense claim: the
+// owner sees "complete as of <time>", and the chip names the run, release and
+// revision it describes.
+const COVERAGE_AS_OF = {
+  artifact_digest: `sha256:${"a".repeat(64)}`,
+  collection_revision: 7,
+  committed_at: "2026-10-22T10:00:00.000Z",
+  evidence: "terminal_run",
+  run_id: "run-a",
+  run_sequence: 3,
+} as const;
+
+test("coverage chip reads 'complete as of <time>' when the reference names the run it describes", () => {
+  const axes = {
+    attention: null,
+    coverage: "complete",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [coverage] = summarizeAxisChips(axes as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(coverage?.label, "Coverage · complete as of 2026-10-22 10:00:00Z");
+  assert.equal(coverage?.value, "complete as of 2026-10-22 10:00:00Z");
+  assert.match(coverage?.title ?? "", /run run-a/);
+  assert.match(coverage?.title ?? "", /sha256:a{12}/);
+  assert.match(coverage?.title ?? "", /revision 7/);
+});
+
+test("coverage chip adds no as-of to unknown coverage or when the reference sends none", () => {
+  const unknown = {
+    attention: null,
+    coverage: "unknown",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [unknownChip] = summarizeAxisChips(unknown as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(unknownChip?.label, formatCoverageAxis("unknown").label);
+  const complete = {
+    attention: null,
+    coverage: "complete",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [plain] = summarizeAxisChips(complete as never, {
+    coverageAsOf: null,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(plain?.label, formatCoverageAxis("complete").label);
+});
+
+test("per-stream coverage reads 'complete as of <time>' with the connection's as-of", () => {
+  const facts = formatStreamCollectionFacts({ coverage_condition: "complete", stream: "messages" } as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+  });
+  assert.equal(facts.coverage.label, "Coverage · complete as of 2026-10-22 10:00:00Z");
 });

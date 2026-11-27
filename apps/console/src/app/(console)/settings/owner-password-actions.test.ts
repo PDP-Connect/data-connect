@@ -8,7 +8,7 @@ import { join } from "node:path"
 import { mock, test } from "node:test"
 
 type OwnerPasswordActions = typeof import("./owner-password-actions.ts")
-type RemoteAccessActions = typeof import("./remote-access-actions.ts")
+type FirstPasswordActions = typeof import("./owner-password-first-setup-actions.ts")
 
 const PROOF = "desktop-reveal-proof-0928"
 
@@ -19,7 +19,7 @@ let reauthStatus = "skipped_linux_polkit_unverified"
 
 let loaded: Promise<{
   owner: OwnerPasswordActions
-  remote: RemoteAccessActions
+  remote: FirstPasswordActions
 }> | null = null
 
 // The real actions and the real proof check in owner-credential-client.ts.
@@ -58,22 +58,6 @@ function loadActions() {
         withOwnerSessionCookie: async (init: RequestInit = {}) => init,
       },
     })
-    mock.module(
-      new URL("../lib/remote-access-client.ts", import.meta.url).href,
-      {
-        namedExports: Object.fromEntries(
-          [
-            "getRemoteAccessConfig",
-            "inspectCloudflareTunnelRemoteAccess",
-            "inspectMyDevicesOnlyRemoteAccess",
-            "inspectNgrokRemoteAccess",
-            "inspectRemoteAccess",
-            "setConsolePort",
-            "setRemoteAccessConfig",
-          ].map(name => [name, async () => ({})])
-        ),
-      }
-    )
     const ownerSet =
       await import("pdpp-reference-implementation/owner-password-owner-set")
     mock.module("pdpp-reference-implementation/owner-password-owner-set", {
@@ -92,7 +76,7 @@ function loadActions() {
     })
     return {
       owner: await import("./owner-password-actions.ts"),
-      remote: await import("./remote-access-actions.ts"),
+      remote: await import("./owner-password-first-setup-actions.ts"),
     }
   })()
   return loaded

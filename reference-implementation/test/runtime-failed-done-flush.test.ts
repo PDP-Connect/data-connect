@@ -44,6 +44,7 @@ import type { TestContext } from "node:test";
 import test from "node:test";
 import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { runConnector } from "../runtime/index.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
@@ -393,7 +394,8 @@ test("certified stream-scoped failure with a failing terminal flush: the staged 
   assert.equal(outcome?.connector_error?.code, "stream_collection_failed", "the connector's error stays primary");
   assert.deepEqual(
     stateCommits.map((r) => decodeURIComponent(r.pathname)),
-    [`/v1/state/${MANIFEST.connector_id}`],
+    // The runtime addresses state by the connector key when it can derive one.
+    [`/v1/state/${canonicalConnectorKey(MANIFEST.connector_id) ?? MANIFEST.connector_id}`],
     "exactly one STATE commit"
   );
   assert.deepEqual(

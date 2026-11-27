@@ -22,12 +22,13 @@ import {
   listDirtySearchIndexScopes,
   markSearchIndexDirtyPostgres,
 } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 function manifest(connectorId: string, semantic: boolean) {
-  return {
+  const value = {
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     display_name: connectorId,
@@ -51,6 +52,7 @@ function manifest(connectorId: string, semantic: boolean) {
     ],
     version: "0.1.0",
   };
+  return withFixtureSourceDeclaration(value, { sourceId: value.manifest_uri });
 }
 
 async function getScope(instance: string) {

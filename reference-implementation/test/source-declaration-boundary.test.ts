@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import type { SourceDeclaration } from "@pdpp/reference-contract/public/source";
 import { requireSourceDeclaration, snapshotSourceDeclaration } from "../server/source-declaration.ts";
 import {
@@ -33,7 +33,8 @@ const RUNTIME_IMPORT_REGEX = /import\s+(?!type\s)[\s\S]*?from\s+["']([^"']+)["']
 // src/public/source.ts directly.
 const SOURCE_CONTRACT_PATH_REGEX = /\/dist\/public\/source\.js$/;
 const PROJECTED_DECLARATION_VERSION_REGEX = /^reference\.legacy-connector-projection\.v1:sha256:[0-9a-f]{64}$/;
-const UNSUPPORTED_PROFILE_VERSION_REGEX = /manifest\.protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
+const UNSUPPORTED_PROFILE_VERSION_REGEX =
+  /manifest\.protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
 
 const query = {
   aggregations: {
@@ -318,7 +319,7 @@ test("legacy adapter admits Collection Profile 0.2.0 and keeps the Core declarat
   assert.deepEqual(declaration, sourceDeclarationFromLegacyConnectorManifest(legacy, attribution));
 });
 
-test("legacy adapter rejects a profile version other than 0.1.0 and 0.2.0", () => {
+test("legacy adapter refuses 0.3.0 until the whole profile is implemented", () => {
   assert.throws(
     () => sourceDeclarationFromLegacyConnectorManifest({ ...legacy, protocol_version: "0.3.0" }, attribution),
     UNSUPPORTED_PROFILE_VERSION_REGEX
@@ -327,7 +328,7 @@ test("legacy adapter rejects a profile version other than 0.1.0 and 0.2.0", () =
 
 test("legacy corpus projects into the neutral SourceDeclaration contract", () => {
   const rejected = new Map<string, string>();
-  for (const { file: filename, manifest: rawManifest } of readPolyfillManifests()) {
+  for (const { file: filename, manifest: rawManifest } of readShippedManifests()) {
     const manifest = rawManifest as Record<string, unknown>;
     try {
       sourceDeclarationFromLegacyConnectorManifest(manifest, {

@@ -1,34 +1,39 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { ingestRecord } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function manifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        query: { search: { lexical_fields: ["subject"] } },
-        schema: {
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          query: { search: { lexical_fields: ["subject"] } },
+          schema: {
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 async function setup(connectorId: string) {
@@ -48,7 +53,7 @@ function ingest(connectorId: string) {
       key: "k1",
       stream: "items",
     },
-    { deferIndexes: true },
+    { deferIndexes: true }
   );
 }
 

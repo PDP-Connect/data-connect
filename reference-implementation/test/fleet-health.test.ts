@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { computeConnectionHealth } from "../runtime/connection-health.ts";
 import type { FleetConfiguredConnection, FleetSummary } from "../server/fleet-health.ts";
 import { composeFleetHealthVerdict } from "../server/fleet-health.ts";
 
@@ -579,6 +580,48 @@ test("headline and reason unknowns remain fleet-unknown", () => {
       result.dimensions.unknown_evidence.map((entry) => entry.connection_id),
       [item.connection_id]
     );
+  }
+});
+
+test("a connector-reported collection is neutral for the fleet, and only that exact unknown", () => {
+  // The snapshot is the one the producer emits for a local source whose
+  // connector reported every store collected and nothing contradicts it.
+  const reported = computeConnectionHealth({
+    activity: null,
+    attention: null,
+    backoff: null,
+    coverage: { axis: "unknown", unknownReportedCollected: true },
+    freshness: { axis: "fresh" },
+    outbox: null,
+    projection: null,
+    run: {
+      hasDegradingGaps: false,
+      lastSuccessAt: "2026-05-19T00:00:00.000Z",
+      latestStatus: "succeeded",
+      reasonCode: null,
+    },
+    schedule: { enabled: true },
+  });
+  assert.equal(reported.state, "unknown");
+  assert.deepEqual(reported.unknown_reasons, ["coverage_reported_collected"]);
+  const neutral = summary("local-a", { connection_health: { ...reported, coverage_as_of: null } });
+  const result = compose([inventory("local-a")], [neutral]);
+  assert.deepEqual(result.dimensions.unknown_evidence, []);
+  assert.equal(result.state, "healthy");
+
+  // The exemption is exactly that one reason on that one condition. Any other
+  // unknown beside it, or the reason without the condition, still fails closed.
+  const withOther = summary("local-b", {
+    connection_health: {
+      ...reported,
+      coverage_as_of: null,
+      unknown_reasons: ["coverage_reported_collected", "repair_lock_unavailable"],
+    },
+  });
+  const noCondition = summary("local-c", { connection_health: { ...reported, conditions: [], coverage_as_of: null } });
+  for (const item of [withOther, noCondition]) {
+    const other = compose([inventory(item.connection_id)], [item]);
+    assert.equal(other.state, "indeterminate", item.connection_id);
   }
 });
 

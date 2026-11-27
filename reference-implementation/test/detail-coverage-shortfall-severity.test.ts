@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,12 +44,12 @@ import { join } from "node:path";
 // carrying a durable DETAIL_GAP.
 import test from "node:test";
 import { type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
-
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Hoisted: the coverage-shortfall explanation the runtime authors, and the
 // connection-scoped denominator the sibling-isolation oracle asserts on.
@@ -60,7 +61,6 @@ const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
-const UNKNOWN_BLOB_MESSAGE_PATTERN = /Connector emitted unknown message type: BLOB/;
 const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (.+)$/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
@@ -188,49 +188,54 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
 
 // Connector-agnostic shape of the live failure: one parent state_stream
 // ("holdings") whose key fans out to two child detail streams.
-const MANIFEST = {
-  connector_id: "coverage-shortfall-regression",
-  display_name: "Coverage Shortfall Regression",
-  manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "holdings",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      name: "activity",
-      primary_key: ["id"],
-      relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
-      schema: {
-        properties: { holding_id: { type: "string" }, id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "coverage-shortfall-regression",
+    display_name: "Coverage Shortfall Regression",
+    manifest_uri: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "holdings",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      coverage_strategy: "parent_detail_accounting",
-      name: "valuations",
-      parent_streams: ["holdings", "activity"],
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        name: "activity",
+        primary_key: ["id"],
+        relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
+        schema: {
+          properties: { holding_id: { type: "string" }, id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+      {
+        coverage_strategy: "parent_detail_accounting",
+        name: "valuations",
+        parent_streams: ["holdings", "activity"],
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/coverage-shortfall-regression" }
+);
 
 /**
- * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
- * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
- * the crediting it had before the capability existed. The capability is new in
- * Collection Profile 0.2.0, so the manifest declares that version (Section 3.1).
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. The runtime does not
+ * implement the extension and leaves it out of START, so a connector that
+ * declares it follows the base hydrated_keys rule, and the declaration changes
+ * no coverage decision. The runtime's manifest validation requires
+ * protocol_version 0.2.0 for a manifest that declares the extension. That is a
+ * package rule, not canonical Collection Profile text.
  */
 const KEY_SETS_MANIFEST = {
   ...MANIFEST,
@@ -567,6 +572,41 @@ test("one detail stream can independently prove two parent checkpoints", async (
   assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
 });
 
+// Pins a limit, not a wish. Collection Profile 0.2.0 Section 5.6 makes `required_keys` the
+// connector's own complete key accounting for one detail stream and parent boundary
+// (docs/spec/collection-profile.md at data-connectors a87edcdc, :1353-1370). It does not
+// require every parent key to be listed: a parent record whose detail is already held needs no
+// detail this run, and shipped connectors (amazon `orders` and `order_items`) report
+// `required_keys: []` with accepted parent records. A runtime check that rejected such a report
+// would stall those connectors, so the runtime credits against the declared set only. A
+// connector that under-declares is not caught here; STREAM_EVIDENCE never gates (Section 5.7).
+test("an empty required_keys report for a parent with accepted records is the connector's declaration and commits", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const messages: Record<string, unknown>[] = [
+    { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+    {
+      hydrated_keys: [],
+      reference_only: true,
+      required_keys: [],
+      state_stream: "holdings",
+      stream: "valuations",
+      type: "DETAIL_COVERAGE",
+    },
+    { cursor: { page: "holdings-1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: 1, status: "succeeded", type: "DONE" },
+  ];
+
+  const { result, thrown } = await runShortfall(server, ownerToken, messages);
+
+  assert.equal(thrown, null);
+  assert.ok(result?.checkpoint_summary);
+  assert.equal(result.checkpoint_summary.state_streams_committed, 1);
+  assert.equal((result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"), false);
+});
+
 test("a durable gap cannot satisfy the same detail key under a different parent", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -656,10 +696,11 @@ test("a staged parent without its required detail coverage report cannot commit"
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
+  // The holdings parent is fully covered by a hydrated declaration (Section 5.6), so
+  // it is the positive control. The missing activity report is the only gate.
   const messages: Record<string, unknown>[] = [
     {
-      empty_keys: ["H"],
-      hydrated_keys: [],
+      hydrated_keys: ["H"],
       reference_only: true,
       required_keys: ["H"],
       state_stream: "holdings",
@@ -826,10 +867,11 @@ test("a hydrated key the RS rejected neither passes the checkpoint gate nor coun
   assert.equal(terminalCoveredFor(accepted.result?.run_id as string, "activity"), 1);
 });
 
-// An optional skip is an accepted terminal absence, so it may release the
-// checkpoint, but it is not coverage: `covered` counts emitted and unchanged
-// items only.
-test("optional_skip_keys release the checkpoint but never inflate covered", async (t) => {
+// Section 5.6: optional_skip_keys does not establish portable coverage, so an
+// optional skip alone never releases the checkpoint. The base profile credits
+// only hydrated declarations and durable gaps. The covered count is capped at
+// considered minus uncovered: the skipped key is not counted as covered.
+test("optional_skip_keys alone never release the checkpoint and never inflate covered", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -858,8 +900,9 @@ test("optional_skip_keys release the checkpoint but never inflate covered", asyn
     ["holdings", "activity"]
   );
   assert.equal(thrown, null);
-  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1);
-  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
+  assert.equal(result?.status, "succeeded");
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 0, "K2 is uncredited, so holdings is withheld");
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1, "only the hydrated K1 is covered");
 });
 
 const RECORD_AT = "2026-04-18T00:00:00Z";
@@ -947,10 +990,12 @@ test("an accepted retry after DETAIL_COVERAGE credits a key whose first attempt 
   assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
 });
 
-// For a connector that declares DETAIL_COVERAGE_KEY_SETS, a hydrated listing
-// is a claim, not evidence. With no accepted record for the key the parent
-// stays put; a key with no detail must say so in empty_keys.
-test("a hydrated key with no accepted record for it withholds the parent and does not count as covered", async (t) => {
+// A 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS. START omits the extension,
+// so the connector sends only base hydrated_keys. Section 5.6 credits a hydrated
+// declaration with no accepted record behind it, and the runtime adds no
+// rule of its own for a manifest that declares the extension. A parent with no
+// detail records (an empty parent) therefore commits.
+test("a 0.2.0 key-set manifest credits a hydrated key with no accepted record for it (Section 5.6)", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -961,16 +1006,43 @@ test("a hydrated key with no accepted record for it withholds the parent and doe
     [holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] })],
     KEY_SETS_MANIFEST
   );
-  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
-  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
-  const coverageGap = (result.known_gaps ?? []).find((gap) => gap.reason === "detail_coverage_incomplete");
-  assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+  assert.equal(
+    (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+    false,
+    "no shortfall is reported"
+  );
 });
 
-// A connector without DETAIL_COVERAGE_KEY_SETS may list a key with no detail
-// record (an account with no transactions) as hydrated. Crediting it by
-// evidence would stall that connector's cursor every run, so it keeps the
-// crediting it had before the capability: the declaration credits the key.
+// The same declaring manifest, with an accepted activity record for K, also
+// credits K and commits.
+test("a 0.2.0 key-set manifest commits a hydrated key backed by an accepted record for it", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(
+    server,
+    ownerToken,
+    [
+      activityRecord("K", { id: "K" }),
+      holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    ],
+    KEY_SETS_MANIFEST
+  );
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+  assert.equal(
+    (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+    false,
+    "the accepted record backs the hydrated declaration for K"
+  );
+});
+
+// A connector may list a key with no detail record (an account with no
+// transactions) as hydrated. Crediting it by evidence would stall that
+// connector's cursor every run, so the declaration credits the key.
 test("without DETAIL_COVERAGE_KEY_SETS, a hydrated key with no record still commits the parent and counts as covered", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -992,11 +1064,12 @@ test("without DETAIL_COVERAGE_KEY_SETS, a hydrated key with no record still comm
   }
 });
 
-// START lists DETAIL_COVERAGE_KEY_SETS to every connector, so a connector whose
-// manifest does not declare it may still send empty_keys and unchanged_keys.
-// They credit like its hydrated keys: rejecting the message would fail a run
-// the host invited, and ignoring the keys would stall the cursor.
-test("without DETAIL_COVERAGE_KEY_SETS, empty_keys and unchanged_keys credit like hydrated keys", async (t) => {
+// Section 5.6: empty and unchanged arrays are not portable coverage. A connector
+// that sends them without a hydrated declaration or a durable gap is withheld,
+// and the parent cursor stays put. The mutation this catches is a runtime that
+// credits raw arrays. START omits DETAIL_COVERAGE_KEY_SETS, so these keys are
+// not a negotiated extension.
+test("empty_keys and unchanged_keys alone withhold the parent and never credit the base profile", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -1004,10 +1077,19 @@ test("without DETAIL_COVERAGE_KEY_SETS, empty_keys and unchanged_keys credit lik
   const result = await runHoldings(server, ownerToken, [
     holdingsCoverage({ empty_keys: ["E"], required_keys: ["E", "U"], unchanged_keys: ["U"] }),
   ]);
-  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(
+    terminalCoveredFor(result.run_id as string, "activity"),
+    undefined,
+    "no covered count is declared, and raw empty and unchanged arrays do not supply one"
+  );
+  assert.ok(
+    (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+    "the uncredited keys are reported as a coverage shortfall"
+  );
 });
 
-test("verified-empty and verified-unchanged keys release the parent and count as covered", async (t) => {
+test("verified-empty and verified-unchanged keys alone do not release the parent or count as covered", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -1021,8 +1103,8 @@ test("verified-empty and verified-unchanged keys release the parent and count as
       unchanged_keys: ["U"],
     }),
   ]);
-  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
-  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 2);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
 });
 
 // The USAA/Chase shape: required keys are parent (account) keys and detail
@@ -1071,13 +1153,14 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+  // K is required and not hydrated, and no gap covers it: a coverage shortfall each run.
+  const unproven = [holdingsCoverage({ required_keys: ["K"] })];
 
   const streaks: (number | null)[] = [];
   let last: RuntimeRunConnectorResult | null = null;
   for (let run = 0; run < 3; run += 1) {
     // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
-    last = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+    last = await runHoldings(server, ownerToken, unproven);
     const [event, ...rest] = withheldEvents(last.run_id as string);
     assert.ok(event);
     assert.equal(rest.length, 0);
@@ -1093,13 +1176,12 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   const committed = await runHoldings(
     server,
     ownerToken,
-    [holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })],
-    KEY_SETS_MANIFEST
+    [activityRecord("K", { id: "K" }), holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })]
   );
   assert.equal(committed.checkpoint_summary?.state_streams_committed, 1);
   assert.deepEqual(withheldEvents(committed.run_id as string), []);
 
-  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const again = await runHoldings(server, ownerToken, unproven);
   const [event] = withheldEvents(again.run_id as string);
   assert.ok(event);
   assert.equal(event.consecutive_runs, 1, "a commit ends the streak");
@@ -1126,8 +1208,9 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
-  await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  // K is required and not hydrated, so holdings is withheld on each of these runs.
+  const unproven = [holdingsCoverage({ required_keys: ["K"] })];
+  await runHoldings(server, ownerToken, unproven);
   const originalFetch = globalThis.fetch;
   const puts: string[] = [];
   const mocked = t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -1140,18 +1223,26 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
     }
     return originalFetch(input, init);
   });
-  const attempt = await runShortfall(server, ownerToken, [
-    { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
-    activityRecord("T", { id: "T" }),
-    holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] }),
-    { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
-    { cursor: { page: "2" }, stream: "activity", type: "STATE" },
-    { records_emitted: 2, status: "succeeded", type: "DONE" },
-  ], undefined, ["holdings", "activity"], KEY_SETS_MANIFEST);
+  const attempt = await runShortfall(
+    server,
+    ownerToken,
+    [
+      { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
+      activityRecord("T", { id: "T" }),
+      // K is hydrated, so holdings commits first; the injected failure is on the activity PUT.
+      activityRecord("K", { id: "K" }),
+      holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] }),
+      { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
+      { cursor: { page: "2" }, stream: "activity", type: "STATE" },
+      { records_emitted: 3, status: "succeeded", type: "DONE" },
+    ],
+    undefined,
+    ["holdings", "activity"]
+  );
   mocked.mock.restore();
   assert.deepEqual(puts, ["holdings", "activity"]);
   assert.ok(attempt.thrown || attempt.result?.status === "failed");
-  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const again = await runHoldings(server, ownerToken, unproven);
   assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
 });
 
@@ -1230,10 +1321,10 @@ const UNPROVEN_HYDRATED_KEY = [
   holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
 ];
 
-// Collection Profile 0.2.0 adds DETAIL_COVERAGE_KEY_SETS (Sections 3.4, 8). A
-// manifest that declares it at 0.2.0 registers, passes the pre-spawn gate, and
-// gets evidence-based crediting: a hydrated key with no record is not credited.
-test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and gets evidence-based crediting", async (t) => {
+// The 0.2.0 key-set manifest registers, passes the pre-spawn gate, and starts. START
+// omits the extension, so the connector sends base hydrated_keys. The run supplies no
+// accepted record for K, and the hydrated declaration credits it anyway.
+test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and credits an unrecorded hydrated key", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -1247,14 +1338,18 @@ test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and
   );
   assert.equal(thrown, null);
   assert.ok(start, "the connector received START");
+  assert.ok(Array.isArray(start.protocol_capabilities), "START carries a capability array");
+  assert.equal(start.protocol_capabilities.includes("DETAIL_COVERAGE_KEY_SETS"), false, "START omits the keyset advisory");
+  assert.deepEqual(start.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
   assert.equal(result?.status, "succeeded");
-  assert.equal(result?.checkpoint_summary?.state_streams_committed, 0, "the unproven parent cursor is withheld");
-  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 0);
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1, "the hydrated declaration credits the key");
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
 });
 
-// A 0.1.0 manifest keeps the 0.1.0 crediting, and may not declare a capability
-// that 0.2.0 adds (Section 3.1).
-test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capability", async (t) => {
+// A 0.1.0 manifest does not declare the package extension, so a hydrated declaration
+// credits by assertion. It may not declare DETAIL_COVERAGE_KEY_SETS, which the
+// runtime's manifest validation reserves for protocol_version 0.2.0.
+test("a 0.1.0 manifest credits a hydrated key by assertion and cannot declare a 0.2.0 capability", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -1273,8 +1368,8 @@ test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capabil
 
 // Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
 // and a known required capability this runtime does not implement fails before
-// any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory and
-// STREAM_EVIDENCE is implemented, so both pass. BLOB is covered separately.
+// any connector code runs. DETAIL_COVERAGE_KEY_SETS and RUN_COVERAGE_V1 are
+// elective; STREAM_EVIDENCE is implemented. BLOB is covered separately.
 test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1290,8 +1385,9 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     [["DETAIL_COVERAGE_KEY_SETS", "FORGED"], UNKNOWN_CAPABILITY_PATTERN, null],
     ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
-    [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
-    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
+    [["OBSERVATION"], null, null],
+    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], null, null],
+    [["RUN_COVERAGE_V1"], null, null],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1319,13 +1415,13 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
 
 // START.protocol_capabilities lists what this runtime implements (Section
 // 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
-// It does not implement BLOB or OBSERVATION, so it does not list them.
+// It also accepts OBSERVATION (Section 5.10) and ingests BLOB through the host spool.
 test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  for (const manifest of [MANIFEST, KEY_SETS_MANIFEST]) {
-    // biome-ignore lint/performance/noAwaitInLoops: each manifest is one isolated run.
+  await [MANIFEST, KEY_SETS_MANIFEST].reduce(async (previous, manifest) => {
+    await previous;
     const { start, thrown } = await runCapturingStart(
       server,
       ownerToken,
@@ -1333,45 +1429,72 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
-  }
+    assert.deepEqual(start?.protocol_capabilities, REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities);
+  }, Promise.resolve());
 });
 
-// BLOB is a runtime-specific extension (Collection Profile Section 7) that this
-// runtime does not implement. chatgpt and anthropic declare it but emit BLOB
-// only for an item over the inline cap, so a declaring connector still starts
-// here. A run that emits no BLOB completes; a run that emits one fails at that
-// line, with the same error as before the capability gate existed.
-test("a 0.1.0 manifest declaring BLOB starts; it completes without BLOB and fails at a BLOB line", async (t) => {
+test("reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.0" };
-  assert.equal(isAdmitted(await registerManifest(server, blobManifest)), true, "the BLOB manifest is admitted");
+  const manifest = {
+    ...MANIFEST,
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    streams: MANIFEST.streams.map((stream) => ({
+      ...stream,
+      coverage_stores: [`${stream.name}-store`],
+    })),
+    version: "1.1.0",
+  };
+  assert.equal(isAdmitted(await registerManifest(server, manifest)), true, "the extension manifest is admitted");
+  const terminalMessages = holdingsRun([]).map((message) =>
+    message.type === "DONE"
+      ? {
+          ...message,
+          coverage: {
+            collection_scope: "unscoped",
+            streams: ["holdings", "activity"].map((stream) => ({
+              scoped: true,
+              stores: [{ status: "collected", store: `run-coverage-${stream}-store` }],
+              stream,
+            })),
+            version: 1,
+          },
+        }
+      : message
+  );
+  const run = await runCapturingStart(server, ownerToken, manifest, terminalMessages);
+  assert.equal(run.thrown, null);
+  assert.ok(run.start, "the connector received START");
+  assert.equal("run_coverage_version" in run.start, false);
+  assert.equal(run.result?.status, "succeeded");
+  const terminalRow = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(run.result?.run_id);
+  assert.ok(terminalRow, "the run has a terminal event");
+  assert.equal(JSON.stringify(JSON.parse(terminalRow.data_json)).includes("run-coverage-"), false);
+});
 
-  const clean = await runCapturingStart(
+test("reference runtime refuses 0.3.0 before spawn until the whole profile is implemented", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const outcome = await runCapturingStart(
     server,
     ownerToken,
-    blobManifest,
-    holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
+    {
+      ...MANIFEST,
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.3.0",
+      streams: MANIFEST.streams.map((stream) => ({ ...stream, coverage_stores: [`${stream.name}-store`] })),
+    },
+    holdingsRun([])
   );
-  assert.equal(clean.thrown, null);
-  assert.ok(clean.start, "the connector received START");
-  assert.equal(clean.start?.protocol_capabilities instanceof Array, true);
-  assert.equal((clean.start?.protocol_capabilities as string[]).includes("BLOB"), false, "START does not offer BLOB");
-  assert.equal(clean.result?.status, "succeeded");
-
-  const blobLine = {
-    file: "blob-1.json",
-    key: "H",
-    mime_type: "application/json",
-    sha256: "a".repeat(64),
-    size_bytes: 2,
-    stream: "holdings",
-    type: "BLOB",
-  };
-  const withBlob = await runCapturingStart(server, ownerToken, blobManifest, [blobLine, ...holdingsRun([])]);
-  assert.ok(withBlob.start, "the connector received START");
-  const failure = withBlob.thrown instanceof Error ? withBlob.thrown.message : JSON.stringify(withBlob.result);
-  assert.match(failure, UNKNOWN_BLOB_MESSAGE_PATTERN);
+  assert.equal(outcome.start, null, "the connector was not spawned");
+  assert.ok(outcome.thrown instanceof Error);
+  assert.match(outcome.thrown.message, /protocol_version must be one of 0\.1\.0, 0\.2\.0/);
 });

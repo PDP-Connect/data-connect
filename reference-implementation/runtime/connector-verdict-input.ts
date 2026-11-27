@@ -56,6 +56,8 @@ export interface CollectionReportEntryLike {
    * reads `false`, the shipped behavior.
    */
   readonly coverage_unfillable_accounted?: boolean;
+  /** The entry's `unknown` condition is the connector's own positive report. */
+  readonly coverage_reported_collected?: boolean;
   readonly pending_detail_gaps: number;
   /**
    * The `SKIP_RESULT` fact for this stream, or `null`/absent. Only
@@ -179,6 +181,7 @@ export function buildStreamRollups(
       gap_retryable: retryable,
       priority: effectivePriority,
       recovery_action: entry.skipped?.recovery_action ?? null,
+      reported_collected: entry.coverage_reported_collected === true,
       stream_id: entry.stream,
       // Carried, never re-derived: the entry already holds the one owner's
       // verdict, so the verdict's disposition reads the same fact the

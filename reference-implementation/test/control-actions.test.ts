@@ -39,6 +39,7 @@ import { getDefaultConnectorAttentionStore } from "../server/stores/connector-at
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -391,7 +392,7 @@ async function emitSyntheticRun({
     actor_id: connectorId,
     actor_type: "runtime",
     data: {
-      bindings: { filesystem: {}, interactive: {}, network: {} },
+      bindings: { browser: {}, filesystem: {}, network: {} },
       boot_epoch: _epoch.boot_epoch,
       collection_mode: "incremental",
       connector_instance_id: connectorInstanceId,
@@ -477,7 +478,7 @@ async function emitSyntheticStartedRun({
     actor_id: connectorId,
     actor_type: "runtime",
     data: {
-      bindings: { filesystem: {}, interactive: {}, network: {} },
+      bindings: { browser: {}, filesystem: {}, network: {} },
       boot_epoch: _epoch.boot_epoch,
       collection_mode: "incremental",
       connection_id: connectorInstanceId,
@@ -1050,7 +1051,7 @@ test("controller startup reconciles abandoned controller-managed runs after rest
         actor_id: connectorId,
         actor_type: "runtime",
         data: {
-          bindings: { filesystem: {}, interactive: {}, network: {} },
+          bindings: { browser: {}, filesystem: {}, network: {} },
           // Synthetic "prior incarnation" stamp — this test seeds the
           // pre-crash state of an interrupted run.
           //
@@ -1312,31 +1313,34 @@ test("schedule upsert on unknown connector returns 404", async () => {
 });
 
 test("schedule upsert returns policy_warning when interval is below minimum_interval_seconds", async () => {
-  const manifest = {
-    capabilities: {
-      refresh_policy: {
-        interaction_posture: "credentials",
-        minimum_interval_seconds: 3600,
-        rationale: "API rate limits; high-friction credentials.",
-        recommended_interval_seconds: 86_400,
-        recommended_mode: "automatic",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          interaction_posture: "credentials",
+          minimum_interval_seconds: 3600,
+          rationale: "API rate limits; high-friction credentials.",
+          recommended_interval_seconds: 86_400,
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: "policy-warning-test",
+      display_name: "Policy Warning Test",
+      manifest_uri: "https://sources.example/policy-warning-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: "policy-warning-test",
-    display_name: "Policy Warning Test",
-    manifest_uri: "https://sources.example/policy-warning-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: "https://sources.example/policy-warning-test" }
+  );
 
   const server = (await startServer({
     asPort: 0,
@@ -1380,30 +1384,33 @@ test("schedule upsert returns policy_warning when interval is below minimum_inte
 });
 
 test("schedule upsert rejects enabling manual or background-unsafe connector policy", async () => {
-  const manifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: false,
-        interaction_posture: "otp_likely",
-        rationale: "Requires owner-present login.",
-        recommended_mode: "manual",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: false,
+          interaction_posture: "otp_likely",
+          rationale: "Requires owner-present login.",
+          recommended_mode: "manual",
+        },
       },
+      connector_id: "manual-unsafe-test",
+      display_name: "Manual Unsafe Test",
+      manifest_uri: "https://sources.example/manual-unsafe-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: "manual-unsafe-test",
-    display_name: "Manual Unsafe Test",
-    manifest_uri: "https://sources.example/manual-unsafe-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: "https://sources.example/manual-unsafe-test" }
+  );
 
   const server = (await startServer({
     asPort: 0,
@@ -1441,30 +1448,33 @@ test("schedule upsert permits an interactive-login connector that declares backg
   // mode is derived from the posture + background-safety, and those two
   // facts derive `automatic`. Declaring the derived mode keeps the fixture
   // honest without changing what this test asserts.
-  const manifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: true,
-        interaction_posture: "otp_likely",
-        rationale: "Owner-created schedule is allowed after the connection is marked background-safe.",
-        recommended_mode: "automatic",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: true,
+          interaction_posture: "otp_likely",
+          rationale: "Owner-created schedule is allowed after the connection is marked background-safe.",
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: "manual-safe-test",
+      display_name: "Manual Safe Test",
+      manifest_uri: "https://sources.example/manual-safe-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: "manual-safe-test",
-    display_name: "Manual Safe Test",
-    manifest_uri: "https://sources.example/manual-safe-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: "https://sources.example/manual-safe-test" }
+  );
 
   const server = (await startServer({
     asPort: 0,
@@ -1494,36 +1504,39 @@ test("schedule upsert permits an interactive-login connector that declares backg
 });
 
 test("schedule upsert permits assisted-after-owner-auth schedules as unattended session reuse", async () => {
-  const manifest = {
-    capabilities: {
-      public_listing: {
-        tier: "preview",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        public_listing: {
+          tier: "preview",
+        },
+        refresh_policy: {
+          assisted_after_owner_auth: true,
+          background_safe: true,
+          interaction_posture: "manual_action_likely",
+          minimum_interval_seconds: 3600,
+          rationale: "Owner-authenticated browser state is required before scheduled session reuse can proceed.",
+          recommended_interval_seconds: 3600,
+          recommended_mode: "automatic",
+        },
       },
-      refresh_policy: {
-        assisted_after_owner_auth: true,
-        background_safe: true,
-        interaction_posture: "manual_action_likely",
-        minimum_interval_seconds: 3600,
-        rationale: "Owner-authenticated browser state is required before scheduled session reuse can proceed.",
-        recommended_interval_seconds: 3600,
-        recommended_mode: "automatic",
-      },
+      connector_id: "assisted-after-owner-auth-test",
+      display_name: "Assisted After Owner Auth Test",
+      manifest_uri: "https://sources.example/assisted-after-owner-auth-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: "assisted-after-owner-auth-test",
-    display_name: "Assisted After Owner Auth Test",
-    manifest_uri: "https://sources.example/assisted-after-owner-auth-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: "https://sources.example/assisted-after-owner-auth-test" }
+  );
 
   const server = (await startServer({
     asPort: 0,
@@ -1554,29 +1567,32 @@ test("schedule upsert permits assisted-after-owner-auth schedules as unattended 
 });
 
 test("schedule resume rejects a disabled schedule when connector policy is background-unsafe", async () => {
-  const manifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: false,
-        rationale: "Automatic refresh needs an owner-present browser.",
-        recommended_mode: "automatic",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: false,
+          rationale: "Automatic refresh needs an owner-present browser.",
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: "background-unsafe-test",
+      display_name: "Background Unsafe Test",
+      manifest_uri: "https://sources.example/background-unsafe-test",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: "background-unsafe-test",
-    display_name: "Background Unsafe Test",
-    manifest_uri: "https://sources.example/background-unsafe-test",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: "https://sources.example/background-unsafe-test" }
+  );
 
   const server = (await startServer({
     asPort: 0,
@@ -1619,30 +1635,33 @@ test("GET /_ref/schedules surfaces ineligibility_reason for a stale enabled row 
   // must surface an explicit reason so the dashboard does not imply the row
   // is running.
   const connectorId = "stale-unsafe-reconcile-test";
-  const baseManifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: true,
-        interaction_posture: "credentials",
-        rationale: "API refresh; safe to background.",
-        recommended_mode: "automatic",
+  const baseManifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: true,
+          interaction_posture: "credentials",
+          rationale: "API refresh; safe to background.",
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: connectorId,
+      display_name: "Stale Unsafe Reconcile Test",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: connectorId,
-    display_name: "Stale Unsafe Reconcile Test",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
   const unsafeManifest = {
     ...baseManifest,
     capabilities: {
@@ -1719,56 +1738,62 @@ test("GET /_ref/schedules surfaces ineligibility_reason for a stale enabled row 
 
 test("GET /_ref/schedules omits ineligibility_reason when persisted row is disabled or policy is safe", async () => {
   const safeId = "eligible-schedule-listing-test";
-  const safeManifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: true,
-        interaction_posture: "credentials",
-        rationale: "API refresh; safe to background.",
-        recommended_mode: "automatic",
+  const safeManifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: true,
+          interaction_posture: "credentials",
+          rationale: "API refresh; safe to background.",
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: safeId,
+      display_name: "Eligible Schedule Listing Test",
+      manifest_uri: `https://sources.example/${safeId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: safeId,
-    display_name: "Eligible Schedule Listing Test",
-    manifest_uri: `https://sources.example/${safeId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: `https://sources.example/${safeId}` }
+  );
 
   const disabledId = "disabled-unsafe-listing-test";
-  const disabledManifest = {
-    capabilities: {
-      refresh_policy: {
-        background_safe: false,
-        interaction_posture: "otp_likely",
-        rationale: "Owner-present login required.",
-        recommended_mode: "manual",
+  const disabledManifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        refresh_policy: {
+          background_safe: false,
+          interaction_posture: "otp_likely",
+          rationale: "Owner-present login required.",
+          recommended_mode: "manual",
+        },
       },
+      connector_id: disabledId,
+      display_name: "Disabled Unsafe Listing Test",
+      manifest_uri: `https://sources.example/${disabledId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: disabledId,
-    display_name: "Disabled Unsafe Listing Test",
-    manifest_uri: `https://sources.example/${disabledId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: `https://sources.example/${disabledId}` }
+  );
 
   const server = (await startServer({
     asPort: 0,

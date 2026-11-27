@@ -326,6 +326,7 @@ test("runConnector: connector that exits before reading START does not crash the
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest,
       onInteraction: () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
       // biome-ignore lint/suspicious/noEmptyBlockStatements: skipped test callback is intentionally empty
@@ -512,6 +513,7 @@ main().catch(err => {
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest,
       onInteraction: () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
       // biome-ignore lint/suspicious/noEmptyBlockStatements: skipped test callback is intentionally empty
@@ -622,6 +624,7 @@ reader.once("line", () => {
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest,
       onInteraction: () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
       // biome-ignore lint/suspicious/noEmptyBlockStatements: this regression asserts only the returned protocol outcome

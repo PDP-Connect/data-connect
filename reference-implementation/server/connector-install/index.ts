@@ -22,8 +22,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
+import { BindingDeclarationError, parseManifestJsonText } from "../../runtime/binding-declarations.ts";
+import { snapshotSourceDeclaration } from "../source-declaration.ts";
 import {
   assertConnectorLifecycleAvailable,
   clearConnectorLifecycleUninstalled,
@@ -39,15 +42,19 @@ import {
 } from "../connector-uninstall-journal.ts";
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
+  checkConfinedFile,
   createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
+  readConfinedFile,
 } from "./local-source.ts";
 
 const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
+const SOURCE_DECLARATION_PATH = "source-declaration.json";
 const MANIFEST_REQUEST = /\/manifests\/(sha256:[0-9a-f]{64})$/;
 const BLOB_REQUEST = /\/blobs\/(sha256:[0-9a-f]{64})$/;
 
@@ -64,6 +71,11 @@ export interface ConnectorInstallRecord {
   readonly manifestSha256: string;
   readonly provenancePath: string;
   readonly provenanceSha256: string;
+  /**
+   * Digest of the verified `source-declaration.json` sidecar. Absent on legacy records: those keep their
+   * retained registry identity, and their sidecar bytes are never read as trusted.
+   */
+  readonly sourceDeclarationSha256?: string;
   readonly registry: "ghcr.io";
   readonly repository: string;
   readonly root: string;
@@ -94,13 +106,13 @@ export interface ConnectorCatalogSnapshot {
 
 interface InstallerCore {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
-  fetchCatalog?: (options: Record<string, unknown>) => Promise<unknown>;
-  fetchResolvedArtifact?: (
-    source: Record<string, unknown>,
+  fetchCatalog: (options: Record<string, unknown>) => Promise<unknown>;
+  fetchResolvedArtifact: (
+    source: null,
     entry: Record<string, unknown>,
     options: Record<string, unknown>
   ) => Promise<unknown>;
-  installFromLock: (options: Record<string, unknown>) => Promise<unknown>;
+  installFromLock: (options: Record<string, unknown> & { source: null }) => Promise<unknown>;
 }
 
 export interface ConnectorInstallStore {
@@ -420,24 +432,23 @@ function assertStoredRecordMetadata(active: ConnectorInstallRecord): void {
     active.repository !== `pdp-connect/connector/${active.connectorId}` ||
     active.manifestPath !== "profile/collection-profile.json" ||
     active.entrypointPath !== "dist/collection-profile.mjs" ||
-    active.provenancePath !== "provenance.json"
+    active.provenancePath !== "provenance.json" ||
+    (active.sourceDeclarationSha256 !== undefined && !DIGEST.test(active.sourceDeclarationSha256))
   ) {
     throw new Error("Active connector record is invalid.");
   }
 }
 
-function assertStoredFileHashes(root: string, active: ConnectorInstallRecord): void {
-  const checks: readonly [string, string][] = [
-    [active.manifestPath, active.manifestSha256],
-    [active.entrypointPath, active.entrypointSha256],
-    [active.provenancePath, active.provenanceSha256],
-  ];
-  for (const [path, expected] of checks) {
-    const file = confinedFile(root, path);
-    if (!(file && DIGEST.test(expected)) || sha256(file) !== expected) {
-      throw new Error("Active connector bytes failed integrity verification.");
-    }
+function readVerifiedStoredFile(root: string, path: string, expected: string, maxBytes?: number): Buffer {
+  const file = confinedFile(root, path);
+  const refusal = "Active connector bytes failed integrity verification.";
+  if (!(file && DIGEST.test(expected))) throw new Error(refusal);
+  const bytes = maxBytes === undefined ? readFileSync(file)
+    : readConfinedFile(checkConfinedFile(root, path, "Active connector metadata"), maxBytes, refusal);
+  if (sha256(bytes) !== expected) {
+    throw new Error(refusal);
   }
+  return bytes;
 }
 
 function acquireInstallLock(dataDir: string): DirectoryLock {
@@ -451,8 +462,8 @@ function acquireCatalogStateLock(dataDir: string): () => void {
     .release;
 }
 
-function sha256(path: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+function sha256(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function confinedFile(root: string, path: string): string | null {
@@ -555,6 +566,60 @@ export async function listVerifiedActiveConnectors(store: ConnectorInstallStore)
   return { invalid, verified };
 }
 
+/**
+ * The artifact a run would execute for this connector: a selected
+ * developer-local source first (an invalid one blocks, there is no fallback),
+ * then the installed active version, as the run path chooses between those two.
+ * The run path has a third fallback, the built-in seed connectors; they are not
+ * browser-bound connectors, so this inspection does not consider them. Both
+ * kinds are re-verified against their recorded bytes. A store that throws is
+ * not handled here: the caller decides what "could not inspect" means.
+ */
+export type SelectedConnectorArtifact =
+  | { readonly status: "none" }
+  | {
+      readonly status: "active";
+      readonly source: "installed" | "developer_local";
+      readonly version: string | null;
+      readonly digest: string | null;
+      readonly manifest: Record<string, unknown>;
+    }
+  | { readonly status: "invalid"; readonly source: "installed" | "developer_local"; readonly reason: string };
+
+export async function inspectSelectedConnectorArtifact(
+  store: ConnectorInstallStore,
+  localStore: LocalConnectorSourceStore,
+  connectorId: string
+): Promise<SelectedConnectorArtifact> {
+  const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
+  if (local.status === "invalid") {
+    return { reason: local.reason, source: "developer_local", status: "invalid" };
+  }
+  if (local.status === "active") {
+    return {
+      digest: local.record.entrypointSha256,
+      manifest: local.record.manifest,
+      source: "developer_local",
+      status: "active",
+      version: local.record.version,
+    };
+  }
+  const installed = await inspectActiveConnector(store, connectorId);
+  if (installed.status === "invalid") {
+    return { reason: installed.reason, source: "installed", status: "invalid" };
+  }
+  if (installed.status === "active") {
+    return {
+      digest: installed.record.digest,
+      manifest: installed.record.manifest,
+      source: "installed",
+      status: "active",
+      version: installed.record.version,
+    };
+  }
+  return { status: "none" };
+}
+
 /** Returns a runnable installed entrypoint only after every recorded byte check passes. */
 export async function resolveActiveConnectorPath(
   store: ConnectorInstallStore,
@@ -572,6 +637,22 @@ export async function resolveActiveConnectorPath(
   });
 }
 
+/**
+ * Parses a Collection Profile from the text on disk. A repeated object key is rejected, as on the HTTP and
+ * local-source paths: `JSON.parse` alone keeps the last value and the repeat is gone before registration. The
+ * error names no key or path, because the profile text is not trusted and an install error reaches the owner.
+ */
+function parseProfileText(text: string): unknown {
+  try {
+    return parseManifestJsonText(text);
+  } catch (error) {
+    if (error instanceof BindingDeclarationError) {
+      throw new Error("Connector profile repeats an object key.", { cause: error });
+    }
+    throw new Error("Connector profile is not valid JSON.", { cause: error });
+  }
+}
+
 function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDir?: string): ConnectorInstallRecord {
   assertStoredRecordMetadata(active);
   const normalizedRoot = resolve(root);
@@ -581,17 +662,79 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
     throw new Error("Active connector root is outside the connector data directory.");
   }
   assertNoSymlinkComponents(normalizedRoot);
-  assertStoredFileHashes(normalizedRoot, active);
-  const manifestFile = confinedFile(normalizedRoot, active.manifestPath);
-  if (!manifestFile) {
-    throw new Error("Active connector manifest path is invalid.");
-  }
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+  const manifestBytes = readVerifiedStoredFile(
+    normalizedRoot, active.manifestPath, active.manifestSha256, MAX_CONFIG_BYTES
+  );
+  readVerifiedStoredFile(normalizedRoot, active.entrypointPath, active.entrypointSha256);
+  readVerifiedStoredFile(normalizedRoot, active.provenancePath, active.provenanceSha256);
+  const manifest = parseProfileText(manifestBytes.toString("utf8")) as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifest);
   if (manifestKey !== active.connectorId) {
     throw new Error("Active connector manifest identity does not match its record.");
   }
-  return { ...active, manifest, root: normalizedRoot };
+  return {
+    ...active,
+    manifest: withVerifiedSourceDeclaration(normalizedRoot, active, manifest),
+    root: normalizedRoot,
+  };
+}
+
+/**
+ * Binds the verified Core source declaration to the profile manifest that registration reads. Only a
+ * record that carries the sidecar digest may supply it, so a legacy record (no digest) keeps its
+ * retained registry identity and its sidecar bytes are never trusted.
+ */
+function withVerifiedSourceDeclaration(
+  root: string,
+  active: ConnectorInstallRecord,
+  manifest: Record<string, unknown>
+): Record<string, unknown> {
+  if (active.sourceDeclarationSha256 === undefined) {
+    return manifest;
+  }
+  const file = confinedFile(root, SOURCE_DECLARATION_PATH);
+  if (!file) {
+    throw new Error("Active source declaration bytes failed integrity verification.");
+  }
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, SOURCE_DECLARATION_PATH, "Active source declaration"),
+    MAX_CONFIG_BYTES, "Active source declaration bytes failed integrity verification."
+  );
+  if (sha256(bytes) !== active.sourceDeclarationSha256) {
+    throw new Error("Active source declaration bytes failed integrity verification.");
+  }
+  const declaration = snapshotSourceDeclaration(JSON.parse(bytes.toString("utf8")));
+  if (manifest.source_declaration !== undefined && !isDeepStrictEqual(manifest.source_declaration, declaration)) {
+    throw new Error(
+      "Connector profile embeds a source declaration that conflicts with the verified source declaration."
+    );
+  }
+  return { ...manifest, source_declaration: declaration };
+}
+
+/**
+ * The sidecar digest when a source declaration file is present; undefined only when it is genuinely absent
+ * (ENOENT). Any other inspection error propagates: an unreadable sidecar is not a legacy root.
+ */
+function sourceDeclarationDigestOf(root: string): string | undefined {
+  const path = join(root, SOURCE_DECLARATION_PATH);
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  const file = confinedFile(root, SOURCE_DECLARATION_PATH);
+  if (!file) {
+    throw new Error("Verified source declaration is invalid.");
+  }
+  const bytes = readConfinedFile(
+    checkConfinedFile(root, SOURCE_DECLARATION_PATH, "Verified source declaration"),
+    MAX_CONFIG_BYTES, "Verified source declaration is invalid."
+  );
+  return sha256(bytes);
 }
 
 function assertCatalogEntry(entry: ConnectorCatalogEntry, connectorId: string, digest?: string): void {
@@ -611,7 +754,35 @@ function assertCatalogEntry(entry: ConnectorCatalogEntry, connectorId: string, d
   }
 }
 
-function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): ConnectorInstallRecord {
+/**
+ * A pinned install must carry exactly the sidecar its installer core verified. Absence and any other digest are
+ * refusals; no pinned digest means a legacy install, which accepts no sidecar check here.
+ */
+function assertPinnedSourceDeclaration(observed: string | undefined, pinned: string | undefined): void {
+  if (pinned === undefined) {
+    return;
+  }
+  if (!DIGEST.test(pinned)) {
+    throw new Error("Pinned source declaration digest is invalid.");
+  }
+  if (observed === undefined) {
+    throw new Error("Verified source declaration is missing for a pinned install.");
+  }
+  if (observed !== pinned) {
+    throw new Error("Verified source declaration does not match installer-core verification.");
+  }
+}
+
+/**
+ * Reads a root into an install record. `pinnedSourceDeclarationSha256` is the digest the pinned installer core
+ * verified: the sidecar must then exist and match it, and the record takes that digest as its authority. Without
+ * it (legacy installers), the sidecar is optional and its digest is observed from the staged bytes.
+ */
+function readVerifiedRecord(
+  root: string,
+  entry: ConnectorCatalogEntry,
+  pinnedSourceDeclarationSha256?: string
+): ConnectorInstallRecord {
   const manifestPath = "profile/collection-profile.json";
   const entrypointPath = "dist/collection-profile.mjs";
   const provenancePath = "provenance.json";
@@ -625,15 +796,19 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
   if (!(manifestFile && entrypointFile && provenanceFile)) {
     throw new Error("Verified connector layout is incomplete.");
   }
-  if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
-    throw new Error("Connector profile exceeds the 1 MiB RI limit.");
-  }
-  const manifest: unknown = JSON.parse(readFileSync(manifestFile, "utf8"));
+  const manifestBytes = readConfinedFile(
+    checkConfinedFile(root, manifestPath, "Connector profile"),
+    MAX_CONFIG_BYTES, "Connector profile exceeds the 1 MiB RI limit."
+  );
+  const manifest: unknown = parseProfileText(manifestBytes.toString("utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
   }
   const manifestRecord = manifest as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifestRecord);
+  const observedSourceDeclarationSha256 = sourceDeclarationDigestOf(root);
+  assertPinnedSourceDeclaration(observedSourceDeclarationSha256, pinnedSourceDeclarationSha256);
+  const sourceDeclarationSha256 = pinnedSourceDeclarationSha256 ?? observedSourceDeclarationSha256;
   if (manifestKey !== entry.connector_key) {
     throw new Error("Connector profile identity does not match the catalog target.");
   }
@@ -648,12 +823,13 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
     connectorId: entry.connector_id,
     digest: entry.digest,
     entrypointPath,
-    entrypointSha256: sha256(entrypointFile),
+    entrypointSha256: sha256(readFileSync(entrypointFile)),
     manifest: manifestRecord,
     manifestPath,
-    manifestSha256: sha256(manifestFile),
+    manifestSha256: sha256(manifestBytes),
     provenancePath,
-    provenanceSha256: sha256(provenanceFile),
+    provenanceSha256: sha256(readFileSync(provenanceFile)),
+    ...(sourceDeclarationSha256 === undefined ? {} : { sourceDeclarationSha256 }),
     registry: "ghcr.io",
     repository: `pdp-connect/connector/${entry.connector_key}`,
     root,
@@ -662,13 +838,28 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
   };
 }
 
+/** What registration may trust about an installed manifest. */
+export interface InstalledManifestProvenance {
+  /** The manifest's `source_declaration` is the sidecar the pinned installer core verified. */
+  readonly sourceDeclarationVerified: boolean;
+}
+
+export type RegisterInstalledManifest = (
+  manifest: Record<string, unknown>,
+  provenance: InstalledManifestProvenance
+) => Promise<unknown>;
+
+function installedManifestProvenance(record: ConnectorInstallRecord): InstalledManifestProvenance {
+  return { sourceDeclarationVerified: record.sourceDeclarationSha256 !== undefined };
+}
+
 async function reuseExistingInstall(
   root: string,
   entry: ConnectorCatalogEntry,
   existing: ConnectorInstallRecord | null,
   previousActive: ConnectorInstallRecord | null,
   dataDir: string,
-  registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
+  registerManifest: RegisterInstalledManifest,
   store: ConnectorInstallStore,
   signal: AbortSignal
 ): Promise<ConnectorInstallRecord> {
@@ -691,7 +882,7 @@ async function reuseExistingInstall(
     // own connection; rolling back the activation after that would leave the
     // two disagreeing, so a deadline during or after it lets the install finish.
     signal.throwIfAborted();
-    await registerManifest(verified.manifest);
+    await registerManifest(verified.manifest, installedManifestProvenance(verified));
     crashPoint("connector-install:after-register");
   } catch (error) {
     if (previousActive) {
@@ -704,12 +895,37 @@ async function reuseExistingInstall(
   return verified;
 }
 
+/**
+ * A pinned installer reports the config digest it verified and the digest of the source-declaration bytes it
+ * verified. The staged install must then carry exactly those bytes; a missing or different sidecar is refused.
+ */
+interface PinnedInstallResult {
+  readonly configDigest: string;
+  readonly sourceDeclarationSha256: string;
+}
+
+type InstallArtifactResult =
+  | string
+  | PinnedInstallResult
+  // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
+  | void;
+
+/** Legacy installers report a config digest string or nothing; the sidecar digest is then optional. */
 type InstallArtifact = (
   root: string,
   entry: ConnectorCatalogEntry,
   signal: AbortSignal
-  // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
-) => Promise<string | void> | string | void;
+) => Promise<InstallArtifactResult> | InstallArtifactResult;
+
+function installResultOf(result: InstallArtifactResult): {
+  readonly configDigest?: string;
+  readonly sourceDeclarationSha256?: string;
+} {
+  if (typeof result === "string") {
+    return { configDigest: result };
+  }
+  return result ? { configDigest: result.configDigest, sourceDeclarationSha256: result.sourceDeclarationSha256 } : {};
+}
 
 async function installStagedEntry(options: {
   readonly connectorId: string;
@@ -717,7 +933,7 @@ async function installStagedEntry(options: {
   readonly entry: ConnectorCatalogEntry;
   readonly existing: ConnectorInstallRecord | null;
   readonly installArtifact: InstallArtifact;
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterInstalledManifest;
   readonly root: string;
   readonly signal: AbortSignal;
   readonly store: ConnectorInstallStore;
@@ -726,13 +942,13 @@ async function installStagedEntry(options: {
   const staged = join(transaction, "next");
   let published = false;
   try {
-    const discoveredConfigDigest = await options.installArtifact(staged, options.entry, options.signal);
+    const installed = installResultOf(await options.installArtifact(staged, options.entry, options.signal));
     options.signal.throwIfAborted();
-    const verifiedEntry = discoveredConfigDigest
-      ? { ...options.entry, config_digest: discoveredConfigDigest }
+    const verifiedEntry = installed.configDigest
+      ? { ...options.entry, config_digest: installed.configDigest }
       : options.entry;
     assertCatalogEntry(verifiedEntry, options.connectorId, options.entry.digest);
-    const record = readVerifiedRecord(staged, verifiedEntry);
+    const record = readVerifiedRecord(staged, verifiedEntry, installed.sourceDeclarationSha256);
     renameSync(staged, options.root);
     published = true;
     const active = { ...record, root: options.root };
@@ -741,7 +957,7 @@ async function installStagedEntry(options: {
     crashPoint("connector-install:after-activate");
     // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
-    await options.registerManifest(verifiedActive.manifest);
+    await options.registerManifest(verifiedActive.manifest, installedManifestProvenance(verifiedActive));
     crashPoint("connector-install:after-register");
     return verifiedActive;
   } catch (error) {
@@ -763,6 +979,9 @@ export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
+  inspectSelected: (connectorId: string) => Promise<SelectedConnectorArtifact>;
+  /** Ids of active installs, read from the store without verifying their bytes. */
+  installedConnectorIds?: () => Promise<readonly string[]>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -781,7 +1000,7 @@ export function createConnectorInstallService(options: {
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
   /** Runs inside the install locks, so it must be bounded: persist the manifest, nothing O(records). */
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterInstalledManifest;
   /**
    * Repairs state derived from the connector's existing records. It is
    * O(records), so it runs after the install locks are released and the
@@ -1109,9 +1328,6 @@ export function createConnectorInstallService(options: {
       return null;
     }
     const core = await loadPinnedCore();
-    if (!core.fetchResolvedArtifact) {
-      throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-    }
     const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
       if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
         return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1120,7 +1336,7 @@ export function createConnectorInstallService(options: {
     };
     const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
     const artifact = await core.fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: entry.connector_id,
@@ -1155,6 +1371,8 @@ export function createConnectorInstallService(options: {
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
+    inspectSelected: (connectorId) => inspectSelectedConnectorArtifact(store, localSourceStore, connectorId),
+    installedConnectorIds: async () => (await store.listActive()).map((record) => record.connectorId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {
@@ -1219,9 +1437,6 @@ async function loadPinnedCore(): Promise<InstallerCore> {
 
 async function loadCatalogFromPinnedCore(lastAcceptedGeneratedAt: string | null): Promise<ConnectorCatalogSnapshot> {
   const core = await loadPinnedCore();
-  if (!core.fetchCatalog) {
-    throw new Error("Pinned connector installer core does not expose fetchCatalog.");
-  }
   const value = (await core.fetchCatalog({
     identity: core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
     registry: "ghcr.io",
@@ -1395,13 +1610,10 @@ async function installPinnedArtifact(
   root: string,
   entry: ConnectorCatalogEntry,
   signal: AbortSignal
-): Promise<string> {
+): Promise<PinnedInstallResult> {
   const core = await loadPinnedCore();
   const abortableFetch: FetchLike = (input, init) =>
     fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
-  if (!core.fetchResolvedArtifact) {
-    throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
-  }
   const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
     if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
       return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
@@ -1410,7 +1622,7 @@ async function installPinnedArtifact(
   };
   const preflightTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
-    { doc: {}, mode: "locked" },
+    null,
     {
       artifactKind: "pdpp-collection-profile",
       connectorId: entry.connector_id,
@@ -1447,7 +1659,6 @@ async function installPinnedArtifact(
   }
   const limitedTransport = createConfigLimitedFetch(abortableFetch, entry.digest);
   await core.installFromLock({
-    artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,
     installRoot: root,
     layout: "source",
@@ -1476,7 +1687,7 @@ async function installPinnedArtifact(
       registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
         ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
         : null,
-    source: { doc: {}, mode: "locked" },
+    source: null,
   });
   const installedConfigDigest = limitedTransport.configDigest();
   if (!installedConfigDigest || installedConfigDigest !== configDigest) {
@@ -1485,7 +1696,10 @@ async function installPinnedArtifact(
     );
   }
   normalizeCoreInstallLayout(root, entry.connector_id, verifiedSourceDeclaration);
-  return configDigest;
+  return {
+    configDigest,
+    sourceDeclarationSha256: sha256(verifiedSourceDeclaration),
+  };
 }
 
 export function normalizeCoreInstallLayout(
@@ -1494,11 +1708,15 @@ export function normalizeCoreInstallLayout(
   verifiedSourceDeclaration: Uint8Array
 ): void {
   const coreRoot = join(root, "collection-profiles", connectorId);
-  const sourceDeclarationPath = join(coreRoot, "source-declaration.json");
-  if (!existsSync(sourceDeclarationPath)) {
+  const sourceDeclarationPath = confinedFile(coreRoot, SOURCE_DECLARATION_PATH);
+  if (!sourceDeclarationPath) {
     throw new Error("Pinned installer core produced an incomplete collection-profile layout.");
   }
-  if (!readFileSync(sourceDeclarationPath).equals(Buffer.from(verifiedSourceDeclaration))) {
+  const sidecar = readConfinedFile(
+    checkConfinedFile(coreRoot, SOURCE_DECLARATION_PATH, "Staged source declaration"),
+    MAX_CONFIG_BYTES, "Staged source declaration exceeds the 1 MiB RI limit."
+  );
+  if (!sidecar.equals(Buffer.from(verifiedSourceDeclaration))) {
     throw new Error("Staged source declaration does not match installer-core verification.");
   }
 

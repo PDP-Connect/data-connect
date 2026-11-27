@@ -17,7 +17,7 @@ DONE. Every time the app is reopened and connected with the web app, it forces a
 ### ChatGPT shows login even though user is already logged in browser
 The user is already logged into ChatGPT in their browser but the app still asks them to log in again. This is partially by design — the Playwright runner imports cookies from the system Chrome profile into a separate browser profile, and the `promptUser` flow verifies the session. But if cookie import fails silently (Chrome profile locked, different encryption key, keychain access denied), the user sees a login page with no explanation. Need to check if cookie import actually succeeds and give better feedback when it doesn't.
 
-## Maciej (v0.7.13, dev build — says release build was fine)
+## Tester (v0.7.13, dev build — says release build was fine)
 
 ### Duplicated log lines
 DONE. Every single log line appears twice in the log file. This is a logging architecture issue: the Tauri log plugin writes to the file, and the stdout reader in `server.rs` also forwards process output to the same log, doubling everything. Not a functional bug but makes debugging painful. Check the log subscriber config and stdout forwarding.

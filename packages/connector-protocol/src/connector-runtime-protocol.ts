@@ -115,12 +115,16 @@ export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as
 /** Capability required by a connector that emits OBSERVATION (Collection Profile 0.2.0, Section 5.10). */
 export const OBSERVATION_CAPABILITY = "OBSERVATION" as const;
 
+/** Optional store collection evidence a connector may request for a run. */
+export const RUN_COVERAGE_V1_CAPABILITY = "RUN_COVERAGE_V1" as const;
+
 /** Protocol capabilities that can be advertised by a connector or runtime. */
 export type ConnectorProtocolCapability =
   | typeof STREAM_EVIDENCE_CAPABILITY
   | typeof HOST_BLOB_CAPABILITY
   | typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY
-  | typeof OBSERVATION_CAPABILITY;
+  | typeof OBSERVATION_CAPABILITY
+  | typeof RUN_COVERAGE_V1_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -136,15 +140,20 @@ export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapabili
   HOST_BLOB_CAPABILITY,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   OBSERVATION_CAPABILITY,
+  RUN_COVERAGE_V1_CAPABILITY,
 ];
 
 /**
  * Capabilities a runtime need not advertise to start a connector that
- * declares them (Collection Profile Section 3.4). Every other declared
- * capability is required.
+ * declares them. RUN_COVERAGE_V1 is an elective extension: a runtime that
+ * does not support it starts the connector without requesting or recording
+ * store evidence. DETAIL_COVERAGE_KEY_SETS has the same non-blocking spawn
+ * rule under Collection Profile Section 3.4. Every other declared capability
+ * is required.
  */
-const ADVISORY_CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+export const ELECTIVE_CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  RUN_COVERAGE_V1_CAPABILITY,
 ];
 
 function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
@@ -167,7 +176,7 @@ export function isConnectorProtocolCapabilityArray(value: unknown): value is rea
 
 /**
  * The declared capabilities a runtime that advertises `advertised` cannot
- * satisfy, in declaration order. An advisory capability is never in the
+ * satisfy, in declaration order. An elective capability is never in the
  * result. A runtime MUST NOT start a connector for which this is non-empty
  * (Collection Profile Sections 3.4 and 4).
  */
@@ -177,13 +186,13 @@ export function unsupportedRequiredProtocolCapabilities(
 ): ConnectorProtocolCapability[] {
   const supported = new Set<ConnectorProtocolCapability>(advertised);
   return declared.filter(
-    (capability) => !(supported.has(capability) || ADVISORY_CONNECTOR_PROTOCOL_CAPABILITIES.includes(capability))
+    (capability) => !(supported.has(capability) || ELECTIVE_CONNECTOR_PROTOCOL_CAPABILITIES.includes(capability))
   );
 }
 
 /**
  * Collection Profile versions a manifest `protocol_version` may name
- * (Collection Profile Sections 3.1 and 8). This is the profile version. It is
+ * (Collection Profile Sections 3.1 and 8). This is the base profile version. It is
  * independent of {@link CONNECTOR_PROTOCOL_VERSION} and of the Core
  * SourceDeclaration `protocol_version`, which Core fixes at 0.1.0.
  */
@@ -200,12 +209,15 @@ const PROFILE_0_2_0_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
  * valid Collection Profile declaration, or null when they are. An absent
  * (`undefined`) capability list declares none. The version must be one of
  * {@link COLLECTION_PROFILE_VERSIONS}, every capability name must be known,
- * and a manifest that declares a capability added in 0.2.0 must declare
- * 0.2.0 (Section 3.1).
+ * and a manifest that declares a capability added in 0.2.0 must use that
+ * profile version or later (Section 3.1). RUN_COVERAGE_V1 is an optional
+ * extension independent of the base profile version. A manifest that declares
+ * `coverage_stores` must also declare RUN_COVERAGE_V1.
  */
 export function collectionProfileDeclarationError(
   protocolVersion: unknown,
-  protocolCapabilities: unknown
+  protocolCapabilities: unknown,
+  coverageStoresDeclared = false
 ): string | null {
   if (!(COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(protocolVersion)) {
     return `protocol_version must be one of ${COLLECTION_PROFILE_VERSIONS.join(", ")}, received ${String(protocolVersion)}`;
@@ -217,6 +229,9 @@ export function collectionProfileDeclarationError(
   const profile020Only = declared.filter((capability) => PROFILE_0_2_0_CAPABILITIES.includes(capability));
   if (protocolVersion === "0.1.0" && profile020Only.length > 0) {
     return `protocol_capabilities ${profile020Only.join(", ")} require protocol_version 0.2.0`;
+  }
+  if (coverageStoresDeclared && !declared.includes(RUN_COVERAGE_V1_CAPABILITY)) {
+    return "coverage_stores requires protocol_capabilities RUN_COVERAGE_V1";
   }
   return null;
 }
@@ -307,6 +322,8 @@ export interface StartMessage {
    * backward compatibility with connectors/tests that predate this field.
    */
   collection_mode?: "full_refresh" | "incremental";
+  /** Canonical boundary fingerprint that a terminal coverage verdict must echo. */
+  collection_scope?: string;
   detail_gaps?: readonly DetailGapStartEntry[];
   /**
    * The host advertises the protocol capabilities it implements. Absent means
@@ -322,6 +339,8 @@ export interface StartMessage {
    * new source-touching work. Absent/false = an ordinary full run.
    */
   recovery_only?: boolean;
+  /** Optional negotiated store collection evidence, independent of protocol_version. */
+  run_coverage_version?: 1;
   scope: { streams: readonly StreamScope[] };
   state?: Record<string, unknown>;
   streamsToBackfill?: readonly string[];
@@ -769,6 +788,21 @@ export interface ProgressExtra {
  */
 export type SkipResultBoundaryClaim = "provider_history_boundary";
 
+/** A terminal claim about one named source store within a requested stream. */
+export type RunCoverageStatus = "collected" | "partial" | "unavailable" | "failed";
+
+export interface RunCoverageVerdict {
+  /** Fingerprint received in START; `unscoped` names a full pass. */
+  collection_scope: string;
+  streams: readonly {
+    /** True only when the requested boundary was enforced during enumeration. */
+    scoped: boolean;
+    stores: readonly { status: RunCoverageStatus; store: string }[];
+    stream: string;
+  }[];
+  version: 1;
+}
+
 export type EmittedMessage =
   | HostBlobMessage
   | {
@@ -892,6 +926,8 @@ export type EmittedMessage =
       type: "DONE";
       status: "succeeded" | "failed";
       records_emitted: number;
+      /** Optional terminal store verdict; absence carries no coverage proof. */
+      coverage?: RunCoverageVerdict;
       error?: {
         code?: string;
         message: string;

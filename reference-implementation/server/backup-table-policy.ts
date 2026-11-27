@@ -74,6 +74,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Subscriptions are durable client delivery configuration.",
   },
+  collection_run_sequences: {
+    classification: "backup_required",
+    reason:
+      "The run sequence the server issued to each run at its start, with its storage epoch. It decides whether a terminal coverage proof can be current, and cannot be rebuilt from any other table. A restore that regresses it must be followed by the storage-epoch restore step (scripts/mark-storage-restored.ts).",
+  },
   connector_accepted_declarations: {
     classification: "backup_required",
     reason:
@@ -143,6 +148,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connector_maintenance_cursor: {
     classification: "backup_required",
     reason: "Maintenance sweep cursors can be retried after crash recovery.",
+  },
+  connector_observation_runs: {
+    classification: "backup_required",
+    reason:
+      "Collection Profile diagnostic record per completed run (runtime observation snapshot and diagnosis, bounded to 8 runs per connector). It is owner-visible evidence that cannot be rebuilt from connector state or records, so a restore that drops it loses the diagnosis of recent failed runs.",
   },
   connector_schedules: {
     classification: "backup_required",
@@ -323,6 +333,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   provider_app_config: {
     classification: "backup_required",
     reason: "Provider app secrets/config depend on the credential encryption key.",
+  },
+  provider_invalidation_proofs: {
+    classification: "backup_required",
+    reason:
+      "Runtime-observed sign-in proofs and their repaired markers; losing the markers would replay an already-handled sign-in prompt.",
   },
   record_acquisition_provenance: {
     classification: "backup_required",

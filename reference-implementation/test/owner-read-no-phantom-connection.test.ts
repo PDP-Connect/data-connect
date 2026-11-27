@@ -13,52 +13,55 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { issueOwnerToken, registerConnector } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "test-manual-artifact";
 
-const manualArtifactManifest = {
-  capabilities: {
-    public_listing: { tier: "supported" },
-    refresh_policy: {
-      background_safe: false,
-      interaction_posture: "manual_action_likely",
-      rationale: "The test source is populated only when the owner uploads an artifact.",
-      recommended_mode: "manual",
-    },
-  },
-  connector_id: CONNECTOR_ID,
-  connector_key: "test-manual-artifact",
-  display_name: "Test Manual Artifact",
-  manifest_uri: "https://registry.pdpp.dev/connectors/test-manual-artifact",
-  protocol_version: "0.1.0",
-  setup: {
-    manual_or_upload: {
-      accepted_file_extensions: [".txt"],
-      label: "Manual artifact",
-      validation: { kind: "test_manual_artifact" },
-    },
-    modality: "manual_or_upload",
-  },
-  streams: [
-    {
-      name: "messages",
-      primary_key: ["id"],
-      schema: {
-        properties: { id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const manualArtifactManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: {
+      public_listing: { tier: "supported" },
+      refresh_policy: {
+        background_safe: false,
+        interaction_posture: "manual_action_likely",
+        rationale: "The test source is populated only when the owner uploads an artifact.",
+        recommended_mode: "manual",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
     },
-  ],
-  version: "1.0.0",
-};
+    connector_id: CONNECTOR_ID,
+    connector_key: "test-manual-artifact",
+    display_name: "Test Manual Artifact",
+    manifest_uri: "https://registry.pdpp.dev/connectors/test-manual-artifact",
+    protocol_version: "0.1.0",
+    setup: {
+      manual_or_upload: {
+        accepted_file_extensions: [".txt"],
+        label: "Manual artifact",
+        validation: { kind: "test_manual_artifact" },
+      },
+      modality: "manual_or_upload",
+    },
+    streams: [
+      {
+        name: "messages",
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/test-manual-artifact" }
+);
 
 // `closeAllConnections` exists on Node's http/http2 server objects at
 // runtime but is not declared on the `tls.Server`/`Http2SecureServer`

@@ -35,6 +35,7 @@ import {
 } from "../server/explore-timeline-substrate.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
@@ -661,34 +662,37 @@ const SEM_STREAM = "conversations";
 
 // `create_time` is the declared semantic field. Manifest mirrors a ChatGPT-shaped
 // stream: an authored timestamp distinct from ingest time.
-const SEM_MANIFEST = {
-  capabilities: { human_interaction: [] },
-  connector_id: SEM_CONNECTOR_ID,
-  connector_key: SEM_CONNECTOR_KEY,
-  display_name: "Explore Semantic-Time Test Connector",
-  manifest_uri: SEM_MANIFEST_URI,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "create_time",
-      cursor_field: "create_time",
-      name: SEM_STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          create_time: { format: "date-time", type: ["string", "null"] },
-          id: { type: "string" },
-          title: { type: ["string", "null"] },
+const SEM_MANIFEST = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: SEM_CONNECTOR_ID,
+    connector_key: SEM_CONNECTOR_KEY,
+    display_name: "Explore Semantic-Time Test Connector",
+    manifest_uri: SEM_MANIFEST_URI,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "create_time",
+        cursor_field: "create_time",
+        name: SEM_STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            create_time: { format: "date-time", type: ["string", "null"] },
+            id: { type: "string" },
+            title: { type: ["string", "null"] },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: SEM_MANIFEST_URI }
+);
 
 // Ingest order (the order of this array) ASCENDS by emitted_at: r1 ingested
 // first/oldest emitted_at, r4 last/newest emitted_at. create_time is INVERTED:

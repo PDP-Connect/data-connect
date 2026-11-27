@@ -6,7 +6,7 @@
  * store's teardown guarantee under a genuine fault in the terminal-
  * processing callback.
  *
- * Independent re-review (STREAM-EVIDENCE-P1-2-REREVIEW.md item 4) found
+ * An independent re-review found
  * the prior round's proof of this property used a temporary, fully-
  * reverted source mutation (an unconditional throw manually inserted,
  * observed, then removed) rather than a permanent test — leaving no
@@ -42,6 +42,7 @@ import { runConnector } from "../runtime/index.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -147,32 +148,35 @@ function fakeAdmitRunConnection(): (input: {
 }
 
 function manifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "checkpoint_window",
-        name: "message_bodies",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-        state_stream: "messages",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "message_bodies",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "messages",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];

@@ -52,7 +52,7 @@ async function seed(sourceInstanceIds: readonly string[]): Promise<void> {
   });
   for (const sourceInstanceId of sourceInstanceIds) {
     await store.upsertSourceInstance({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       createdAt,
       deviceId: "dev_pgsilence",
       localBindingId: sourceInstanceId,

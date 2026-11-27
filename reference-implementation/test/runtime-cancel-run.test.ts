@@ -43,7 +43,7 @@ import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connecto
 const STREAM = "items";
 
 const MANIFEST = {
-  connector_id: "https://registry.pdpp.dev/connectors/runtime-cancel-stub",
+  connector_id: "runtime-cancel-stub",
   runtime_requirements: {},
   streams: [
     {
@@ -155,10 +155,38 @@ main();
   return { stubPath, tmpDir };
 }
 
-function freshDb(t: TestContext): void {
+interface FreshDb {
+  dir: string;
+  handle: ReturnType<typeof getDb>;
+}
+
+// Opens the DB without registering its teardown, for a test that must close it
+// only after something else has finished using it. Returns what it opened.
+function openFreshDb(): FreshDb {
   closeDb();
-  initDb(join(mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-")), "pdpp.sqlite"));
-  t.after(() => closeDb());
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-db-"));
+  try {
+    initDb(join(dir, "pdpp.sqlite"));
+  } catch (error) {
+    // No caller holds `dir` yet, so no teardown can remove it.
+    rmSync(dir, { force: true, recursive: true });
+    throw error;
+  }
+  return { dir, handle: getDb() };
+}
+
+// Closes only the handle openFreshDb opened, and only while it is still the
+// current one: a teardown that runs late must not close a later test's DB.
+function closeFreshDb({ dir, handle }: FreshDb): void {
+  if (getDb() === handle) {
+    closeDb();
+  }
+  rmSync(dir, { force: true, recursive: true });
+}
+
+function freshDb(t: TestContext): void {
+  const fresh = openFreshDb();
+  t.after(() => closeFreshDb(fresh));
 }
 
 interface SpineEventRow {
@@ -352,3 +380,126 @@ test("runtime owner-cancel: a raced successful DONE still returns the cancelled 
   assert.ok(events.includes("run.cancelled"));
   assert.ok(!events.includes("run.completed"));
 });
+
+// A connector blocked on an INTERACTION stays blocked until the runtime sends
+// INTERACTION_RESPONSE. Cancellation and the scheduler timeout must settle that
+// wait instead of holding the run for the interaction's own timeout.
+for (const { abortReason, expectedStatus, expectedTerminalEvent } of [
+  { abortReason: undefined, expectedStatus: "cancelled", expectedTerminalEvent: "run.cancelled" },
+  { abortReason: "run_timed_out", expectedStatus: "failed", expectedTerminalEvent: "run.failed" },
+]) {
+  test(`runtime ${abortReason ?? "owner-cancel"}: a run blocked on an INTERACTION ends without an answer`, { timeout: 10_000 }, async (t) => {
+    const controller = new AbortController();
+    let releaseHandler: () => void = () => undefined;
+    let outcome: Promise<unknown> | undefined;
+    let fresh: FreshDb | undefined;
+    let tmpDir: string | undefined;
+    // One ordered teardown, registered before anything can fail, so it
+    // tolerates what was never opened. Node runs after hooks in registration
+    // order, so separate hooks for the DB, the directory and the release would
+    // close the DB and delete the stub before the run had ended. Whether the
+    // test passes, fails or times out: release the pending handler, re-request
+    // cancellation, wait for the run to settle (its terminal write and child
+    // cleanup), then close this test's DB and remove its directories. Node
+    // does not cancel this continuation when the hook's timeout fires, so it
+    // closes the DB only while it is still the current one. The hook timeout
+    // bounds a run that never settles; it is Node's own, not a timer in this
+    // file.
+    t.after(
+      async () => {
+        releaseHandler();
+        controller.abort(abortReason);
+        await outcome;
+        if (fresh) {
+          closeFreshDb(fresh);
+        }
+        if (tmpDir) {
+          rmSync(tmpDir, { force: true, recursive: true });
+        }
+      },
+      { timeout: 10_000 }
+    );
+    fresh = openFreshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-cancel-interaction-"));
+    const stubPath = join(tmpDir, "stub.mjs");
+    writeFileSync(
+      stubPath,
+      `import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.once('line', () => {
+  process.stdout.write(JSON.stringify({
+    type: 'INTERACTION', request_id: 'int_otp', kind: 'otp', message: 'Enter the code', timeout_seconds: 600,
+  }) + '\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      "utf8"
+    );
+    const runId = `run_cancel_blocked_interaction_${abortReason ?? "owner"}`;
+    // The cancellation budget is measured from the observed interaction, not
+    // from server setup: freshDb, the stub write and the child spawn cannot
+    // eat into it. No timer (the real-wait ratchet counts one): the elapsed
+    // check after the run ends catches a late settle, and the test timeout
+    // above stays as the ceiling for a run that never ends.
+    let interactionObservedAt: number | undefined;
+    outcome = runConnector({
+      admitRunConnection: async ({ connectorId }) => {
+        await Promise.resolve();
+        const exactId = makeDefaultAccountConnectorInstanceId(OWNER_AUTH_DEFAULT_SUBJECT_ID, connectorId);
+        return { connectorId, connectorInstanceId: exactId, ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID };
+      },
+      cancelSignal: controller.signal,
+      collectionMode: "full_refresh",
+      connectorId: MANIFEST.connector_id,
+      connectorPath: stubPath,
+      manifest: { ...MANIFEST, capabilities: { human_interaction: ["otp"] } },
+      // An owner who never answers: the handler settles only when the test
+      // releases it after the assertions.
+      onInteraction: (interaction) => {
+        interactionObservedAt ??= performance.now();
+        setImmediate(() => controller.abort(abortReason));
+        return new Promise((resolve) => {
+          releaseHandler = () =>
+            resolve({ request_id: interaction.request_id, status: "cancelled", type: "INTERACTION_RESPONSE" });
+        });
+      },
+      onProgress: () => undefined,
+      ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
+      ownerToken: "test-owner-token",
+      rsUrl: "http://127.0.0.1:9",
+      runId,
+      state: null,
+    }).then(
+      (value) => value,
+      (err: unknown) => err
+    );
+    const settled = await outcome;
+    releaseHandler();
+    // The guard first, so the elapsed check cannot pass vacuously on a run
+    // that ended without ever reaching its interaction.
+    assert.notEqual(
+      interactionObservedAt,
+      undefined,
+      "the run must observe its pending INTERACTION before it can end"
+    );
+    assert.ok(
+      interactionObservedAt !== undefined &&
+        performance.now() - interactionObservedAt < 5_000,
+      "the run must end within the kill grace, not the 600 s interaction timeout"
+    );
+
+    assert.equal((settled as { status?: unknown }).status, expectedStatus);
+    const events = spineEventsForRun(runId);
+    const types = events.map((event) => event.event_type);
+    assert.deepEqual(
+      types.filter((type) => type === "run.cancelled" || type === "run.failed" || type === "run.completed"),
+      [expectedTerminalEvent],
+      "exactly one terminal event"
+    );
+    assert.deepEqual(
+      events.filter((event) => event.event_type === "run.interaction_completed").map((event) => event.status),
+      ["cancelled"],
+      "the pending interaction settles once, as cancelled"
+    );
+  });
+}

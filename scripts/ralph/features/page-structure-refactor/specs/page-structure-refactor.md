@@ -2,7 +2,7 @@
 
 ## Source
 
-- `docs/260203-page-structure-refactor.md`
+- a source doc since removed from the tree (see git history)
 
 ## Goals
 

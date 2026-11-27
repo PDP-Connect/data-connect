@@ -482,7 +482,7 @@ test("burst order: three same-day bursts (newest members 23m/19m/31m ago) sort N
   const ago23 = "2026-06-19T14:37:00Z";
   const ago19 = "2026-06-19T14:41:00Z";
   const ago31 = "2026-06-19T14:29:00Z";
-  // Feed arrives in the BAD order Tim saw: A(23m) first, then B(19m), then C(31m).
+  // Feed arrives in the BAD order seen in practice: A(23m) first, then B(19m), then C(31m).
   const feed = [
     ...burstNewestAt("codex_messages", "cin_codex", ago23), // A
     ...burstNewestAt("codex_calls", "cin_codex2", ago19), // B

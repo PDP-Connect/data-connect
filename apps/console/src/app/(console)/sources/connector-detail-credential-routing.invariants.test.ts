@@ -22,7 +22,7 @@ const SESSION_BOUND_RESOLVED = /const sessionBound = isBrowserSessionBoundConnec
 const STORED_CREDENTIAL_HREF_RESOLVED =
   /const storedCredentialUpdateHref =\s*staticSecretCapture === null \? null : updateCredentialHref\(connectorId, repairConnectionId\)/;
 const BROWSER_SESSION_HREF_RESOLVED =
-  /const browserSessionRepairHref =\s*sessionBound \|\| isBrowserBoundConnector\(connectorId\)\s*\? browserSessionReconnectHref\(connectorId, repairConnectionId\)/;
+  /const browserSessionRepairHref =\s*sessionBound \|\| manifestBrowserBound\s*\? browserSessionReconnectHref\(connectorId, repairConnectionId\)/;
 const SESSION_BOUND_PRECEDES_STATIC_SECRET =
   /if \(sessionBound\) \{[\s\S]{0,120}return browserSessionRepairHref;[\s\S]{0,120}if \(storedCredentialUpdateHref !== null\) \{/;
 // The static-secret update affordance is suppressed for a session-bound

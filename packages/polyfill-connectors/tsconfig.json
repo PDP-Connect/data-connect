@@ -46,7 +46,7 @@
   },
   "include": [
     "src/**/*.ts",
-    "connectors/google_messages/**/*.ts",
+    "connectors/google-messages/**/*.ts",
     "bin/**/*.ts",
     "bench/**/*.ts",
     "types/**/*.d.ts"

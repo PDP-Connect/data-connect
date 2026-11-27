@@ -8,7 +8,7 @@
  *   POST /_ref/connections/:connectorInstanceId/acknowledge-loss
  *
  * This is the missing write path for `runtime/acknowledged-loss.ts`
- * (BANNER-ZERO-PLAN.md workstream E, H-E-B gezalsatx row): the record shape,
+ * (BANNER-ZERO-PLAN.md workstream E, H-E-B terminal-gap row): the record shape,
  * validation, and rendering already existed and are covered by
  * `test/acknowledged-loss.test.ts` and `test/acknowledged-loss-store.test.ts`
  * — this suite proves only the NEW route's own behavior (auth, validation,
@@ -179,7 +179,7 @@ function postAcknowledgeLoss(
 
 const HEB_PURGE_BODY = {
   acknowledged_at: "2026-08-21T00:00:00.000Z",
-  acknowledged_by: "Tim Nunamaker",
+  acknowledged_by: "Jane Doe",
   cause: "provider_deleted_upstream",
   note: "H-E-B purged the order history; heb.com no longer shows those orders.",
   scope: "total",
@@ -248,7 +248,7 @@ test("owner-session stamps an acknowledgement (200), writes source_binding only,
     const stamped = ack.body.acknowledged_loss as Record<string, unknown>;
     assert.equal(stamped.cause, "provider_deleted_upstream");
     assert.equal(stamped.scope, "total");
-    assert.equal(stamped.acknowledgedBy, "Tim Nunamaker");
+    assert.equal(stamped.acknowledgedBy, "Jane Doe");
 
     const after = await store.get("cin_ack_loss_stamp");
     assert.equal(after?.status, before?.status, "acknowledging loss must never change connection status");

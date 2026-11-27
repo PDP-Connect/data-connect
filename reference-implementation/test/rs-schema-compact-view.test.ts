@@ -35,6 +35,7 @@ import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Documented byte budgets for the compact REST schema view. These are the
 // regression guards: if a future change re-introduces verbatim-by-default on
@@ -148,41 +149,44 @@ function isVerboseFieldCapability(value: unknown): value is { schema: { descript
 }
 
 function makeLargeManifest({ streamCount = 6, fieldsPerStream = 30 } = {}) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: CONNECTOR_ID,
-    display_name: "Compact Schema Fixture Connector",
-    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-    protocol_version: "0.1.0",
-    streams: Array.from({ length: streamCount }, (_, s) => {
-      const properties: ManifestProperties = {
-        id: { type: "string" },
-        received_at: { format: "date-time", type: "string" },
-      };
-      const rangeFilters = { received_at: ["gte", "lte"] };
-      for (let f = 0; f < fieldsPerStream; f += 1) {
-        // A verbose per-field JSON Schema: the size driver. A real RS attaches
-        // the full declared JSON Schema (descriptions, enums, examples).
-        properties[`field_${f}`] = {
-          description: "x".repeat(FIELD_SCHEMA_BLOB_PADDING),
-          // biome-ignore lint/suspicious/noShadow: the nested fixture scope intentionally uses the domain term from its enclosing scenario.
-          examples: Array.from({ length: 4 }, (_, e) => `example-${f}-${e}`.repeat(8)),
-          type: "string",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: CONNECTOR_ID,
+      display_name: "Compact Schema Fixture Connector",
+      manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+      protocol_version: "0.1.0",
+      streams: Array.from({ length: streamCount }, (_, s) => {
+        const properties: ManifestProperties = {
+          id: { type: "string" },
+          received_at: { format: "date-time", type: "string" },
         };
-      }
-      return {
-        consent_time_field: "received_at",
-        cursor_field: "received_at",
-        name: `stream_${s}`,
-        primary_key: ["id"],
-        query: { range_filters: rangeFilters },
-        schema: { properties, required: ["id", "received_at"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      };
-    }),
-    version: "1.0.0",
-  };
+        const rangeFilters = { received_at: ["gte", "lte"] };
+        for (let f = 0; f < fieldsPerStream; f += 1) {
+          // A verbose per-field JSON Schema: the size driver. A real RS attaches
+          // the full declared JSON Schema (descriptions, enums, examples).
+          properties[`field_${f}`] = {
+            description: "x".repeat(FIELD_SCHEMA_BLOB_PADDING),
+            // biome-ignore lint/suspicious/noShadow: the nested fixture scope intentionally uses the domain term from its enclosing scenario.
+            examples: Array.from({ length: 4 }, (_, e) => `example-${f}-${e}`.repeat(8)),
+            type: "string",
+          };
+        }
+        return {
+          consent_time_field: "received_at",
+          cursor_field: "received_at",
+          name: `stream_${s}`,
+          primary_key: ["id"],
+          query: { range_filters: rangeFilters },
+          schema: { properties, required: ["id", "received_at"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        };
+      }),
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+  );
 }
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<{ body: SchemaHttpBody; status: number }> {

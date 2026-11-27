@@ -47,6 +47,7 @@ import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 // biome-ignore lint/performance/noNamespaceImport: namespace import is required to exercise module surface
 import * as recordsModule from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "agg-time-buckets";
 const STREAM = "events";
@@ -60,8 +61,10 @@ interface AggregationsDeclaration {
   [key: string]: unknown;
 }
 
+// The fixture's source identity is explicit and authored (see withFixtureSourceDeclaration). Registration never
+// infers a source from the manifest's own provenance (`manifest_uri`).
 function manifestWith(aggregations: AggregationsDeclaration) {
-  return {
+  return withFixtureSourceDeclaration({
     capabilities: { human_interaction: [] },
     connector_id: CONNECTOR_ID,
     display_name: "Aggregate Time Buckets Test Connector",
@@ -88,7 +91,7 @@ function manifestWith(aggregations: AggregationsDeclaration) {
       },
     ],
     version: "1.0.0",
-  };
+  });
 }
 
 // `server/auth.ts` and `server/records.js` are untyped legacy JS:
@@ -560,10 +563,12 @@ test("manifest validation accepts valid group_by_time / count_distinct declarati
 test("manifest validation rejects a non-date group_by_time field", async () => {
   initDb();
   try {
-    await assert.rejects(
-      () => registerConnector(manifestWith({ count: true, group_by_time: ["sender"] })),
-      TOP_LEVEL_REGEX_11
-    );
+    // Keep the source declaration valid; only registration's collection-manifest input is malformed.
+    const manifest = manifestWith(FULL_AGGREGATIONS);
+    const [stream] = manifest.streams;
+    assert.ok(stream);
+    stream.query.aggregations = { count: true, group_by_time: ["sender"] };
+    await assert.rejects(() => registerConnector(manifest), TOP_LEVEL_REGEX_11);
   } finally {
     closeDb();
   }
@@ -572,10 +577,11 @@ test("manifest validation rejects a non-date group_by_time field", async () => {
 test("manifest validation rejects an unknown count_distinct field", async () => {
   initDb();
   try {
-    await assert.rejects(
-      () => registerConnector(manifestWith({ count: true, count_distinct: ["nope"] })),
-      TOP_LEVEL_REGEX_12
-    );
+    const manifest = manifestWith(FULL_AGGREGATIONS);
+    const [stream] = manifest.streams;
+    assert.ok(stream);
+    stream.query.aggregations = { count: true, count_distinct: ["nope"] };
+    await assert.rejects(() => registerConnector(manifest), TOP_LEVEL_REGEX_12);
   } finally {
     closeDb();
   }

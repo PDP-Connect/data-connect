@@ -33,6 +33,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { STREAM_FACTS_FOLD_LOGIC_VERSION } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { listConnectorSummaries } from "../server/ref-control.ts";
 
@@ -111,9 +112,9 @@ function seedPersistedEvidenceRow({
          connector_instance_id, connector_id, display_name, status, source_kind,
          total_records, stream_count, stream_records_json, dirty, computed_at, state,
          record_snapshot_state, terminal_facts_state, manifest_declaration_state,
-         retained_bytes_state, stream_latest_facts_json
+         retained_bytes_state, stream_latest_facts_json, stream_facts_fold_version
        ) VALUES (?, ?, ?, 'active', 'account', 0, 0, ?, 0, ?, 'fresh',
-                 'current', 'current', 'current', 'current', ?)`
+                 'current', 'current', 'current', 'current', ?, ?)`
     )
     .run(
       connectorInstanceId,
@@ -129,7 +130,8 @@ function seedPersistedEvidenceRow({
         },
       ]),
       NOW,
-      streamLatestFacts === null ? null : JSON.stringify(streamLatestFacts)
+      streamLatestFacts === null ? null : JSON.stringify(streamLatestFacts),
+      STREAM_FACTS_FOLD_LOGIC_VERSION
     );
 }
 

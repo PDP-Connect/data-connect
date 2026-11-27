@@ -9,8 +9,8 @@ it until each has its own publishability review.
 
 ### Where connector code comes from
 
-Each supported connector (`claude_code`, `codex`, `google_takeout`,
-`imessage`, `apple_photos`) is a signed Collection Profile published by
+Each supported connector (`claude-code`, `codex`, `google-takeout`,
+`imessage`, `apple-photos`) is a signed Collection Profile published by
 [data-connectors](https://github.com/PDP-Connect/data-connectors) to
 `ghcr.io/pdp-connect/connector/<key>`. This package pins one release of each
 by OCI digest (`src/generated/collection-profile-pins.generated.ts`), so the
@@ -25,7 +25,7 @@ That first run needs network access to `ghcr.io` and to Sigstore. Later runs
 check the installed files against the pinned hashes and need no network; an
 installed copy that fails the check is moved aside and installed again.
 
-`google_messages` is not available: data-connectors does not publish a
+`google-messages` is not available: data-connectors does not publish a
 Collection Profile for it yet, and the collector refuses it by name.
 
 To move the pins to the catalog's latest releases (network required):
@@ -95,10 +95,10 @@ JSON/env-var copying:
 npx -y @pdpp/local-collector setup \
   --base-url https://<reference-host> \
   --code <one-time-code> \
-  --connector claude_code \
+  --connector claude-code \
   --sample 20   # bounded proof pass: verify without collecting the whole archive
 
-# credentials are saved to ~/.config/pdpp/collectors/claude_code.env (0600);
+# credentials are saved to ~/.config/pdpp/collectors/claude-code.env (0600);
 # run resolves them automatically from --connection-id alone:
 npx -y @pdpp/local-collector run --connection-id <source_instance_id>
 ```
@@ -118,7 +118,7 @@ first:
 npx -y @pdpp/local-collector connect \
   --base-url https://<reference-host> \
   --code <one-time-code> \
-  --connector claude_code \
+  --connector claude-code \
   --recent 30
 
 # Explicit full history:
@@ -127,7 +127,7 @@ npx -y @pdpp/local-collector connect --base-url https://<reference-host> \
 
 # Custom boundary — since a timestamp, and/or specific project roots:
 npx -y @pdpp/local-collector connect --base-url https://<reference-host> \
-  --code <one-time-code> --connector claude_code \
+  --code <one-time-code> --connector claude-code \
   --since 2026-07-01T00:00:00.000Z --source-roots ~/code/project-a,~/code/project-b
 ```
 
@@ -183,7 +183,7 @@ npx -y @pdpp/local-collector connectors
 # Revoke this device's credential on the reference server, then remove its
 # saved local profile. Add --local-only to skip the server call (only for an
 # unreachable/decommissioned server — the device token stays live otherwise).
-npx -y @pdpp/local-collector logout --connector claude_code
+npx -y @pdpp/local-collector logout --connector claude-code
 
 # Preview host-local recovery for a stalled collector lane. This loads the
 # enrolled local profile for the source instance and changes nothing.
@@ -211,7 +211,7 @@ PDPP_LOCAL_DEVICE_TOKEN=<device_token> \
 PDPP_CONNECTION_ID=<source_instance_id> \
 npx -y @pdpp/local-collector run \
   --base-url https://<reference-host> \
-  --connector claude_code
+  --connector claude-code
 ```
 
 The collector sends `X-PDPP-Collector-Protocol` on enrollment and every

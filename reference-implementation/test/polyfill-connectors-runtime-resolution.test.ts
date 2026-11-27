@@ -36,15 +36,15 @@ test("the first base that resolves the specifier wins", () => {
       },
       (specifier) => {
         seen.push(`cwd:${specifier}`);
-        return { PRODUCTION_READY_CONNECTORS: { reddit: {} } };
+        return { readPolyfillManifests: "cwd" };
       },
     ],
-    "@pdpp/polyfill-connectors/connector-conformance-roster"
+    "@pdpp/polyfill-connectors/manifests"
   );
-  assert.deepEqual(found, { PRODUCTION_READY_CONNECTORS: { reddit: {} } });
+  assert.deepEqual(found, { readPolyfillManifests: "cwd" });
   assert.deepEqual(seen, [
-    "build:@pdpp/polyfill-connectors/connector-conformance-roster",
-    "cwd:@pdpp/polyfill-connectors/connector-conformance-roster",
+    "build:@pdpp/polyfill-connectors/manifests",
+    "cwd:@pdpp/polyfill-connectors/manifests",
   ]);
 });
 
@@ -84,7 +84,7 @@ test("a failure other than module-not-found propagates", () => {
 // Loads the real module in a child whose resolve hook refuses the package
 // when the parent is polyfill-connectors-runtime.ts itself, which is what a
 // bundle's stale build-machine `import.meta.url` amounts to.
-function productionReadyFromChild(cwd: string): string[] {
+function manifestFilesFromChild(cwd: string): string[] {
   const hook = `
 import { registerHooks } from "node:module";
 registerHooks({
@@ -98,7 +98,7 @@ registerHooks({
 `;
   const probe = `
 const runtime = await import(${JSON.stringify(pathToFileURL(RUNTIME_MODULE).href)});
-process.stdout.write(JSON.stringify(Object.keys(runtime.PRODUCTION_READY_CONNECTORS)));
+process.stdout.write(JSON.stringify(runtime.readPolyfillManifests().map((entry) => entry.file)));
 `;
   const child = spawnSync(
     process.execPath,
@@ -119,6 +119,7 @@ process.stdout.write(JSON.stringify(Object.keys(runtime.PRODUCTION_READY_CONNECT
       env: {
         ...process.env,
         NODE_PATH: "",
+        PDPP_POLYFILL_MANIFESTS_DIR: "",
         ...(process.env.TSX_TSCONFIG_PATH ? { TSX_TSCONFIG_PATH: resolve(process.env.TSX_TSCONFIG_PATH) } : {}),
       },
     }
@@ -131,21 +132,20 @@ test("the module falls back to the package staged under the process cwd", () => 
   const directory = mkdtempSync(join(tmpdir(), "pdpp-polyfill-runtime-cwd-"));
   try {
     const installedPackage = dirname(
-      createRequire(RUNTIME_MODULE).resolve("@pdpp/polyfill-connectors/connector-conformance-roster")
+      createRequire(RUNTIME_MODULE).resolve("@pdpp/polyfill-connectors/manifests")
     );
     const packageRoot = dirname(installedPackage);
     const stagedPackage = join(directory, "staged", "node_modules", "@pdpp", "polyfill-connectors");
     mkdirSync(join(stagedPackage, "src"), { recursive: true });
+    mkdirSync(join(stagedPackage, "manifests"));
     cpSync(join(packageRoot, "package.json"), join(stagedPackage, "package.json"));
-    cpSync(
-      join(packageRoot, "src", "connector-conformance-roster.js"),
-      join(stagedPackage, "src", "connector-conformance-roster.js")
-    );
+    cpSync(join(packageRoot, "src", "manifest-registry.js"), join(stagedPackage, "src", "manifest-registry.js"));
+    writeFileSync(join(stagedPackage, "manifests", "staged-example.json"), "{}\n");
     mkdirSync(join(directory, "empty"));
     writeFileSync(join(directory, "empty", "package.json"), "{}\n");
 
-    assert.ok(productionReadyFromChild(join(directory, "staged")).includes("reddit"));
-    assert.deepEqual(productionReadyFromChild(join(directory, "empty")), []);
+    assert.deepEqual(manifestFilesFromChild(join(directory, "staged")), ["staged-example.json"]);
+    assert.deepEqual(manifestFilesFromChild(join(directory, "empty")), []);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }

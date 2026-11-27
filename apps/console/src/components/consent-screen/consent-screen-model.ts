@@ -23,6 +23,8 @@ export type ConsentTrustTier = "unverified" | "domain" | "verified";
 
 /** Manifest-declared brand glyph, shaped for `ConnectorIcon`'s `icon` prop. */
 export interface ConsentSourceIcon {
+  /** Declared brand background; without it a light glyph can sit on a light tile. */
+  readonly backgroundColor?: string | null;
   readonly color?: string | null;
   readonly kind?: string | null;
   readonly svg?: string | null;
@@ -56,6 +58,8 @@ export interface ConsentStreamModel {
 
 export interface ConsentSourceModel {
   readonly account: string;
+  /** Optional for compatibility with servers predating display identity. */
+  readonly connectorId?: string;
   readonly icon?: ConsentSourceIcon | null;
   readonly id: string;
   readonly name: string;

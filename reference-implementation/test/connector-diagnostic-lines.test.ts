@@ -32,6 +32,7 @@ import {
 import { runConnector } from "../runtime/index.ts";
 import { startServer } from "../server/index.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // ─── 1. Collector ────────────────────────────────────────────────────────────
 
@@ -132,7 +133,8 @@ test("redactor replaces code slots that carry a known secret or a bad shape", ()
 // ─── 2-4. Real runConnector + owner timeline ─────────────────────────────────
 
 const STUB_MANIFEST = {
-  connector_id: "https://registry.pdpp.dev/connectors/test-diagnostic-lines",
+  connector_id: "test-diagnostic-lines",
+  connector_key: "test-diagnostic-lines",
   display_name: "Diagnostic lines fixture",
   manifest_uri: "https://registry.pdpp.dev/connectors/test-diagnostic-lines",
   protocol_version: "0.1.0",
@@ -314,7 +316,7 @@ test("diagnostic lines persist on the owner timeline for completed and failed ru
 
   try {
     const registerResp = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(STUB_MANIFEST),
+      body: JSON.stringify(withFixtureSourceDeclaration(STUB_MANIFEST)),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

@@ -20,7 +20,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 import pg from "pg";
@@ -33,6 +33,8 @@ import {
   COMPACTION_MODES,
   COMPACTION_POLICIES,
   type CompactionPolicy,
+  compactionPoliciesFromManifests,
+  describePolicies,
   findPolicy,
   type HistoryRow,
   isCanonicalEligible,
@@ -64,9 +66,9 @@ const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 // Reference-fixture manifests are read directly from disk (test-only
 // static-file access — the same pattern connector-key.test.ts already uses —
 // NOT the runtime `getConnectorManifest` DB-catalog lookup version-disposition
-// callers use in production). The first-party polyfill manifests are read via
-// `@pdpp/polyfill-connectors`'s own `readPolyfillManifests()` export, since
-// that package — not this repo — owns their on-disk layout. Used below to
+// callers use in production). The shipped connector manifests are read via
+// the RI test helper, which preserves the old entry shape without depending on
+// the package's on-disk layout. Used below to
 // independently re-derive which (connector, stream) pairs declare each
 // `compaction_class`, so the server-list-matches-script-list guardrail tests
 // keep proving the two stay in sync without importing any list out of
@@ -82,7 +84,7 @@ interface ManifestForCompactionClassScan {
 
 function allShippedManifestsForTest(): ManifestForCompactionClassScan[] {
   const manifests: ManifestForCompactionClassScan[] = [];
-  for (const entry of readPolyfillManifests()) {
+  for (const entry of readShippedManifests()) {
     manifests.push(entry.manifest as ManifestForCompactionClassScan);
   }
   let referenceFixtureFiles: string[];
@@ -212,6 +214,27 @@ test("COMPACTION_POLICIES exposes the registered policies (short-name canonical 
     ["codex", "shell_snapshots"],
     ["codex", "config_inventory"],
     ["codex", "cache_inventory"],
+    // Policies added by the pinned current manifest snapshot.
+    ["anthropic", "account_plan"],
+    ["anthropic-live", "account_plan"],
+    ["anthropic-live", "usage_limits"],
+    ["chatgpt", "account_plan"],
+    ["chatgpt", "account_profile"],
+    ["chatgpt", "usage_summary"],
+    ["claude-code", "usage"],
+    ["heb", "order_items"],
+    ["reddit", "comments"],
+    ["reddit", "downvoted"],
+    ["reddit", "hidden"],
+    ["reddit", "saved"],
+    ["reddit", "submitted"],
+    ["reddit", "upvoted"],
+    ["slack", "dm_read_states"],
+    ["slack-browser", "files"],
+    ["slack-browser", "users"],
+    ["slack-browser", "workspace"],
+    ["ynab", "month_categories"],
+    ["ynab", "payees"],
   ];
   // ri-zero-knowledge-terminal-revise-0810: COMPACTION_POLICIES is now built
   // by iterating every shipped manifest's own streams (readdirSync order),
@@ -219,10 +242,55 @@ test("COMPACTION_POLICIES exposes the registered policies (short-name canonical 
   // meaningful invariant (findPolicy is a keyed lookup, never a positional
   // one), so this compares the same expected SET of (connector, stream)
   // pairs sorted, rather than requiring an exact incidental order match.
-  const actual = COMPACTION_POLICIES.map((p) => [p.connectorIds[0], p.stream]);
+  const actual = compactionPoliciesFromManifests(allShippedManifestsForTest()).policies.map((p) => [p.connectorIds[0], p.stream]);
   const sortPairs = (pairs: (readonly [string, string])[]) =>
     [...pairs].map(([c, s]) => `${c}/${s}`).sort((a, b) => a.localeCompare(b));
   assert.deepEqual(sortPairs(actual as [string, string][]), sortPairs(expected as [string, string][]));
+});
+
+const FINGERPRINT = { exclude_keys: ["fetched_at"] };
+const NOT_COMPACTED = /not compacted/;
+
+test("a manifest is eligible for compaction under every identity field the server accepts", () => {
+  const { conflicts, policies } = compactionPoliciesFromManifests([
+    { connector_key: "keyed", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    {
+      connector_id: "https://registry.pdpp.dev/connectors/by-url",
+      streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }],
+    },
+    { connector_id: "bare-id", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { storage_binding: { connector_id: "native" }, streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    { connector_key: "undeclared", streams: [{ name: "items" }] },
+  ]);
+  assert.deepEqual(conflicts, []);
+  assert.deepEqual(
+    policies.map((p) => `${p.connectorIds[0]}/${p.stream}`),
+    ["keyed/items", "by-url/items", "bare-id/items", "native/items"],
+    "a manifest without an identity, or a stream without a fingerprint, gets no policy"
+  );
+});
+
+test("a stream two manifests declare under one key is not compacted, and is reported", () => {
+  const { conflicts, policies } = compactionPoliciesFromManifests([
+    { connector_key: "shared", streams: [{ compaction_fingerprint: FINGERPRINT, name: "items" }] },
+    {
+      connector_id: "https://registry.pdpp.dev/connectors/shared",
+      streams: [
+        { compaction_fingerprint: { exclude_keys: [] }, name: "items" },
+        { compaction_fingerprint: FINGERPRINT, name: "other" },
+      ],
+    },
+  ]);
+  assert.deepEqual(conflicts, ["shared/items"]);
+  assert.deepEqual(
+    policies.map((p) => `${p.connectorIds[0]}/${p.stream}`),
+    ["shared/other"]
+  );
+});
+
+test("no shipped stream is left uncompacted by a conflicting declaration", () => {
+  assert.doesNotMatch(describePolicies(), NOT_COMPACTED);
 });
 
 test("findPolicy returns null for unknown streams", () => {
@@ -300,6 +368,7 @@ test("findPolicy returns the registered policy for Slack channel_memberships wit
 const POINT_IN_TIME_REAL_FIELD_STREAMS = [
   { connector: "github", realField: "follower/repo/gist counts", stream: "user" },
   { connector: "slack", realField: "num_members", stream: "channels" },
+  { connector: "slack-browser", realField: "num_members", stream: "channels" },
   // ynab/accounts is the same class: the connector already split its balances
   // into the append-keyed `account_stats` observation stream
   // (split-ynab-account-balance-observation-stream), so the current entity
@@ -404,9 +473,10 @@ test("manifest-declared recurring point-in-time snapshot streams DO have a regis
   // manifest-declared class with precedence, NOT by policy absence.
   const manifestRecurringSnapshot = manifestStreamPairsByCompactionClass("recurring_snapshot");
   assert.ok(manifestRecurringSnapshot.length > 0, "expected at least one manifest to declare recurring_snapshot");
+  const policies = compactionPoliciesFromManifests(allShippedManifestsForTest()).policies;
   for (const { connector, stream } of manifestRecurringSnapshot) {
     assert.ok(
-      findPolicy(connector, stream),
+      findPolicy(connector, stream, policies),
       `${connector}/${stream} is a recurring snapshot; it MUST keep a compaction policy as the no-op regression safety net`
     );
   }

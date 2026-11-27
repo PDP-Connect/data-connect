@@ -651,11 +651,9 @@ export function classifyForCohort(
   // authored source is the generator and the inputs it reads, and a fault
   // there reaches this file only by regeneration. Mutating it asks whether the
   // suite notices a hand-edit the file's own header forbids. It also cannot
-  // run: the drift check that pins the file
-  // (`reference-implementation/test/connector-registry-manifest-derivation.test.ts`)
-  // compares it byte-for-byte with a fresh regeneration, so Stryker's
-  // instrumented copy fails that check in the baseline and rejects it, as it did
-  // on PR #141.
+  // run: a drift check that pins such a file compares it byte-for-byte with a
+  // fresh regeneration, so Stryker's instrumented copy fails that check in the
+  // baseline and rejects it, as it did on PR #141.
   if (isGeneratedSource(entry.path)) {
     return { selected: false, reason: "generated_source" }
   }

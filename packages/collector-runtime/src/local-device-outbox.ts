@@ -4,9 +4,10 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { TerminalCoverageFact } from "./local-device-client.ts";
 import { hashCanonicalJson } from "./local-device-envelope.ts";
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 6;
 type OutboxMigrationV3FaultPoint = "after_copy";
 let outboxMigrationV3FaultHook: ((point: OutboxMigrationV3FaultPoint) => void) | null = null;
 
@@ -21,22 +22,6 @@ export function assertSupportedOutboxSchemaVersion(version: number, supportedVer
     throw new Error(`local outbox schema version ${version} is newer than supported version ${supportedVersion}`);
   }
 }
-
-/**
- * Maximum number of legacy (pre-index) `record_batch` rows a coverage probe
- * will reparse before giving up and answering `null` (unknown).
- *
- * New enqueues maintain a payload-light observed-stream index so coverage
- * detection never touches `payload_json`. A database created before that
- * index existed has `record_batch` rows with no index entries; the schema
- * upgrade backfills the index from those rows once, bounded by this budget.
- * If a giant legacy outbox carries more unindexed batches than the budget,
- * the probe stops and reports `observed: null` rather than launch an
- * unbounded `json_each` scan over tens of gigabytes of retained payloads.
- * Small/test outboxes (well under the budget) are fully backfilled, so their
- * coverage observation is exact and existing behavior is preserved.
- */
-const LEGACY_COVERAGE_SCAN_BUDGET = 5000;
 
 /**
  * Max bound parameters to put in a single `... IN (?, ?, …)` statement.
@@ -143,6 +128,26 @@ export interface LocalDeviceOutboxLeaseInput {
   holder: string;
   id: string;
   leaseEpoch: number;
+}
+
+/** What the server acknowledged for a terminal run record: its run order and commit revision. */
+export interface TerminalRunAck {
+  /** The commit revision the server recorded the run at; null when the server did not say. */
+  readonly collectionRevision: number | null;
+  readonly runId: string;
+  /** The sequence the server issued at run start; null for a run without one, or an older server. */
+  readonly runSequence: number | null;
+  /** The storage epoch the server recorded the run in; null when the server did not say. */
+  readonly storageEpoch: number | null;
+}
+
+/** What the latest acknowledged receipt is a fact about. */
+export interface TerminalCoverageReceiptAsOf {
+  readonly acknowledgedAt: string;
+  readonly collectionRevision: number;
+  readonly runId: string;
+  readonly runSequence: number;
+  readonly storageEpoch: number;
 }
 
 export interface LocalDeviceOutboxFailInput extends LocalDeviceOutboxLeaseInput {
@@ -385,12 +390,11 @@ export class LocalDeviceOutbox {
 
   /**
    * Record the distinct stream names a `record_batch` row carries into the
-   * payload-light observed-stream index, so coverage detection can answer
-   * without ever reparsing `payload_json`.
+   * payload-light observed-stream index.
    *
    * Reads `$.records[*].stream` from the in-memory payload we already have
    * (no extra DB read) and inserts one `(outbox_id, source_instance_id,
-   * stream)` row per distinct stream. The index intentionally stores no
+   * stream)` row per distinct stream. The index stores no
    * record bodies, ids, or counts beyond stream membership; the live
    * dead-letter exclusion is applied at query time by joining the row's
    * current status, so a later dead-letter transition needs no index update.
@@ -462,11 +466,13 @@ export class LocalDeviceOutbox {
     return row.next_time;
   }
 
-  acknowledge(input: LocalDeviceOutboxLeaseInput): void {
+  acknowledge(input: LocalDeviceOutboxLeaseInput & { readonly terminalAck?: TerminalRunAck }): void {
     const now = this.#now();
-    const result = this.#db
-      .prepare(
-        `UPDATE local_device_outbox
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.#db
+        .prepare(
+          `UPDATE local_device_outbox
            SET status = 'succeeded',
                acknowledged_at = ?,
                lease_holder = NULL,
@@ -477,9 +483,129 @@ export class LocalDeviceOutbox {
            AND lease_holder = ?
            AND lease_epoch = ?
            AND lease_until > ?`
+        )
+        .run(now, now, input.id, input.holder, input.leaseEpoch, now);
+      assertOneChange(Number(result.changes), `local outbox lease not current for acknowledge: ${input.id}`);
+      const row = this.#db
+        .prepare("SELECT source_instance_id, kind, payload_json FROM local_device_outbox WHERE id = ?")
+        .get(input.id);
+      if (isRecord(row) && row.kind === "terminal_run_commit" && typeof row.source_instance_id === "string") {
+        // Keep this in the ACK transaction so pruning cannot erase proof.
+        this.#recordTerminalReceipt(row.source_instance_id, row.payload_json, input.terminalAck ?? null, now);
+      }
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
+   * Replace the lane's receipt by run order, not by ACK order. A sequenced ACK
+   * replaces the stored receipt only when its (storage epoch, run sequence) is
+   * higher, or when the stored receipt has no sequence; an older run's late
+   * ACK leaves a newer receipt in place. An ACK without a sequence cannot be
+   * ordered: it clears the evidence and keeps the stored order, as the server
+   * attributes such a run to the newest issued sequence. Only a valid v2
+   * commit with facts keeps evidence; any other acknowledged run stores none.
+   */
+  #recordTerminalReceipt(
+    sourceInstanceId: string,
+    payloadJson: unknown,
+    ack: TerminalRunAck | null,
+    now: string
+  ): void {
+    const stored = this.#db
+      .prepare(
+        "SELECT run_sequence, storage_epoch FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?"
       )
-      .run(now, now, input.id, input.holder, input.leaseEpoch, now);
-    assertOneChange(Number(result.changes), `local outbox lease not current for acknowledge: ${input.id}`);
+      .get(sourceInstanceId);
+    const storedSequence = isRecord(stored) ? readOrderInteger(stored.run_sequence) : null;
+    const storedEpoch = isRecord(stored) ? readOrderInteger(stored.storage_epoch) : null;
+    const sequenced = ack !== null && ack.runSequence !== null && ack.storageEpoch !== null;
+    if (
+      sequenced &&
+      storedSequence !== null &&
+      storedEpoch !== null &&
+      !isLaterRun(ack.storageEpoch as number, ack.runSequence as number, storedEpoch, storedSequence)
+    ) {
+      return;
+    }
+    const payload = typeof payloadJson === "string" ? JSON.parse(payloadJson) : null;
+    const facts = sequenced && isRecord(payload) && isValidCoveragePayload(payload) ? payload.terminal_facts : [];
+    const boundary =
+      isRecord(payload) && typeof payload.collection_boundary === "string" ? payload.collection_boundary : "";
+    this.#db
+      .prepare(
+        `INSERT INTO local_device_terminal_coverage_receipts
+           (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at,
+            run_id, run_sequence, storage_epoch, collection_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_instance_id) DO UPDATE SET
+           collection_boundary = excluded.collection_boundary,
+           terminal_facts_json = excluded.terminal_facts_json,
+           acknowledged_at = excluded.acknowledged_at,
+           run_id = excluded.run_id,
+           run_sequence = excluded.run_sequence,
+           storage_epoch = excluded.storage_epoch,
+           collection_revision = excluded.collection_revision`
+      )
+      .run(
+        sourceInstanceId,
+        boundary,
+        JSON.stringify(facts),
+        now,
+        ack?.runId ?? (isRecord(payload) && typeof payload.run_id === "string" ? payload.run_id : null),
+        sequenced ? ack.runSequence : storedSequence,
+        sequenced ? ack.storageEpoch : storedEpoch,
+        sequenced ? ack.collectionRevision : null
+      );
+  }
+
+  latestTerminalCoverageReceipt(input: { sourceInstanceId: string }): {
+    asOf: TerminalCoverageReceiptAsOf | null;
+    collectionBoundary: string;
+    terminalFacts: readonly TerminalCoverageFact[];
+  } | null {
+    const row = this.#db
+      .prepare(`SELECT collection_boundary, terminal_facts_json, acknowledged_at,
+                       run_id, run_sequence, storage_epoch, collection_revision
+      FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?`)
+      .get(input.sourceInstanceId);
+    if (!isRecord(row) || typeof row.collection_boundary !== "string" || typeof row.terminal_facts_json !== "string") {
+      return null;
+    }
+    let facts: unknown;
+    try {
+      facts = JSON.parse(row.terminal_facts_json);
+    } catch {
+      return null;
+    }
+    if (
+      !Array.isArray(facts) ||
+      facts.length === 0 ||
+      !facts.every(isTerminalCoverageFact) ||
+      new Set(facts.map((fact: TerminalCoverageFact) => fact.stream)).size !== facts.length ||
+      facts.some(
+        (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size !== fact.stores.length
+      )
+    ) {
+      return null;
+    }
+    const runSequence = readOrderInteger(row.run_sequence);
+    const storageEpoch = readOrderInteger(row.storage_epoch);
+    const collectionRevision = readOrderInteger(row.collection_revision);
+    // A receipt from before run order (outbox schema v5) has none of these:
+    // it is still readable, but it names no as-of.
+    const asOf =
+      typeof row.run_id === "string" &&
+      typeof row.acknowledged_at === "string" &&
+      runSequence !== null &&
+      storageEpoch !== null &&
+      collectionRevision !== null
+        ? { acknowledgedAt: row.acknowledged_at, collectionRevision, runId: row.run_id, runSequence, storageEpoch }
+        : null;
+    return { asOf, collectionBoundary: row.collection_boundary, terminalFacts: facts };
   }
 
   failRetryable(input: LocalDeviceOutboxFailInput): void {
@@ -573,6 +699,31 @@ export class LocalDeviceOutbox {
 
   deleteSucceeded(id: string): boolean {
     const result = this.#db.prepare("DELETE FROM local_device_outbox WHERE id = ? AND status = 'succeeded'").run(id);
+    return Number(result.changes) === 1;
+  }
+
+  /**
+   * Return one acknowledged row to `ready`, so the next drain delivers it again.
+   * Only `succeeded` rows reopen. A delivered gap stays open for its lane until a
+   * complete successful run recovers it, so a failure that re-observes the gap
+   * reopens the row instead of leaving it looking closed.
+   */
+  reopenSucceeded(id: string): boolean {
+    const now = this.#now();
+    const result = this.#db
+      .prepare(
+        `UPDATE local_device_outbox
+            SET status = 'ready',
+                attempt_count = 0,
+                next_attempt_at = ?,
+                acknowledged_at = NULL,
+                lease_holder = NULL,
+                lease_until = NULL,
+                last_error = NULL,
+                updated_at = ?
+          WHERE id = ? AND status = 'succeeded'`
+      )
+      .run(now, now, id);
     return Number(result.changes) === 1;
   }
 
@@ -702,6 +853,58 @@ export class LocalDeviceOutbox {
     }
   }
 
+  /**
+   * Rewrite the stored payload of every row of one source instance whose
+   * top-level connector id (`connectorId` or `connector_id`, whichever the
+   * row's kind uses) equals `connectorId`, in one transaction.
+   *
+   * `rewrite` receives each matching row's kind and parsed payload and returns
+   * the replacement payload. The row's `body_hash` follows the new payload;
+   * its status, attempt count, lease and error are left as they are. Rows that
+   * already succeeded are skipped unless their kind is named in
+   * `alsoSucceededKinds`, for kinds a later run still reads back.
+   *
+   * Selection is by connector id, so a second call with the same arguments
+   * finds nothing once the first has committed. Returns the number of rows
+   * rewritten.
+   */
+  rewriteStoredPayloads(input: {
+    alsoSucceededKinds?: readonly LocalDeviceOutboxKind[];
+    connectorId: string;
+    rewrite: (row: { kind: LocalDeviceOutboxKind; payload: unknown }) => unknown;
+    sourceInstanceId: string;
+  }): number {
+    const succeededKinds = input.alsoSucceededKinds ?? [];
+    const succeededClause = succeededKinds.length > 0 ? `OR kind IN (${succeededKinds.map(() => "?").join(", ")})` : "";
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const ids = this.#db
+        .prepare(
+          `SELECT id
+             FROM local_device_outbox
+            WHERE source_instance_id = ?
+              AND (status != 'succeeded' ${succeededClause})
+              AND (json_extract(payload_json, '$.connectorId') = ?
+                   OR json_extract(payload_json, '$.connector_id') = ?)
+            ORDER BY rowid`
+        )
+        .all(input.sourceInstanceId, ...succeededKinds, input.connectorId, input.connectorId)
+        .map((row) => (row as { id: string }).id);
+      const read = this.#db.prepare("SELECT kind, payload_json FROM local_device_outbox WHERE id = ?");
+      const write = this.#db.prepare("UPDATE local_device_outbox SET payload_json = ?, body_hash = ? WHERE id = ?");
+      for (const id of ids) {
+        const row = read.get(id) as { kind: LocalDeviceOutboxKind; payload_json: string };
+        const payload = input.rewrite({ kind: row.kind, payload: JSON.parse(row.payload_json) as unknown });
+        write.run(JSON.stringify(payload), hashCanonicalJson(payload), id);
+      }
+      this.#db.exec("COMMIT");
+      return ids.length;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   #selectDeadLetterIds(input: {
     clauses: readonly string[];
     errorClassPattern?: RegExp;
@@ -743,7 +946,7 @@ export class LocalDeviceOutbox {
    * `retrying`, or `dead_letter` rows.
    *
    * Safety invariants:
-   * - Only rows with `status = 'succeeded'` are ever considered.
+   * - Only rows with `status = 'succeeded'` and a non-gap kind are ever considered.
    * - `olderThanIso` uses `COALESCE(acknowledged_at, updated_at)` so rows
    *   without an explicit acknowledged timestamp still age out correctly.
    * - `keepCount` uses a `NOT IN (SELECT id … ORDER BY rowid DESC LIMIT n)`
@@ -761,7 +964,10 @@ export class LocalDeviceOutbox {
       throw new Error("pruneSent keepCount must be a non-negative safe integer");
     }
 
-    const clauses: string[] = ["status = 'succeeded'"];
+    // A delivered gap is still open for its lane until recovery deletes it (see
+    // `deleteSucceeded`). Pruning it would close a failure barrier the server
+    // still holds open, so gap rows are never prune candidates.
+    const clauses: string[] = ["status = 'succeeded'", "kind != 'gap'"];
     const params: (string | number)[] = [];
 
     if (input.sourceInstanceId) {
@@ -1152,154 +1358,6 @@ export class LocalDeviceOutbox {
   }
 
   /**
-   * Whether this lane has ever carried a record on the named stream.
-   *
-   * Local-device collectors push records from this durable outbox and write
-   * no spine run, so the connection-health rollup can only project a
-   * non-`unknown` coverage axis from durable `coverage_diagnostics` records.
-   * A drained lane that has carried real records but never a coverage record
-   * is the exact local shape behind the dashboard's stuck `coverage_unknown`
-   * (see `openspec/changes/derive-local-collector-coverage-from-diagnostics`).
-   *
-   * Construction (payload-light, bounded):
-   *
-   *   1. Primary path is the `local_device_observed_stream` index maintained
-   *      on every `record_batch` enqueue. The probe reads only stream names
-   *      from that index, joined to the row's *current* status so a stream
-   *      that only ever dead-lettered is excluded. This touches no
-   *      `payload_json` and is O(index hits), regardless of how many gigabytes
-   *      of retained record payloads the outbox holds.
-   *   2. A database created before the index existed (or a row enqueued by an
-   *      older build) has `record_batch` rows with no index entry. Those are
-   *      backfilled once on schema upgrade. If the count of still-unindexed
-   *      non-dead-letter record batches is within {@link
-   *      LEGACY_COVERAGE_SCAN_BUDGET}, the probe reparses only that bounded
-   *      tail. If it exceeds the budget, the probe returns `null` (unknown)
-   *      rather than launch an unbounded scan — the caller surfaces
-   *      `observed: null` and an operator re-runs the collector to populate
-   *      the index going forward.
-   *
-   * Returns `true`/`false` when the answer is known, or `null` when a legacy
-   * unindexed backlog exceeds the bounded scan budget. Never reads record
-   * bodies, paths, or tokens — only stream names.
-   */
-  hasObservedStream(input: { sourceInstanceId: string; stream: string }): boolean | null {
-    const indexed = this.#db
-      .prepare(
-        `SELECT 1 AS found
-           FROM local_device_observed_stream AS idx
-           JOIN local_device_outbox AS o ON o.id = idx.outbox_id
-          WHERE idx.source_instance_id = ?
-            AND idx.stream = ?
-            AND o.status != 'dead_letter'
-          LIMIT 1`
-      )
-      .get(input.sourceInstanceId, input.stream);
-    if (indexed) {
-      return true;
-    }
-
-    // The index reported no hit. Account for any legacy record_batch rows the
-    // index does not yet cover before concluding `false`, but never scan more
-    // than the bounded budget of payloads.
-    // Fetch budget + 1: the extra row is a sentinel so a returned length STRICTLY
-    // greater than the budget means "at least one row beyond what we'd scan" →
-    // over budget (return null/unknown below) rather than a false negative.
-    const unindexed = this.#unindexedRecordBatchIds(input.sourceInstanceId, LEGACY_COVERAGE_SCAN_BUDGET + 1);
-    if (unindexed.length === 0) {
-      return false;
-    }
-    if (unindexed.length > LEGACY_COVERAGE_SCAN_BUDGET) {
-      return null;
-    }
-    return this.#legacyHasObservedStream(unindexed, input.stream);
-  }
-
-  /**
-   * Count of non-dead-letter `record_batch` rows for a source instance.
-   *
-   * Lets the status/doctor surface distinguish an empty/never-run lane
-   * (zero record batches — coverage absence is simply "nothing collected
-   * yet") from a lane that has carried records but no coverage diagnostic
-   * (coverage genuinely missing). Reads only the indexed status/kind
-   * columns; never materializes payloads.
-   */
-  countRecordBatches(input: { sourceInstanceId: string }): number {
-    const row = this.#db
-      .prepare(
-        `SELECT COUNT(*) AS total
-           FROM local_device_outbox
-          WHERE source_instance_id = ?
-            AND kind = 'record_batch'
-            AND status != 'dead_letter'`
-      )
-      .get(input.sourceInstanceId);
-    return isRecord(row) ? numberFrom(row.total) : 0;
-  }
-
-  /**
-   * Ids of non-dead-letter `record_batch` rows for a source instance that
-   * carry no observed-stream index entry yet (legacy rows enqueued before the
-   * index existed). Bounded by `limit` so the caller can both detect "more
-   * than the budget exists" and obtain a small set to reparse. Reads only the
-   * `id` column; never `payload_json`.
-   */
-  #unindexedRecordBatchIds(sourceInstanceId: string, limit: number): string[] {
-    const rows = this.#db
-      .prepare(
-        `SELECT o.id AS id
-           FROM local_device_outbox AS o
-          WHERE o.source_instance_id = ?
-            AND o.kind = 'record_batch'
-            AND o.status != 'dead_letter'
-            AND NOT EXISTS (
-              SELECT 1 FROM local_device_observed_stream AS idx
-               WHERE idx.outbox_id = o.id
-            )
-          ORDER BY o.rowid
-          LIMIT ?`
-      )
-      .all(sourceInstanceId, limit);
-    return rows.map((row) => {
-      if (!isRecord(row) || typeof row.id !== "string") {
-        throw new Error("local outbox unindexed record-batch query returned an invalid row");
-      }
-      return row.id;
-    });
-  }
-
-  /**
-   * Reparse a bounded set of legacy (unindexed) `record_batch` payloads to
-   * answer whether any carries the named stream, and lazily backfill the
-   * observed-stream index for each as it is read. Only ever called with a set
-   * no larger than {@link LEGACY_COVERAGE_SCAN_BUDGET}, so the reparse is
-   * bounded. Reads stream names only.
-   */
-  #legacyHasObservedStream(outboxIds: readonly string[], stream: string): boolean {
-    let found = false;
-    for (const id of outboxIds) {
-      const row = this.#db
-        .prepare("SELECT payload_json, source_instance_id FROM local_device_outbox WHERE id = ?")
-        .get(id);
-      if (!isRecord(row) || typeof row.payload_json !== "string" || typeof row.source_instance_id !== "string") {
-        continue;
-      }
-      let payload: unknown;
-      try {
-        payload = JSON.parse(row.payload_json);
-      } catch {
-        continue;
-      }
-      const streams = distinctRecordStreams(payload);
-      this.#backfillObservedStreamIndex(id, row.source_instance_id, streams);
-      if (streams.includes(stream)) {
-        found = true;
-      }
-    }
-    return found;
-  }
-
-  /**
    * Backfill the observed-stream index for one legacy `record_batch` row.
    * Idempotent via `INSERT OR IGNORE`. A row that legitimately carries no
    * records gets a single sentinel index entry so it is never reparsed again
@@ -1397,24 +1455,15 @@ export class LocalDeviceOutbox {
     `);
     const version = this.#schemaVersion();
     assertSupportedOutboxSchemaVersion(version, CURRENT_SCHEMA_VERSION);
-    // Schema DDL is `IF NOT EXISTS`, so applying every step is safe on a fresh
-    // or partially-migrated DB. The version bump only records that the index
-    // table now exists; the index itself is populated lazily and bounded:
-    //
-    //   - new enqueues maintain it directly (fast, payload already in hand);
-    //   - a pre-index (v1) database's legacy rows are backfilled per-lane and
-    //     bounded the first time a coverage probe scopes that lane.
-    //
-    // Opening a giant legacy outbox therefore does NO payload work — the cost
-    // moves to the bounded, source-scoped probe in `hasObservedStream`, never
-    // an unbounded scan at open. This is what keeps `doctor`/`status` fast on
-    // a 35 GB retained outbox.
+    // Schema DDL is `IF NOT EXISTS`; retain v2 for existing outboxes.
     this.#applySchemaV1();
     this.#applySchemaV2();
     if (version < 3) {
       this.#applySchemaV3();
     }
     this.#applySchemaV4();
+    this.#applySchemaV5();
+    this.#applySchemaV6();
     if (version < CURRENT_SCHEMA_VERSION) {
       this.#db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`);
     }
@@ -1452,10 +1501,7 @@ export class LocalDeviceOutbox {
    * Schema v2 — the payload-light observed-stream index.
    *
    * One row per `(record_batch outbox row × distinct stream name)` plus a
-   * sentinel for empty-records batches. Lets `hasObservedStream` answer
-   * coverage observation by reading indexed stream names joined to the row's
-   * live status, instead of an unbounded `json_each` scan over retained
-   * `payload_json`. `outbox_id` is not a declared foreign key (the parent row
+   * sentinel for empty-records batches. `outbox_id` is not a declared foreign key (the parent row
    * is intentionally retained after drain and never cascades), but the join
    * to `local_device_outbox` at query time supplies the live dead-letter
    * exclusion.
@@ -1551,6 +1597,42 @@ export class LocalDeviceOutbox {
     `);
   }
 
+  /**
+   * Schema v6 — the receipt records the run it is about and its place in run
+   * order: run id, run sequence, storage epoch and commit revision. A v5
+   * receipt keeps NULLs; it stays readable and names no as-of.
+   */
+  #applySchemaV6(): void {
+    const columns = new Set(
+      this.#db
+        .prepare("PRAGMA table_info(local_device_terminal_coverage_receipts)")
+        .all()
+        .map((column) => (isRecord(column) ? String(column.name) : ""))
+    );
+    for (const [name, type] of [
+      ["run_id", "TEXT"],
+      ["run_sequence", "INTEGER"],
+      ["storage_epoch", "INTEGER"],
+      ["collection_revision", "INTEGER"],
+    ] as const) {
+      if (!columns.has(name)) {
+        this.#db.exec(`ALTER TABLE local_device_terminal_coverage_receipts ADD COLUMN ${name} ${type}`);
+      }
+    }
+  }
+
+  /** Schema v5 — latest acknowledged coverage survives outbox pruning. */
+  #applySchemaV5(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS local_device_terminal_coverage_receipts (
+        source_instance_id TEXT PRIMARY KEY,
+        collection_boundary TEXT NOT NULL,
+        terminal_facts_json TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL
+      );
+    `);
+  }
+
   #selectReady(
     sourceInstanceId: string | undefined,
     now: string,
@@ -1599,12 +1681,62 @@ export class LocalDeviceOutbox {
   }
 }
 
+/** A stored run-order integer, or null when absent or unreadable. */
+function readOrderInteger(value: unknown): number | null {
+  const number = typeof value === "bigint" ? Number(value) : value;
+  return typeof number === "number" && Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+/** Whether (epoch, sequence) orders after the stored (epoch, sequence). */
+function isLaterRun(epoch: number, sequence: number, storedEpoch: number, storedSequence: number): boolean {
+  return epoch > storedEpoch || (epoch === storedEpoch && sequence > storedSequence);
+}
+
+function isValidCoveragePayload(payload: Record<string, unknown>): payload is Record<string, unknown> & {
+  terminal_facts: TerminalCoverageFact[];
+} {
+  return (
+    payload.version === 2 &&
+    typeof payload.collection_boundary === "string" &&
+    payload.collection_boundary.length > 0 &&
+    Array.isArray(payload.terminal_facts) &&
+    payload.terminal_facts.length > 0 &&
+    payload.terminal_facts.every(isTerminalCoverageFact) &&
+    new Set(payload.terminal_facts.map((fact: TerminalCoverageFact) => fact.stream)).size ===
+      payload.terminal_facts.length &&
+    payload.terminal_facts.every(
+      (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size === fact.stores.length
+    )
+  );
+}
+
 export function buildLocalDeviceOutboxId(input: BuildLocalDeviceOutboxIdInput): string {
   return `local-outbox:${hashCanonicalJson({
     kind: input.kind,
     parts: input.parts,
     source_instance_id: input.sourceInstanceId,
   })}`;
+}
+
+function isTerminalCoverageFact(value: unknown): value is TerminalCoverageFact {
+  return (
+    isRecord(value) &&
+    typeof value.stream === "string" &&
+    value.stream.length > 0 &&
+    typeof value.scoped === "boolean" &&
+    Array.isArray(value.stores) &&
+    value.stores.length > 0 &&
+    value.stores.every(
+      (store: unknown) =>
+        isRecord(store) &&
+        typeof store.store === "string" &&
+        store.store.length > 0 &&
+        (store.status === "collected" ||
+          store.status === "partial" ||
+          store.status === "unavailable" ||
+          store.status === "failed")
+    )
+  );
 }
 
 /**

@@ -47,6 +47,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>> & {
   asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
@@ -112,33 +113,36 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   return tokenBody.access_token;
 }
 
-const TEST_MANIFEST = {
-  connector_id: "concurrent-responsiveness-probe",
-  connector_key: "concurrent-responsiveness-probe",
-  display_name: "Concurrent responsiveness probe",
-  manifest_uri: "https://sources.example/concurrent-responsiveness-probe",
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: true } } },
-  streams: [
-    {
-      cursor_field: "updated_at",
-      name: "items",
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
-          payload: { type: "string" },
-          updated_at: { format: "date-time", type: ["string", "null"] },
+const TEST_MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "concurrent-responsiveness-probe",
+    connector_key: "concurrent-responsiveness-probe",
+    display_name: "Concurrent responsiveness probe",
+    manifest_uri: "https://sources.example/concurrent-responsiveness-probe",
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    streams: [
+      {
+        cursor_field: "updated_at",
+        name: "items",
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+            payload: { type: "string" },
+            updated_at: { format: "date-time", type: ["string", "null"] },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/concurrent-responsiveness-probe" }
+);
 
 function buildNdjsonBatch(count: number): string {
   const lines: string[] = [];

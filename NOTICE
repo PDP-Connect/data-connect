@@ -28,3 +28,35 @@ Two sources of icon are in play:
 A connector with no icon from either source renders a deterministic
 monogram (the connector's initial(s) and a color derived from its name) —
 this is the normal, first-class default, not an error state.
+
+## Bundled word and password lists
+
+Two data files are copied from MIT-licensed projects:
+
+- `public/passphrase/words.js` holds the English word list from BIP-39
+  (https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt), which is
+  licensed MIT by its authors. The desktop app draws suggested passphrases from it.
+- `reference-implementation/server/data/common-passwords.txt` holds the 10,000
+  most common passwords from zxcvbn (https://github.com/dropbox/zxcvbn),
+  Copyright (c) 2012-2016 Dan Wheeler and Dropbox, Inc. The server and the
+  desktop app reject an owner password that matches it.
+
+Both are used under the MIT License:
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in
+> all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

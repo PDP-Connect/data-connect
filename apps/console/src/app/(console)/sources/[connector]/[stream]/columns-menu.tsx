@@ -31,7 +31,7 @@ export function ColumnsMenu({
 
   const apply = useCallback(
     (columns: "reset" | "all" | string[]) => {
-      const next = new URLSearchParams(params.toString());
+      const next = new URLSearchParams(params?.toString());
       if (columns === "reset") {
         next.delete("columns");
       } else if (columns === "all") {

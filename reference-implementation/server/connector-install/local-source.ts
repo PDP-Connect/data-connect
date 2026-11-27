@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto"
 import {
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   lstatSync,
@@ -25,14 +26,18 @@ import {
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { findDuplicateJsonKeys } from "../../runtime/connector-binding-grammar.mjs"
 import { canonicalConnectorKey } from "../connector-key.ts"
+import {
+  projectLocalConnectorArtifactForManifestValidation,
+  validateConnectorManifest,
+} from "../connector-manifest-validation.ts"
 
 const MANIFEST_PATH = "profile/collection-profile.json"
 const ENTRYPOINT_PATH = "dist/collection-profile.mjs"
 const PROVENANCE_PATH = "provenance.json"
 const MAX_PROFILE_BYTES = 1024 * 1024
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9._-]*$/
-const LOCAL_BINDINGS = new Set(["browser", "filesystem", "network"])
 
 export interface LocalConnectorSourceRecord {
   readonly connectorId: string
@@ -115,7 +120,7 @@ function confinedFile(
   return checkConfinedFile(root, relativePath, label).path
 }
 
-function checkConfinedFile(
+export function checkConfinedFile(
   root: string,
   relativePath: string,
   label: string
@@ -141,11 +146,16 @@ function checkConfinedFile(
 /**
  * Reads at most `limit + 1` bytes from one descriptor, which must be the
  * regular file that passed confinement. A file or parent directory replaced
- * after the check opens another inode and is refused, and a file that grows
- * mid-read cannot allocate past the limit.
+ * after the check opens another inode and is refused. Content beyond the
+ * limit is refused without reading past `limit + 1` bytes.
  */
-export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
-  const fd = openSync(file.path, "r")
+export function readConfinedFile(
+  file: ConfinedFile,
+  limit: number,
+  refusal = `${file.label} exceeds the ${limit} byte limit.`
+): Buffer {
+  // A substituted FIFO must reach the regular-file check without blocking.
+  const fd = openSync(file.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const opened = fstatSync(fd)
     if (
@@ -155,6 +165,7 @@ export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
     ) {
       throw new Error(`${file.label} changed while it was being read.`)
     }
+    if (opened.size > limit) throw new Error(refusal)
     const buffer = Buffer.alloc(limit + 1)
     let length = 0
     while (length < buffer.length) {
@@ -162,6 +173,7 @@ export function readConfinedFile(file: ConfinedFile, limit: number): Buffer {
       if (n === 0) break
       length += n
     }
+    if (length > limit) throw new Error(refusal)
     return buffer.subarray(0, length)
   } finally {
     closeSync(fd)
@@ -181,6 +193,23 @@ function canonicalRoot(sourcePath: string): string {
   return root
 }
 
+type LocalManifestJson =
+  | { readonly kind: "parsed"; readonly value: unknown }
+  | { readonly kind: "invalid_json" }
+  | { readonly kind: "duplicate_key" }
+
+/** Parser failures stay inside this boundary because their messages can contain file contents. */
+function decodeLocalManifestJson(text: string): LocalManifestJson {
+  try {
+    if (findDuplicateJsonKeys(text).length > 0) {
+      return { kind: "duplicate_key" }
+    }
+    return { kind: "parsed", value: JSON.parse(text) }
+  } catch {
+    return { kind: "invalid_json" }
+  }
+}
+
 function readManifest(root: string): {
   readonly connectorId: string
   readonly connectorKey: string
@@ -193,20 +222,17 @@ function readManifest(root: string): {
   // of the parsed bytes.
   const bytes = readConfinedFile(
     checkConfinedFile(root, MANIFEST_PATH, "Collection Profile manifest"),
-    MAX_PROFILE_BYTES
+    MAX_PROFILE_BYTES,
+    "Collection Profile manifest exceeds the 1 MiB limit."
   )
-  if (bytes.byteLength > MAX_PROFILE_BYTES) {
-    throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
+  const decoded = decodeLocalManifestJson(bytes.toString("utf8"))
+  if (decoded.kind === "invalid_json") {
+    throw new Error("Collection Profile manifest is invalid JSON.")
   }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(bytes.toString("utf8"))
-  } catch (error) {
-    throw new Error(
-      `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error }
-    )
+  if (decoded.kind === "duplicate_key") {
+    throw new Error("Collection Profile manifest contains duplicate JSON object keys.")
   }
+  const parsed = decoded.value
   assertRecord(parsed, "Collection Profile manifest")
   const connectorId = parsed.connector_id
   const connectorKey = parsed.connector_key
@@ -223,38 +249,12 @@ function readManifest(root: string): {
       "Collection Profile manifest must declare a valid connector_id, connector_key, and version."
     )
   }
+  validateConnectorManifest(projectLocalConnectorArtifactForManifestValidation(parsed))
   const streams = parsed.streams
   if (!Array.isArray(streams) || streams.length === 0) {
     throw new Error(
       "Collection Profile manifest must declare at least one stream."
     )
-  }
-  const requirements = parsed.runtime_requirements
-  if (requirements !== undefined && requirements !== null) {
-    assertRecord(requirements, "Collection Profile runtime_requirements")
-    const bindings = requirements.bindings
-    if (bindings !== undefined && bindings !== null) {
-      assertRecord(bindings, "Collection Profile runtime_requirements.bindings")
-      for (const [binding, requirement] of Object.entries(bindings)) {
-        if (!LOCAL_BINDINGS.has(binding)) {
-          throw new Error(
-            `Collection Profile declares unsupported runtime binding: ${binding}`
-          )
-        }
-        assertRecord(
-          requirement,
-          `Collection Profile runtime binding ${binding}`
-        )
-        if (
-          requirement.required !== undefined &&
-          typeof requirement.required !== "boolean"
-        ) {
-          throw new Error(
-            `Collection Profile runtime binding ${binding}.required must be a boolean.`
-          )
-        }
-      }
-    }
   }
   return {
     connectorId,

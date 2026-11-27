@@ -3,57 +3,60 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { ingestRecord, queryRecords } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 test("SQLite expansion enforces the child grant's frozen time_constraint in SQL", async () => {
   const connectorId = `expand_time_${Date.now()}`;
   const parentStream = "projects";
   const childStream = "events";
-  const manifest = {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: "Temporal Expand Test",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: parentStream,
-        primary_key: ["id"],
-        query: { expand: [{ default_limit: 10, max_limit: 10, name: "events" }] },
-        relationships: [{ cardinality: "has_many", foreign_key: "project_id", name: "events", stream: childStream }],
-        schema: {
-          properties: { id: { type: "string" }, name: { type: "string" } },
-          required: ["id"],
-          type: "object",
-        },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        consent_time_field: "event-time",
-        cursor_field: "occurred_at",
-        name: childStream,
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            "event-time": { format: "date-time", type: "string" },
-            id: { type: "string" },
-            mutable_time: { format: "date-time", type: "string" },
-            occurred_at: { format: "date-time", type: "string" },
-            project_id: { type: "string" },
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: "Temporal Expand Test",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: parentStream,
+          primary_key: ["id"],
+          query: { expand: [{ default_limit: 10, max_limit: 10, name: "events" }] },
+          relationships: [{ cardinality: "has_many", foreign_key: "project_id", name: "events", stream: childStream }],
+          schema: {
+            properties: { id: { type: "string" }, name: { type: "string" } },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id", "project_id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+        {
+          consent_time_field: "event-time",
+          cursor_field: "occurred_at",
+          name: childStream,
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              "event-time": { format: "date-time", type: "string" },
+              id: { type: "string" },
+              mutable_time: { format: "date-time", type: "string" },
+              occurred_at: { format: "date-time", type: "string" },
+              project_id: { type: "string" },
+            },
+            required: ["id", "project_id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 
   initDb(":memory:");
   try {

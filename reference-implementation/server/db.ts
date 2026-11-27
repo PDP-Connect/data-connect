@@ -25,11 +25,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
+import { describeConnectorIdRename, migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
 import {
   makeConnectorInstanceId as canonicalConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
+import { RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID } from "./postgres-migration-ledger.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
 import {
@@ -404,22 +406,9 @@ export function isTransientSqliteLockError(err: unknown): boolean {
 }
 
 /**
- * Synchronous sibling of `runWithSqliteBusyRetry` for the boot path.
- *
- * `initDb` runs synchronously (better-sqlite3 is sync; the surrounding
- * `await initDb(...)` call site only awaits the Promise wrapper) and the
- * very first write after opening the DB is `raw.exec(SCHEMA)`. On Docker
- * dev restart (`node --watch` or `docker compose restart reference`),
- * the new process can race the old process's still-closing WAL writer.
- * `seedPreRegisteredClients` is already wrapped in the async retry
- * helper, but the SCHEMA exec runs BEFORE that — so a transient lock
- * surfaces as `SQLITE_BUSY` from the boot itself. This helper applies
- * the same bounded retry policy without going async.
- *
- * Uses a busy-wait spin to back off because we are intentionally on the
- * synchronous path; the retry budget is small (5 attempts capped at
- * 1.5s each) and only fires on a transient lock, so the worst case is
- * ~5s of boot delay before we surface the original error.
+ * Synchronous busy retry for the bootstrap writer lock and other sync callers.
+ * Each attempt also observes the connection's busy_timeout; the backoff below
+ * adds 1.5s across the default five attempts, not a wall-clock timeout itself.
  */
 // Normalize the shared retry knobs for the busy-retry helpers. Defaults: 5
 // attempts, 100ms initial backoff doubling to a 1.5s ceiling. Clamps keep the
@@ -1666,7 +1655,16 @@ CREATE TABLE IF NOT EXISTS run_history (
   -- influencing scheduler backoff math — see terminal-read-architecture-
   -- fable-0730.md R7.5 and openspec/changes/
   -- generalize-run-history-write-authority.
-  scheduler_managed          INTEGER NOT NULL DEFAULT 0
+  scheduler_managed          INTEGER NOT NULL DEFAULT 0,
+  -- Run provenance: the actor_type of the run's terminal spine event
+  -- (server/stores/run-history-writer.ts), e.g. 'local_device' for a run a
+  -- device terminal commit recorded; 'runtime' for a row the scheduler's own
+  -- append wrote (a server run by construction). NULL = not known: the row is
+  -- still running, predates this column and is not yet backfilled
+  -- (server/stores/run-history-actor-backfill.ts), or its run has spine events
+  -- but no terminal one. Coverage reads it (server/ref-control.ts
+  -- isDeviceTerminalRun); NULL on a terminal row never counts as server.
+  actor_type                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_history_connector_completed
@@ -2028,6 +2026,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_coverage_horizons_current
 
 CREATE INDEX IF NOT EXISTS idx_connector_coverage_horizons_instance
   ON connector_coverage_horizons(connector_instance_id);
+
+-- Collection Profile v0.2.0 diagnostic record per completed run (data-connectors
+-- spec sections 5.10.3-5.10.4). Holds the runtime's ObservationSnapshot and
+-- Diagnosis as JSON and nothing else. server/stores/connector-observation-store.ts
+-- keeps at most 8 rows per connector_id, across its instances, and prunes in the
+-- write transaction. recorded_seq is the store's per-connector order, never a
+-- connector timestamp. Deleting a connection cascades its rows.
+CREATE TABLE IF NOT EXISTS connector_observation_runs (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  run_id                TEXT NOT NULL,
+  recorded_seq          INTEGER NOT NULL,
+  record_version        INTEGER NOT NULL CHECK (record_version = 1),
+  recorded_at           TEXT NOT NULL,
+  payload_json          TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, run_id),
+  FOREIGN KEY(connector_instance_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_observation_runs_seq
+  ON connector_observation_runs(connector_id, recorded_seq);
 
 -- Cross-invocation half of STREAM_EVIDENCE rule 5 ("at most one accepted
 -- STREAM_EVIDENCE per stream per run_id"): a durable record of every
@@ -2498,16 +2517,15 @@ CREATE INDEX IF NOT EXISTS idx_connector_summary_evidence_connector
 -- module for the semantics of each column and why completion may never be
 -- inferred from the data.
 --
--- SQLite has no writer for it today, and that is deliberate rather than an
--- omission: this backend's local-device canonicalization
--- (migrateLocalDeviceConnectorInstances below) is a synchronous
--- single-file transaction whose cost profile is not the one the Postgres
--- ledger exists to bound -- there is no pre-listen multi-GB index scan and
--- no 503 window to protect. The table is created here so the two backends'
--- schemas stay at parity (backup-table-policy.ts's parity invariant, proven
--- by test/backup-table-inventory.test.ts) and so a SQLite deployment that
--- later needs the same receipt does not require a schema migration to get
--- one.
+-- SQLite's only writer is run_history's device-run provenance repair
+-- (migrateRunHistoryDeviceRunProvenance), a one-statement pass that needs a
+-- receipt but no resume cursor. The local-device canonicalization
+-- (migrateLocalDeviceConnectorInstances below) writes none, deliberately: it
+-- is a synchronous single-file transaction whose cost profile is not the one
+-- the Postgres ledger exists to bound -- there is no pre-listen multi-GB index
+-- scan and no 503 window to protect. The table keeps the two backends'
+-- schemas at parity (backup-table-policy.ts's parity invariant, proven by
+-- test/backup-table-inventory.test.ts).
 CREATE TABLE IF NOT EXISTS storage_migration_ledger (
   migration_id      TEXT PRIMARY KEY,
   status            TEXT NOT NULL CHECK(status IN ('pending', 'running', 'complete', 'blocked')),
@@ -2520,6 +2538,22 @@ CREATE TABLE IF NOT EXISTS storage_migration_ledger (
   started_at        TEXT,
   updated_at        TEXT NOT NULL,
   completed_at      TEXT
+);
+
+-- Runtime-observed provider-invalidation proofs: one row per failed run whose
+-- last top-level navigation matched the connector's declared sign-in URL
+-- pattern. repaired_at is the replay-suppression record for that proof key.
+-- seq is the runtime-assigned recording order; it, not the wall-clock
+-- observed_at, decides which proof is current.
+CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
+  seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  provider      TEXT NOT NULL,
+  observed_at   TEXT NOT NULL,
+  repaired_at   TEXT,
+  UNIQUE (connection_id, run_id),
+  FOREIGN KEY(connection_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
 );
 
 -- Durable scheduling cursors for bounded, periodic maintenance sweeps
@@ -2751,8 +2785,7 @@ function rekeyRecordRejectionReplayKeys(raw: SqliteDatabase): void {
 }
 
 function migrateRecordRejectionBytePayload(raw: SqliteDatabase): void {
-  raw.exec("BEGIN IMMEDIATE");
-  try {
+  raw.transaction(() => {
     addColumnIfMissing(raw, "record_rejection_quota", "pending_receipt_count", "INTEGER NOT NULL DEFAULT 0");
     const columns = raw.prepare("PRAGMA table_info(record_rejections)").all<{ name: string }>();
     const hasPayloadText = columns.some((column) => column.name === "payload_text");
@@ -2910,11 +2943,7 @@ function migrateRecordRejectionBytePayload(raw: SqliteDatabase): void {
         )
   `);
     rekeyRecordRejectionReplayKeys(raw);
-    raw.exec("COMMIT");
-  } catch (error) {
-    raw.exec("ROLLBACK");
-    throw error;
-  }
+  }).immediate();
 }
 
 function testOnlySourceRevisionInstallationLockMarker(): void {
@@ -3002,6 +3031,140 @@ function ensureRecordResetGenerationColumn(raw: SqliteDatabase): void {
 // any specific connector; it only compares two integers.
 function ensureRecordIdentityGenerationColumn(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_instances", "record_identity_generation", "INTEGER NOT NULL DEFAULT 0");
+}
+
+// Per-connection collection revision (server/stores/collection-revision-store.ts):
+// a monotonic counter the server assigns at commit to every observed event that
+// can establish or retire a local coverage proof. `connector_instances` holds
+// the high-water mark; `connector_state.collection_revision` is the revision of
+// the commit that last wrote the row. Rows that predate the columns read NULL,
+// and a NULL proof revision is unknown coverage.
+function ensureCollectionRevisionColumns(raw: SqliteDatabase): void {
+  addColumnIfMissing(raw, "connector_instances", "collection_revision", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_event", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_run_id", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_at", "TEXT");
+  addColumnIfMissing(raw, "connector_state", "collection_revision", "INTEGER");
+  // Run order (collection-revision-store.ts): the last issued run sequence, the
+  // storage epoch a restore step increments, and the newest observation of the
+  // highest observed run sequence. A positive proof is eligible only while it
+  // is that observation, in the current storage epoch.
+  addColumnIfMissing(raw, "connector_instances", "run_sequence_issued", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "storage_epoch", "INTEGER NOT NULL DEFAULT 1");
+  addColumnIfMissing(raw, "connector_instances", "run_order_sequence", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "run_order_event", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "run_order_run_id", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "run_order_revision", "INTEGER");
+  raw.exec(`
+    CREATE TABLE IF NOT EXISTS collection_run_sequences (
+      connector_instance_id TEXT NOT NULL
+        REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+      run_id TEXT NOT NULL,
+      run_sequence INTEGER NOT NULL,
+      storage_epoch INTEGER NOT NULL,
+      device_id TEXT NOT NULL,
+      source_instance_id TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      PRIMARY KEY (connector_instance_id, run_id)
+    )
+  `);
+}
+
+// A previous boot could create collection_run_sequences before rebuilding
+// connector_instances. SQLite then retargeted its foreign key to the renamed
+// table, which those rebuilds later dropped. Rebuild only when the stored FK
+// does not name the final connector_instances table, preserving every row.
+function repairCollectionRunSequencesForeignKey(raw: SqliteDatabase): void {
+  const foreignKeys = raw
+    .prepare("PRAGMA foreign_key_list(collection_run_sequences)")
+    .all() as Array<{ table: string }>;
+  if (foreignKeys.length === 1 && foreignKeys[0]?.table === "connector_instances") {
+    return;
+  }
+
+  const foreignKeysEnabled = raw.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysEnabled) {
+    raw.pragma("foreign_keys = OFF");
+  }
+  try {
+    raw.transaction(() => {
+      if (
+        raw
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'collection_run_sequences_new'")
+          .get()
+      ) {
+        throw new Error("Found unfinished collection_run_sequences migration table; refusing to overwrite it.");
+      }
+      raw.exec(`
+        CREATE TABLE collection_run_sequences_new (
+          connector_instance_id TEXT NOT NULL
+            REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL,
+          run_sequence INTEGER NOT NULL,
+          storage_epoch INTEGER NOT NULL,
+          device_id TEXT NOT NULL,
+          source_instance_id TEXT NOT NULL,
+          issued_at TEXT NOT NULL,
+          PRIMARY KEY (connector_instance_id, run_id)
+        );
+        INSERT INTO collection_run_sequences_new(
+          connector_instance_id, run_id, run_sequence, storage_epoch,
+          device_id, source_instance_id, issued_at
+        )
+        SELECT connector_instance_id, run_id, run_sequence, storage_epoch,
+               device_id, source_instance_id, issued_at
+          FROM collection_run_sequences;
+        DROP TABLE collection_run_sequences;
+        ALTER TABLE collection_run_sequences_new RENAME TO collection_run_sequences;
+      `);
+      const foreignKeyViolations = raw.prepare("PRAGMA foreign_key_check").all();
+      if (foreignKeyViolations.length > 0) {
+        throw new Error(
+          `collection_run_sequences migration failed foreign_key_check: ${JSON.stringify(foreignKeyViolations)}`
+        );
+      }
+    })();
+  } finally {
+    if (foreignKeysEnabled) {
+      raw.pragma("foreign_keys = ON");
+    }
+  }
+}
+
+// The legacy rebuilds above can drop run_sequence_issued and storage_epoch, and
+// ensureCollectionRevisionColumns re-adds them at their defaults while
+// collection_run_sequences keeps the sequences already issued. The next run
+// start would then reuse sequence space and an older retained run could
+// outrank it. Raise (never lower) each counter to cover the retained rows.
+// run_order_sequence is left alone: it is the highest OBSERVED sequence, a
+// fresh observation sets it (RUN_ORDER_OBSERVATION), and a stale 0 only means
+// no observation has been recorded yet. Idempotent and a single indexed pass,
+// so it runs on every boot.
+function reconcileRunOrderCounters(raw: SqliteDatabase): void {
+  raw.transaction(() => {
+    raw.exec(`
+      UPDATE connector_instances
+         SET storage_epoch = (
+           SELECT MAX(rs.storage_epoch) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+         )
+       WHERE storage_epoch < COALESCE((
+           SELECT MAX(rs.storage_epoch) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+         ), 0);
+      UPDATE connector_instances
+         SET run_sequence_issued = (
+           SELECT MAX(rs.run_sequence) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+              AND rs.storage_epoch = connector_instances.storage_epoch
+         )
+       WHERE run_sequence_issued < COALESCE((
+           SELECT MAX(rs.run_sequence) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+              AND rs.storage_epoch = connector_instances.storage_epoch
+         ), 0);
+    `);
+  })();
 }
 
 function ensureConnectorSummaryEvidenceColumns(raw: SqliteDatabase): void {
@@ -6009,6 +6172,72 @@ function migrateSpineEventsConnectorInstanceIdBackfill(
 }
 
 /**
+ * Set `run_history.scheduler_managed = 0` on the rows a device wrote. The
+ * Postgres twin (`migratePostgresRunHistoryDeviceRunProvenance`) explains the
+ * rule and why server rows are left alone.
+ *
+ * A database that predates the column carries `DEFAULT 1` (see
+ * `migrateRunHistoryRename`), and SQLite cannot change a default in place. The
+ * two run-history writers that leave the column unset
+ * (`start-run-history.sql`, `insert-finalized-run-history.sql`) now set it to
+ * 0 themselves, so the stale default no longer decides a value. This pass
+ * repairs the rows already written. It is one statement in one transaction:
+ * SQLite is the single-file local backend, where the Postgres ledger's bounded
+ * pages answer a cost this table does not have. The COMPLETE receipt skips it
+ * on later boots.
+ */
+function migrateRunHistoryDeviceRunProvenance(raw: SqliteDatabase): void {
+  if (!(tableColumns(raw, "run_history").length && hasTableColumn(raw, "spine_events", "connector_instance_id"))) {
+    return;
+  }
+  const receipt = raw
+    .prepare("SELECT 1 FROM storage_migration_ledger WHERE migration_id = ? AND status = 'complete'")
+    .get(RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID);
+  if (receipt) {
+    return;
+  }
+  // A database with no run history has nothing to repair, and every writer now
+  // stamps the column explicitly. Writing a receipt here would put a boot-time
+  // timestamp into every fresh schema, so a restored schema snapshot would no
+  // longer equal a freshly initialized one. The first boot that finds rows
+  // runs the repair and records the receipt.
+  if (!raw.prepare("SELECT 1 FROM run_history LIMIT 1").get()) {
+    return;
+  }
+  raw.transaction(() => {
+    const result = raw
+      .prepare(
+        `UPDATE run_history
+            SET scheduler_managed = 0
+          WHERE scheduler_managed <> 0
+            AND run_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM spine_events s
+               WHERE s.run_id = run_history.run_id
+                 AND s.actor_type = 'local_device'
+                 AND COALESCE(
+                   NULLIF(s.connector_instance_id, ''),
+                   NULLIF(json_extract(s.data_json, '$.connector_instance_id'), ''),
+                   NULLIF(json_extract(s.data_json, '$.connection_id'), '')
+                 ) = run_history.connector_instance_id
+            )`
+      )
+      .run();
+    const nowIso = new Date().toISOString();
+    raw
+      .prepare(
+        `INSERT INTO storage_migration_ledger(
+           migration_id, status, attempt_count, changed_rows, started_at, updated_at, completed_at
+         ) VALUES (?, 'complete', 1, ?, ?, ?, ?)
+         ON CONFLICT(migration_id) DO UPDATE SET
+           status = 'complete', changed_rows = excluded.changed_rows,
+           attempt_count = attempt_count + 1, updated_at = excluded.updated_at, completed_at = excluded.completed_at`
+      )
+      .run(RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, Number(result.changes), nowIso, nowIso, nowIso);
+  })();
+}
+
+/**
  * Migrate `blob_bindings` to include `json_path` in the primary key.
  *
  * Pre-migration shape: PRIMARY KEY (blob_id, connector_id, stream, record_key).
@@ -6289,109 +6518,117 @@ export function publishSchemaSnapshotFile(
  * `buildPrivateSchemaSnapshot`) as well as on the connection it returns.
  */
 function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
-  // The first non-trivial write on the freshly opened DB. On Docker dev
-  // restart the previous process may still be closing its WAL writer;
-  // wrap with the same bounded retry policy used by
-  // `seedPreRegisteredClients` so a single SQLITE_BUSY at boot doesn't
-  // crash the new process. Sync because better-sqlite3 / initDb are sync.
-  runWithSqliteBusyRetrySync(() => raw.exec(SCHEMA), {
-    onRetry: opts.onSchemaRetry,
-  });
+  // SQLite's documented table-rebuild procedure disables FK enforcement before
+  // BEGIN, checks references before COMMIT, then restores enforcement outside
+  // the transaction: https://www.sqlite.org/lang_altertable.html#otheralter
+  raw.pragma("foreign_keys = OFF");
+  try {
+    // Hold the writer lock across every schema probe and DDL replacement.
+    // With the default 30s busy timeout and five attempts, contenders can wait
+    // about 151.5s; busyTimeoutMs can raise that bound for larger migrations.
+    runWithSqliteBusyRetrySync(
+      () => raw.transaction(() => {
+        buildSqliteSchemaInTransaction(raw, opts);
+        const violations = raw.prepare("PRAGMA foreign_key_check").all();
+        if (violations.length > 0) {
+          throw new Error(`SQLite bootstrap failed foreign_key_check: ${JSON.stringify(violations)}`);
+        }
+      }).immediate(),
+      { onRetry: opts.onSchemaRetry }
+    );
+  } finally {
+    raw.pragma("foreign_keys = ON");
+  }
+}
+
+function buildSqliteSchemaInTransaction(raw: SqliteDatabase, opts: InitDbOptions): void {
+  // The caller holds BEGIN IMMEDIATE across schema probes and DDL. The busy
+  // retry in buildSqliteSchema wraps this whole body, not only the lock
+  // acquisition: a transient failure anywhere inside it (body, onSchemaMigration
+  // callbacks, commit) rolls the unit back and runs it again, so a callback can
+  // run more than once for one successful bootstrap.
+  raw.exec(SCHEMA);
   // The red-stage table may already contain random handles. Add metadata in
   // place so those exact issued mappings remain readable as legacy rows.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_identity_handles", "client_sector", "TEXT"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))")
-  );
+  addColumnIfMissing(raw, "pairwise_identity_handles", "client_sector", "TEXT");
+  addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))");
   // A legacy row and its v1 successor share the original six-column tuple, so
   // the key must include scheme. SQLite cannot change a primary key in place:
   // rebuild once, atomically, copying every disclosed handle unchanged. The
   // shape is re-read inside the write lock so a concurrent starter skips it.
-  runWithSqliteBusyRetrySync(() => {
-    raw
-      .transaction(() => {
-        const key = raw
-          .prepare("SELECT name FROM pragma_table_info('pairwise_identity_handles') WHERE pk > 0 ORDER BY pk")
-          .all<{ name: string }>()
-          .map((column) => column.name)
-          .join(",");
-        if (key === "issuer,subject_id,client_id,kind,source_id,internal_id,scheme") return;
-        if (key !== "issuer,subject_id,client_id,kind,source_id,internal_id") {
-          throw new Error("Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.");
-        }
-        raw.exec(`
-          CREATE TABLE pairwise_identity_handles_new (
-            issuer TEXT NOT NULL,
-            subject_id TEXT NOT NULL,
-            client_id TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
-            source_id TEXT NOT NULL,
-            internal_id TEXT NOT NULL,
-            client_sector TEXT,
-            scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
-            handle TEXT NOT NULL UNIQUE,
-            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
-          );
-          INSERT INTO pairwise_identity_handles_new
-            (issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle)
-          SELECT issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle
-            FROM pairwise_identity_handles;
-          DROP TABLE pairwise_identity_handles;
-          ALTER TABLE pairwise_identity_handles_new RENAME TO pairwise_identity_handles;
-          CREATE UNIQUE INDEX idx_pairwise_identity_handles_v1_scope
-            ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
-            WHERE scheme = 'v1';
-        `);
-      })
-      .immediate();
-  });
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
-         ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
-         WHERE scheme = 'v1'`
-    );
-  });
+  raw
+    .transaction(() => {
+      const key = raw
+        .prepare("SELECT name FROM pragma_table_info('pairwise_identity_handles') WHERE pk > 0 ORDER BY pk")
+        .all<{ name: string }>()
+        .map((column) => column.name)
+        .join(",");
+      if (key === "issuer,subject_id,client_id,kind,source_id,internal_id,scheme") return;
+      if (key !== "issuer,subject_id,client_id,kind,source_id,internal_id") {
+        throw new Error("Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.");
+      }
+      raw.exec(`
+        CREATE TABLE pairwise_identity_handles_new (
+          issuer TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+          source_id TEXT NOT NULL,
+          internal_id TEXT NOT NULL,
+          client_sector TEXT,
+          scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+          handle TEXT NOT NULL UNIQUE,
+          PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+        );
+        INSERT INTO pairwise_identity_handles_new
+          (issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle)
+        SELECT issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle
+          FROM pairwise_identity_handles;
+        DROP TABLE pairwise_identity_handles;
+        ALTER TABLE pairwise_identity_handles_new RENAME TO pairwise_identity_handles;
+        CREATE UNIQUE INDEX idx_pairwise_identity_handles_v1_scope
+          ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+          WHERE scheme = 'v1';
+      `);
+    })
+    .immediate();
+  raw.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
+       ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+       WHERE scheme = 'v1'`
+  );
   // Older registries contain only the uniqueness key. Keep those claims
   // spent, but leave them without a replay payload so the store fails closed
   // instead of fabricating terminal evidence from an incomplete row.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "stream_evidence_run_registry", "payload_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "stream_evidence_run_registry", "replay_identity_json", "TEXT")
-  );
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "stream_evidence_run_registry", "payload_digest", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "stream_evidence_run_registry", "event_id", "TEXT"));
+  addColumnIfMissing(raw, "stream_evidence_run_registry", "payload_json", "TEXT");
+  addColumnIfMissing(raw, "stream_evidence_run_registry", "replay_identity_json", "TEXT");
+  addColumnIfMissing(raw, "stream_evidence_run_registry", "payload_digest", "TEXT");
+  addColumnIfMissing(raw, "stream_evidence_run_registry", "event_id", "TEXT");
   // Idempotent column additions for tables that pre-existed before the
   // column was introduced. SQLite has no `ADD COLUMN IF NOT EXISTS`, so
   // we probe pragma table_info and only ALTER when the column is missing.
   // Adds the non-redeemable `approval_id` column on the consent + device
   // auth tables; see SCHEMA comment for rationale.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pending_consents", "approval_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pending_consents", "approval_review_revision", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pending_consents", "approval_review_digest", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pending_consents", "approval_review_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "pending_consents", "interval_seconds", "INTEGER NOT NULL DEFAULT 2")
-  );
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pending_consents", "last_polled_at", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "owner_device_auth", "approval_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "consent_exchange_codes", "proof_hash", "TEXT"));
+  addColumnIfMissing(raw, "pending_consents", "approval_id", "TEXT");
+  addColumnIfMissing(raw, "pending_consents", "approval_review_revision", "TEXT");
+  addColumnIfMissing(raw, "pending_consents", "approval_review_digest", "TEXT");
+  addColumnIfMissing(raw, "pending_consents", "approval_review_json", "TEXT");
+  addColumnIfMissing(raw, "pending_consents", "interval_seconds", "INTEGER NOT NULL DEFAULT 2");
+  addColumnIfMissing(raw, "pending_consents", "last_polled_at", "TEXT");
+  addColumnIfMissing(raw, "owner_device_auth", "approval_id", "TEXT");
+  addColumnIfMissing(raw, "consent_exchange_codes", "proof_hash", "TEXT");
   // Add the v0.1 refresh-family columns without reconstructing legacy token
   // state. The fail-closed migration below revokes families and bound bearers
   // that lack the new linkage, so they require fresh authorization.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "oauth_refresh_tokens", "family_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "oauth_refresh_tokens", "generation", "INTEGER"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "oauth_refresh_tokens", "parent_generation", "INTEGER"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "oauth_refresh_tokens", "superseded_at", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "tokens", "refresh_family_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec(
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family_generation ON oauth_refresh_tokens(family_id, generation)"
-    );
-  });
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec("CREATE INDEX IF NOT EXISTS idx_tokens_refresh_family ON tokens(refresh_family_id, revoked)");
-  });
+  addColumnIfMissing(raw, "oauth_refresh_tokens", "family_id", "TEXT");
+  addColumnIfMissing(raw, "oauth_refresh_tokens", "generation", "INTEGER");
+  addColumnIfMissing(raw, "oauth_refresh_tokens", "parent_generation", "INTEGER");
+  addColumnIfMissing(raw, "oauth_refresh_tokens", "superseded_at", "TEXT");
+  addColumnIfMissing(raw, "tokens", "refresh_family_id", "TEXT");
+  raw.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family_generation ON oauth_refresh_tokens(family_id, generation)"
+  );
+  raw.exec("CREATE INDEX IF NOT EXISTS idx_tokens_refresh_family ON tokens(refresh_family_id, revoked)");
   // Absent-only grant expiry: grants issued before that normalization
   // persisted an explicit `"expires_at": null` in grant_json. `null` and
   // absent both mean "no expiry", so dropping the member is a representation
@@ -6409,174 +6646,134 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // it stays unusable because the parser that reads it still fails closed.
   // The PostgreSQL column is JSONB, which cannot hold malformed JSON, so the
   // equivalent migration there carries no such risk and needs no guard.
-  const malformedGrantIds = runWithSqliteBusyRetrySync(
-    () =>
-      raw.prepare("SELECT grant_id FROM grants WHERE json_valid(grant_json) = 0 ORDER BY grant_id").all() as {
-        grant_id: string;
-      }[]
-  ).map((row) => row.grant_id);
+  const malformedGrantIds = (raw
+    .prepare("SELECT grant_id FROM grants WHERE json_valid(grant_json) = 0 ORDER BY grant_id")
+    .all() as { grant_id: string }[]).map((row) => row.grant_id);
   if (malformedGrantIds.length > 0) {
     console.warn(
       `[db] absent-only grant expiry migration skipped ${malformedGrantIds.length} grant row(s) whose grant_json is not valid JSON; these grants remain unusable and were left untouched: ${malformedGrantIds.join(", ")}`
     );
   }
-  runWithSqliteBusyRetrySync(() => {
+  raw.exec(`
+    UPDATE grants
+       SET grant_json = json_remove(grant_json, '$.expires_at')
+     WHERE json_valid(grant_json)
+       AND json_type(grant_json, '$.expires_at') = 'null';
+  `);
+  raw.transaction(() =>
     raw.exec(`
-      UPDATE grants
-         SET grant_json = json_remove(grant_json, '$.expires_at')
-       WHERE json_valid(grant_json)
-         AND json_type(grant_json, '$.expires_at') = 'null';
-    `);
-  });
-  runWithSqliteBusyRetrySync(() => {
-    raw.transaction(() =>
-      raw.exec(`
-      UPDATE tokens
-         SET revoked = 1
-       WHERE revoked = 0
-         AND (
-           grant_id IN (
-             SELECT legacy.grant_id
-               FROM oauth_refresh_tokens legacy
-              WHERE legacy.grant_id IS NOT NULL
-                AND legacy.status <> 'revoked'
-                AND NOT EXISTS (
-                  SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = legacy.family_id
-                )
-           )
-           OR package_id IN (
-             SELECT legacy.package_id
-               FROM oauth_refresh_tokens legacy
-              WHERE legacy.package_id IS NOT NULL
-                AND legacy.status <> 'revoked'
-                AND NOT EXISTS (
-                  SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = legacy.family_id
-                )
-           )
-         );
-      UPDATE oauth_refresh_tokens
-         SET status = 'revoked',
-             revoked_at = COALESCE(revoked_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-       WHERE status <> 'revoked'
-         AND NOT EXISTS (
-           SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = oauth_refresh_tokens.family_id
-         );
-      `)
-    )();
-  });
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_exporters", "agent_version", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_exporters", "collector_protocol_version", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_exporters", "last_heartbeat_at", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_exporters", "last_error_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "device_enrollment_codes", "connector_id", "TEXT NOT NULL DEFAULT 'unknown'")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "device_enrollment_codes", "local_binding_id", "TEXT NOT NULL DEFAULT 'default'")
-  );
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_enrollment_codes", "display_name", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_enrollment_codes", "collection_scope_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "connector_instance_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "source_kind", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "last_error_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "last_heartbeat_at", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "last_heartbeat_status", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "device_source_instances", "records_pending", "INTEGER"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "device_source_instances", "outbox_diagnostics_json", "TEXT")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "device_source_instances", "manifest_generation", "INTEGER")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "connector_instances", "manifest_generation", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "connector_state", "manifest_generation", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "grant_connector_state", "manifest_generation", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() => migrateDeviceIngestBatchOutcomes(raw));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "surface_mode", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "surface_subject_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "surface_source", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "stream_origin", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "window_settle_endpoint", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "container_name", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_dir", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_volume", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "browser_generation_hash", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "allocator_metadata_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "browser_surfaces", "retained", "INTEGER CHECK (retained IS NULL OR retained IN (0, 1))")
-  );
+    UPDATE tokens
+       SET revoked = 1
+     WHERE revoked = 0
+       AND (
+         grant_id IN (
+           SELECT legacy.grant_id
+             FROM oauth_refresh_tokens legacy
+            WHERE legacy.grant_id IS NOT NULL
+              AND legacy.status <> 'revoked'
+              AND NOT EXISTS (
+                SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = legacy.family_id
+              )
+         )
+         OR package_id IN (
+           SELECT legacy.package_id
+             FROM oauth_refresh_tokens legacy
+            WHERE legacy.package_id IS NOT NULL
+              AND legacy.status <> 'revoked'
+              AND NOT EXISTS (
+                SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = legacy.family_id
+              )
+         )
+       );
+    UPDATE oauth_refresh_tokens
+       SET status = 'revoked',
+           revoked_at = COALESCE(revoked_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE status <> 'revoked'
+       AND NOT EXISTS (
+         SELECT 1 FROM tokens linked WHERE linked.refresh_family_id = oauth_refresh_tokens.family_id
+       );
+    `)
+  )();
+  addColumnIfMissing(raw, "device_exporters", "agent_version", "TEXT");
+  addColumnIfMissing(raw, "device_exporters", "collector_protocol_version", "TEXT");
+  addColumnIfMissing(raw, "device_exporters", "last_heartbeat_at", "TEXT");
+  addColumnIfMissing(raw, "device_exporters", "last_error_json", "TEXT");
+  addColumnIfMissing(raw, "device_enrollment_codes", "connector_id", "TEXT NOT NULL DEFAULT 'unknown'");
+  addColumnIfMissing(raw, "device_enrollment_codes", "local_binding_id", "TEXT NOT NULL DEFAULT 'default'");
+  addColumnIfMissing(raw, "device_enrollment_codes", "display_name", "TEXT");
+  addColumnIfMissing(raw, "device_enrollment_codes", "collection_scope_json", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "connector_instance_id", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "source_kind", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "last_error_json", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "last_heartbeat_at", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "last_heartbeat_status", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "records_pending", "INTEGER");
+  addColumnIfMissing(raw, "device_source_instances", "outbox_diagnostics_json", "TEXT");
+  addColumnIfMissing(raw, "device_source_instances", "manifest_generation", "INTEGER");
+  addColumnIfMissing(raw, "connector_instances", "manifest_generation", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_state", "manifest_generation", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "grant_connector_state", "manifest_generation", "INTEGER NOT NULL DEFAULT 0");
+  migrateDeviceIngestBatchOutcomes(raw);
+  addColumnIfMissing(raw, "browser_surfaces", "surface_mode", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "surface_subject_id", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "surface_source", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "stream_origin", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "window_settle_endpoint", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "container_name", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "profile_dir", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "profile_volume", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "browser_generation_hash", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "allocator_metadata_json", "TEXT");
+  addColumnIfMissing(raw, "browser_surfaces", "retained", "INTEGER CHECK (retained IS NULL OR retained IN (0, 1))");
   // Dataset summary projection fencing: a `generation` column lets rebuild
   // and reconcile writers guard their final summary write against
   // concurrent record/blob delta writers. Pre-existing rows seed with 0;
   // any subsequent write bumps the counter so old captures cannot win.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "dataset_summary_projection", "generation", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() => migrateBrowserSurfaceLeaseEnumChecks(raw));
-  runWithSqliteBusyRetrySync(() => ensureBrowserSurfaceLeaseIndexes(raw));
-  runWithSqliteBusyRetrySync(() => ensureConnectorSummaryEvidenceColumns(raw));
+  addColumnIfMissing(raw, "dataset_summary_projection", "generation", "INTEGER NOT NULL DEFAULT 0");
+  migrateBrowserSurfaceLeaseEnumChecks(raw);
+  ensureBrowserSurfaceLeaseIndexes(raw);
+  ensureConnectorSummaryEvidenceColumns(raw);
   // Adaptive whale-repair pages: pre-existing databases have the durable
   // chunk table but not the next page limit. Add it without rewriting the
   // retained records or changing any evidence authority.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "connector_summary_evidence_repair_chunk", "page_size", "INTEGER")
-  );
-  runWithSqliteBusyRetrySync(() => ensureRetainedSizeRejectionColumns(raw));
-  runWithSqliteBusyRetrySync(() => ensureConnectorMaintenanceCursorColumns(raw));
-  runWithSqliteBusyRetrySync(() => migrateManifestWriteViolations(raw));
+  addColumnIfMissing(raw, "connector_summary_evidence_repair_chunk", "page_size", "INTEGER");
+  ensureRetainedSizeRejectionColumns(raw);
+  ensureConnectorMaintenanceCursorColumns(raw);
+  migrateManifestWriteViolations(raw);
   // Starvation-avoidance backoff columns for search_index_dirty (see the
   // CREATE TABLE comment above): a pre-existing reference DB created the
   // table before these columns existed on it.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "search_index_dirty", "attempts", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT"));
+  addColumnIfMissing(raw, "search_index_dirty", "attempts", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT");
   // Existing delayed rows have no provenance: do not guess whether an old
   // deadline was automatic or an intentional operator park. New rows use the
   // default (0) on both fresh and upgraded tables; legacy delayed rows remain
   // NULL until an automatic failure or explicit control action classifies them.
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec("BEGIN IMMEDIATE");
-    try {
-      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
-        raw.exec(`UPDATE search_index_dirty
-                  SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
-      }
-      raw.exec("COMMIT");
-    } catch (error) {
-      raw.exec("ROLLBACK");
-      throw error;
+  raw.transaction(() => {
+    if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
+      raw.exec(`UPDATE search_index_dirty
+                SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
     }
-  });
+  }).immediate();
   // Monotonic per-scope CAS generation (see the CREATE TABLE comment above):
   // a pre-existing reference DB created the table before this column
   // existed. Pre-existing rows seed with 0; any subsequent mark-dirty write
   // bumps it, so a reconcile that read revision=0 before this migration ran
   // still correctly fails its clear CAS if a mark landed in between.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "search_index_dirty", "revision", "INTEGER NOT NULL DEFAULT 0")
-  );
-  runWithSqliteBusyRetrySync(() => ensureRecordResetGenerationColumn(raw));
-  runWithSqliteBusyRetrySync(() => ensureRecordIdentityGenerationColumn(raw));
+  addColumnIfMissing(raw, "search_index_dirty", "revision", "INTEGER NOT NULL DEFAULT 0");
+  ensureRecordResetGenerationColumn(raw);
+  ensureRecordIdentityGenerationColumn(raw);
   // Incremental add-source linkage: a later same-client ceremony records the
   // prior package it extends via `parent_package_id`. Pre-existing reference
   // DBs predate the column; add it non-destructively (NULL = a root package
   // with no prior linkage). It is cumulative-view/audit metadata only and
   // carries no source or stream authority — record access is still governed
   // solely by active child grants.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grant_packages", "parent_package_id", "TEXT"));
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec(
-      `CREATE INDEX IF NOT EXISTS idx_grant_packages_parent
-         ON grant_packages(parent_package_id)`
-    );
-  });
+  addColumnIfMissing(raw, "grant_packages", "parent_package_id", "TEXT");
+  raw.exec(
+    `CREATE INDEX IF NOT EXISTS idx_grant_packages_parent
+       ON grant_packages(parent_package_id)`
+  );
   // Disclosure-spine `event_seq` migration. Pre-existing reference DBs were
   // created before `event_seq` existed; add the column non-destructively and
   // seed any rows that lack a value. An interrupted boot can leave the column
@@ -6585,73 +6782,69 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // ordered by `rowid`. After backfill, `event_seq` is the only ordering
   // surface readers and cursors consult; the cursor contract no longer reads
   // `rowid`.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "event_seq", "INTEGER"));
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec(`
-      WITH pending AS (
-        SELECT rowid, ROW_NUMBER() OVER (ORDER BY rowid) AS ordinal
-          FROM spine_events
-         WHERE event_seq IS NULL
-      ), current AS (
-        SELECT COALESCE(MAX(event_seq), 0) AS max_seq
-          FROM spine_events
-      )
-      UPDATE spine_events
-         SET event_seq = (
-           SELECT current.max_seq + pending.ordinal
-             FROM pending, current
-            WHERE pending.rowid = spine_events.rowid
-         )
-       WHERE rowid IN (SELECT rowid FROM pending)
-    `);
-  });
-  runWithSqliteBusyRetrySync(() => migrateSpineSourceColumns(raw, opts));
+  addColumnIfMissing(raw, "spine_events", "event_seq", "INTEGER");
+  raw.exec(`
+    WITH pending AS (
+      SELECT rowid, ROW_NUMBER() OVER (ORDER BY rowid) AS ordinal
+        FROM spine_events
+       WHERE event_seq IS NULL
+    ), current AS (
+      SELECT COALESCE(MAX(event_seq), 0) AS max_seq
+        FROM spine_events
+    )
+    UPDATE spine_events
+       SET event_seq = (
+         SELECT current.max_seq + pending.ordinal
+           FROM pending, current
+          WHERE pending.rowid = spine_events.rowid
+       )
+     WHERE rowid IN (SELECT rowid FROM pending)
+  `);
+  migrateSpineSourceColumns(raw, opts);
   // blob_bindings gains a json_path column (RFC 6901 JSON Pointer or
   // '@record' pseudo-path). Required for lossless binary extraction
   // during sqlite→postgres migration; see
   // docs/reference/binary-content-invariant-design-brief.md §4.6. Legacy rows
   // backfill with '@record' (their existing record-level semantics).
-  runWithSqliteBusyRetrySync(() => migrateBlobBindingsJsonPath(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
+  migrateBlobBindingsJsonPath(raw, opts);
+  migrateConnectorSyncStateInstanceColumns(raw, opts);
+  migrateConnectorDetailGapInstanceColumns(raw, opts);
+  migrateRecordStorageInstanceColumns(raw, opts);
   // Pre-existing DBs predate changes_floor. Seed it at each stream's head so
   // every older changes_since token expires once (clients re-sync from
   // `beginning`): history may already have been pruned or compacted, and the
   // floor cannot tell. The column and seed commit together so an interrupted
   // seed cannot leave a column that makes the next startup skip it.
-  runWithSqliteBusyRetrySync(() => {
-    raw.exec("BEGIN IMMEDIATE");
-    try {
-      if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
-        raw.exec(
-          `UPDATE version_counter
-              SET changes_floor = MAX(max_version,
-                COALESCE((SELECT MAX(rc.version) FROM record_changes rc
-                           WHERE rc.connector_instance_id = version_counter.connector_instance_id
-                             AND rc.stream = version_counter.stream), 0),
-                COALESCE((SELECT MAX(r.version) FROM records r
-                           WHERE r.connector_instance_id = version_counter.connector_instance_id
-                             AND r.stream = version_counter.stream), 0))`
-        );
-      }
-      raw.exec("COMMIT");
-    } catch (error) {
-      raw.exec("ROLLBACK");
-      throw error;
+  raw.transaction(() => {
+    if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+      raw.exec(
+        `UPDATE version_counter
+            SET changes_floor = MAX(max_version,
+              COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                         WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                           AND rc.stream = version_counter.stream), 0),
+              COALESCE((SELECT MAX(r.version) FROM records r
+                         WHERE r.connector_instance_id = version_counter.connector_instance_id
+                           AND r.stream = version_counter.stream), 0))`
+      );
     }
-  });
-  runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
+  }).immediate();
+  migrateBlobOriginInstanceColumn(raw, opts);
+  migrateSemanticSearchInstanceColumns(raw, opts);
   // A legacy vector has no evidence that it was produced from the current
   // normalized input. NULL deliberately forces one guarded refresh.
-  runWithSqliteBusyRetrySync(() => {
-    addColumnIfMissing(raw, "semantic_search_blob", "input_identity", "TEXT");
-    addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
-  });
-  runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
+  addColumnIfMissing(raw, "semantic_search_blob", "input_identity", "TEXT");
+  addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
+  migrateLexicalSearchInstanceColumns(raw, opts);
+  // Rename ids that older collectors spelled with underscores before any
+  // migration below derives identity from a connector id.
+  const connectorIdRename = migrateRenamedConnectorIdsSqlite(raw);
+  const connectorIdRenameSummary = describeConnectorIdRename(connectorIdRename);
+  if (connectorIdRenameSummary) {
+    console.warn(`[db] ${connectorIdRenameSummary}`);
+  }
+  migrateLocalDeviceConnectorInstances(raw, opts);
+  migrateRecordSemanticTimeColumn(raw);
   raw.exec(`
 DROP INDEX IF EXISTS idx_records_lookup;
 DROP INDEX IF EXISTS idx_records_version;
@@ -6665,29 +6858,38 @@ CREATE INDEX IF NOT EXISTS idx_record_changes_record ON record_changes(connector
 CREATE INDEX IF NOT EXISTS idx_record_changes_emitted ON record_changes(connector_instance_id, stream, emitted_at);
 CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_instance_id, stream, record_key);
 `);
-  runWithSqliteBusyRetrySync(() => migrateSchedulerInstanceColumns(raw));
-  runWithSqliteBusyRetrySync(() => migrateRunHistoryRename(raw));
-  runWithSqliteBusyRetrySync(() => migrateRunHistoryCompletedAtNullable(raw));
-  runWithSqliteBusyRetrySync(() => migrateConnectorMaintenanceCursorNameCheck(raw));
-  runWithSqliteBusyRetrySync(() => migrateLegacyConnectorInstancesToDefaultAccount(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorInstancesSourceKindCheck(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorInstancesSourceKindBrowserCollector(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorInstancesStatusDraft(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateRecordRejectionBytePayload(raw));
-  runWithSqliteBusyRetrySync(() => migrateConnectorCredentialKindCheck(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorCredentialStatusRejected(raw, opts));
-  runWithSqliteBusyRetrySync(() => migrateConnectorCredentialKindCheckAccessTokenApiKey(raw, opts));
+  migrateSchedulerInstanceColumns(raw);
+  migrateRunHistoryRename(raw);
+  migrateRunHistoryCompletedAtNullable(raw);
+  // After both run_history rebuilds above: they copy an explicit column list
+  // and would drop a column added earlier. Additive and nullable; rows that
+  // predate it read NULL until the startup actor backfill reaches them.
+  addColumnIfMissing(raw, "run_history", "actor_type", "TEXT");
+  migrateConnectorMaintenanceCursorNameCheck(raw);
+  migrateLegacyConnectorInstancesToDefaultAccount(raw, opts);
+  migrateConnectorInstancesSourceKindCheck(raw, opts);
+  migrateConnectorInstancesSourceKindBrowserCollector(raw, opts);
+  migrateConnectorInstancesStatusDraft(raw, opts);
+  // These legacy migrations rebuild connector_instances from fixed column
+  // lists. Re-add projection metadata and collection revisions after the final
+  // rebuild so state writes and the new run-sequence reference survive boot.
+  addColumnIfMissing(raw, "connector_instances", "manifest_generation", "INTEGER NOT NULL DEFAULT 0");
+  ensureCollectionRevisionColumns(raw);
+  repairCollectionRunSequencesForeignKey(raw);
+  reconcileRunOrderCounters(raw);
+  migrateRecordRejectionBytePayload(raw);
+  migrateConnectorCredentialKindCheck(raw, opts);
+  migrateConnectorCredentialStatusRejected(raw, opts);
+  migrateConnectorCredentialKindCheckAccessTokenApiKey(raw, opts);
   // NULL preserves the honest "unknown" state for credentials written before
   // latest-transition provenance existed; no historical actor is invented.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "connector_instance_credentials", "state_change_json", "TEXT")
-  );
-  runWithSqliteBusyRetrySync(() => migrateClientEventSubscriptionAuthority(raw));
-  runWithSqliteBusyRetrySync(() => ensureClientEventSubscriptionAuthorityIndex(raw));
+  addColumnIfMissing(raw, "connector_instance_credentials", "state_change_json", "TEXT");
+  migrateClientEventSubscriptionAuthority(raw);
+  ensureClientEventSubscriptionAuthorityIndex(raw);
   // Additive and NULL-tolerant: rows written before this column existed read
   // as NULL, which the sweep treats as orphaned because no live process
   // claims them. See the column comment on manual_upload_artifacts.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "manual_upload_artifacts", "owner_epoch", "TEXT"));
+  addColumnIfMissing(raw, "manual_upload_artifacts", "owner_epoch", "TEXT");
   raw.exec(
     `CREATE INDEX IF NOT EXISTS idx_spine_events_run_terminal
       ON spine_events(run_id, event_type, event_seq DESC)
@@ -6732,14 +6934,14 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // write-path derivation, only promoting an existing value to a column.
   // Spec: openspec/changes/reconcile-active-summary-evidence/specs/
   //       reference-connector-instances/spec.md
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT"));
+  addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT");
+  addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT");
   // Terminal provenance is source-bound, not projection-bound. This trigger
   // shares SQLite's single-writer ordering with registry mutation. It accepts
   // the normalized column or the event payload identity, so every normal
   // terminal append reaches the same source boundary. Pre-column rows are
   // deliberately not backfilled with a generation and remain historical.
-  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "manifest_generation", "INTEGER"));
+  addColumnIfMissing(raw, "spine_events", "manifest_generation", "INTEGER");
   raw.exec(`
     DROP TRIGGER IF EXISTS stamp_terminal_manifest_generation;
     CREATE TRIGGER stamp_terminal_manifest_generation
@@ -6801,7 +7003,8 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // Precedence matches `readEventConnectionId` in
   // connector-summary-read-model.ts exactly: `data.connector_instance_id`
   // first, then `data.connection_id`.
-  runWithSqliteBusyRetrySync(() => migrateSpineEventsConnectorInstanceIdBackfill(raw, opts));
+  migrateSpineEventsConnectorInstanceIdBackfill(raw, opts);
+  migrateRunHistoryDeviceRunProvenance(raw);
   // Index gives us a fast lookup-by-approval-id and approximates the
   // UNIQUE constraint on the column (the inline CREATE TABLE form
   // declares it UNIQUE; SQLite's ALTER TABLE ADD COLUMN does not
@@ -6815,16 +7018,12 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   );
   // Selection overrides predate reviewed episode batches. Keep legacy
   // single-target rows valid while making batch membership additive.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "browser_surface_replacement_selection_overrides", "replacement_batch_id", "TEXT")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(
-      raw,
-      "browser_surface_replacement_selection_override_batches",
-      "reviewed_artifact_sha256",
-      "TEXT NOT NULL DEFAULT ''"
-    )
+  addColumnIfMissing(raw, "browser_surface_replacement_selection_overrides", "replacement_batch_id", "TEXT");
+  addColumnIfMissing(
+    raw,
+    "browser_surface_replacement_selection_override_batches",
+    "reviewed_artifact_sha256",
+    "TEXT NOT NULL DEFAULT ''"
   );
   raw.exec(`
 CREATE INDEX IF NOT EXISTS idx_browser_surface_replacement_selection_override_batch
@@ -6871,12 +7070,8 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
   // new run is admitted for a connector_instance. Existing rows backfill to 1
   // (safe baseline — the column default also ensures new rows without an
   // explicit value start at 1). See docs/research/slvp-ideal-stuck-run-liveness-2026-06-14.md §2.6 / §8.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "controller_active_runs", "run_generation", "INTEGER NOT NULL DEFAULT 1")
-  );
-  runWithSqliteBusyRetrySync(() =>
-    raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
-  );
+  addColumnIfMissing(raw, "controller_active_runs", "run_generation", "INTEGER NOT NULL DEFAULT 1");
+  raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate();
 }
 
 /**
@@ -6922,6 +7117,15 @@ function publishFileSchemaSnapshot(path: string, opts: InitDbOptions): boolean {
   }
 }
 
+function stampVectorIndexKind(raw: SqliteDatabase, vectorIndexKind: VectorIndexKind): void {
+  Object.defineProperty(raw, "vectorIndexKind", {
+    configurable: false,
+    enumerable: true,
+    value: vectorIndexKind,
+    writable: false,
+  });
+}
+
 export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
   // Detach, don't close: a previously-returned handle belongs to whoever
   // holds it. See `detachDb()` for why closing here was a cross-instance
@@ -6957,55 +7161,60 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   const raw = (restoredMemorySchema
     ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
     : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
-  sqliteStoreCacheGeneration += 1;
-  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
-  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+  // This function owns `raw` until it assigns `db`, which is the last step.
+  // Closing it on a failure before that point is the only way it is ever closed: `closeDb()` cannot
+  // reach a handle that was never published. A previous handle belongs to its
+  // caller (see `detachDb()`) and is not touched here.
+  try {
+    sqliteStoreCacheGeneration += 1;
+    sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
+    raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
 
-  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
-  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
-  // invalid on in-memory DBs.
-  if (path !== ":memory:") {
-    raw.pragma("journal_mode = WAL");
-    raw.pragma("synchronous = NORMAL");
-    raw.pragma("temp_store = MEMORY");
-    raw.pragma("mmap_size = 268435456");
-    raw.pragma("cache_size = -65536");
-  }
+    // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
+    // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
+    // invalid on in-memory DBs.
+    if (path !== ":memory:") {
+      raw.pragma("journal_mode = WAL");
+      raw.pragma("synchronous = NORMAL");
+      raw.pragma("temp_store = MEMORY");
+      raw.pragma("mmap_size = 268435456");
+      raw.pragma("cache_size = -65536");
+    }
 
-  const vectorIndexKind = loadVectorExtension(raw);
+    const vectorIndexKind = loadVectorExtension(raw);
 
-  // SQLite connection settings are not part of a serialized database. The
-  // schema-building path restores foreign_keys during its migrations; a
-  // deserialized connection must restore it explicitly.
-  if (restoredMemorySchema || restoredFileSchema) {
-    sqliteSchemaSnapshotRestores += 1;
-    raw.pragma("foreign_keys = ON");
+    // SQLite connection settings are not part of a serialized database. The
+    // schema-building path restores foreign_keys during its migrations; a
+    // deserialized connection must restore it explicitly.
+    if (restoredMemorySchema || restoredFileSchema) {
+      sqliteSchemaSnapshotRestores += 1;
+      raw.pragma("foreign_keys = ON");
+      stampVectorIndexKind(raw, vectorIndexKind);
+      // Publish last: nothing after this line can fail.
+      db = withCachedPrepare(raw);
+      return db;
+    }
+
+    buildSqliteSchema(raw, opts);
+    if (
+      path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
+    ) {
+      sqliteMemorySchemaSnapshot = raw.serialize();
+    }
+    // Stamp the chosen vector-index backend onto `raw` so the wrapped db
+    // exposes it to search-semantic.js without re-probing. The Proxy's
+    // get-handler falls through to Reflect for non-`prepare` properties,
+    // so direct property reads like `db.vectorIndexKind` work.
+    stampVectorIndexKind(raw, vectorIndexKind);
+    // Publish last: nothing after this line can fail.
     db = withCachedPrepare(raw);
-    Object.defineProperty(raw, "vectorIndexKind", {
-      configurable: false,
-      enumerable: true,
-      value: vectorIndexKind,
-      writable: false,
-    });
     return db;
+  } catch (error) {
+    try {
+      raw.close();
+    } catch {
+      /* best-effort: report the bootstrap error, not the close error */
+    }
+    throw error;
   }
-
-  buildSqliteSchema(raw, opts);
-  if (
-    path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
-  ) {
-    sqliteMemorySchemaSnapshot = raw.serialize();
-  }
-  db = withCachedPrepare(raw);
-  // Stamp the chosen vector-index backend onto the wrapped db so
-  // search-semantic.js can select without re-probing. The Proxy's
-  // get-handler falls through to Reflect for non-`prepare` properties,
-  // so direct property reads like `db.vectorIndexKind` work.
-  Object.defineProperty(raw, "vectorIndexKind", {
-    configurable: false,
-    enumerable: true,
-    value: vectorIndexKind,
-    writable: false,
-  });
-  return db;
 }

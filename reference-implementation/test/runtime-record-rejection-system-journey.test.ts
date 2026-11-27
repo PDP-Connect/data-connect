@@ -6,7 +6,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-
 import { loadSyncState, runConnector } from "../runtime/index.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -15,6 +14,7 @@ import { __setAdmissionPreCheckPhaseHookForTest } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const OWNER_SUBJECT_ID = "owner_alice";
@@ -139,23 +139,26 @@ function streamSchema() {
 }
 
 function manifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    connector_key: connectorId,
-    display_name: "Runtime Record Rejection Journey Test Connector",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: streamSchema(),
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      connector_key: connectorId,
+      display_name: "Runtime Record Rejection Journey Test Connector",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: streamSchema(),
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function runtimeManifest(connectorId: string): Parameters<typeof runConnector>[0]["manifest"] {

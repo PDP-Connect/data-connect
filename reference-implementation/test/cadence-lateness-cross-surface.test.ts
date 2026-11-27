@@ -110,7 +110,7 @@ function fleetFor(snapshot: ConnectionHealthSnapshot, connectionId: string) {
     streamHealth: { status: "pass" },
     summaries: [
       {
-        connection_health: snapshot,
+        connection_health: { ...snapshot, coverage_as_of: null },
         connection_id: connectionId,
         connector_id: "test-connector",
         connector_instance_id: connectionId,

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
@@ -18,34 +19,38 @@ import {
   listDirtySearchIndexScopes,
   markSearchIndexDirtySqlite,
 } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function manifest(connectorId: string, semantic = false) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        query: {
-          search: semantic
-            ? { lexical_fields: ["subject"], semantic_fields: ["subject"] }
-            : { lexical_fields: ["subject"] },
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          query: {
+            search: semantic
+              ? { lexical_fields: ["subject"], semantic_fields: ["subject"] }
+              : { lexical_fields: ["subject"] },
+          },
+          schema: {
+            type: "object",
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        schema: {
-          type: "object",
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-        },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-  };
+      ],
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 async function seed(connectorId: string, instance: string, key = "k1") {
@@ -57,7 +62,7 @@ async function seed(connectorId: string, instance: string, key = "k1") {
       emitted_at: "2026-07-16T00:00:00.000Z",
       data: { id: key, subject: `canonical ${key}` },
     },
-    { deferIndexes: true },
+    { deferIndexes: true }
   );
   assert.equal(outcome.accepted, true);
 }
@@ -65,13 +70,13 @@ async function seed(connectorId: string, instance: string, key = "k1") {
 function mark(connectorId: string, instance: string) {
   markSearchIndexDirtySqlite(
     { connectorId, connectorInstanceId: instance, stream: "items" },
-    "2026-07-16T00:00:00.000Z",
+    "2026-07-16T00:00:00.000Z"
   );
 }
 
 async function scope(instance: string) {
   const result = (await listDirtySearchIndexScopes(100)).find(
-    (s) => s.connectorInstanceId === instance && s.stream === "items",
+    (s) => s.connectorInstanceId === instance && s.stream === "items"
   );
   assert.ok(result, "fixture must have an eligible dirty scope");
   return result;
@@ -81,7 +86,7 @@ function lexicalRows(instance: string) {
   return getDb()
     .prepare(
       "SELECT rowid, record_key, field, text FROM lexical_search_index " +
-        "WHERE connector_instance_id = ? AND stream = ? ORDER BY record_key, field, rowid",
+        "WHERE connector_instance_id = ? AND stream = ? ORDER BY record_key, field, rowid"
     )
     .all(instance, "items");
 }
@@ -143,7 +148,7 @@ test("G1: lexical index-only cleanup debt is removed before dirty completion", {
             connectorInstanceId: instance,
             stream: "items",
           }),
-          false,
+          false
         );
         assert.deepEqual(lexicalRows(sibling), siblingBefore, "repair remains exact-instance scoped");
       } finally {
@@ -207,7 +212,12 @@ test("G1: reconciling a removed stream keeps the semantic index of a declared si
     for (const stream of ["items", "notes"]) {
       const outcome = await ingestRecord(
         { connector_id: connectorId, connector_instance_id: instance },
-        { data: { id: "k1", subject: `canonical ${stream}` }, emitted_at: "2026-07-16T00:00:00.000Z", key: "k1", stream },
+        {
+          data: { id: "k1", subject: `canonical ${stream}` },
+          emitted_at: "2026-07-16T00:00:00.000Z",
+          key: "k1",
+          stream,
+        },
         { deferIndexes: true }
       );
       assert.equal(outcome.accepted, true);

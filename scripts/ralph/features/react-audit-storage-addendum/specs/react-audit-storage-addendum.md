@@ -2,7 +2,7 @@
 
 ## Source
 
-- `docs/260130-react-audit-storage-and-vercel-review-feedback.md`
+- a source doc since removed from the tree (see git history)
 
 ## Goals
 

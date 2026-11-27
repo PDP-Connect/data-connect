@@ -52,7 +52,7 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
  * signed manifest named.
  */
 export interface CollectionProfilePin {
-  /** The local collector's id for the connector (`claude_code`). */
+  /** The local collector's id for the connector: its manifest key (`claude-code`). */
   readonly connectorId: string;
   /** The artifact's connector key; also the GHCR repository leaf (`claude-code`). */
   readonly connectorKey: string;
@@ -69,7 +69,7 @@ export interface CollectionProfilePin {
 /** The part of the installer core this module calls. */
 export interface CollectionProfileInstallerCore {
   readonly DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
-  installFromLock(options: Record<string, unknown>): Promise<unknown>;
+  installFromLock(options: Record<string, unknown> & { source: null }): Promise<unknown>;
 }
 
 export interface EnsureCollectionProfileOptions {
@@ -163,8 +163,6 @@ export async function ensureCollectionProfileInstalled(
     const identityResolver = ({ registry, repository: requested }: { registry: string; repository: string }) =>
       registry === REGISTRY && requested === repository ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY : null;
     await core.installFromLock({
-      // Tarball entries are not accepted from this lock.
-      artifactCertificateIdentityResolver: () => null,
       installRoot: staging,
       layout: "source",
       lock: {
@@ -183,7 +181,7 @@ export async function ensureCollectionProfileInstalled(
         ],
       },
       ociCertificateIdentityResolver: identityResolver,
-      source: { doc: {}, mode: "locked" },
+      source: null,
     });
 
     const staged = join(staging, "collection-profiles", pin.connectorId);

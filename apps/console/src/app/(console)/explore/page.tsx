@@ -40,6 +40,7 @@ import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { assembleExplorerData } from "@pdpp/operator-ui/explore/explore-data-assembler";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
+import { buildConnectorIconMap } from "../lib/connector-icon-map.ts";
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getRsInternalUrl, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
@@ -128,12 +129,8 @@ export default async function RecordsExplorerPage({
 
   try {
     const data = await assembleExplorerData(params, liveDashboardDataSource, getRsInternalUrl());
-    const connectorIcons = Object.fromEntries(
-      (await listConnectorManifests().catch(() => [])).flatMap((manifest) => [
-        [manifest.connector_id, manifest.icon] as const,
-        ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-      ])
-    );
+    const manifests = await listConnectorManifests().catch(() => []);
+    const connectorIcons = await buildConnectorIconMap(manifests, []);
     const order = data.supportsTimelineDirection && requestedOrder === "oldest" ? "oldest" : "newest";
     // Relationships for the inspected record come from declared metadata via the
     // SAME `records/lib/relationships.ts` helpers the records detail page uses —

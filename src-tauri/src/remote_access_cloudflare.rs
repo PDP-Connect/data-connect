@@ -79,7 +79,7 @@
 //!   ~62MB `cloudflare/cloudflared:latest` image on a fast connection;
 //!   untested on a slow one) on top of everything else.
 //!
-//! Tim's own assessment, independently confirmed by this investigation:
+//! The owner's own assessment, independently confirmed by this investigation:
 //! Docker is the MOST complex option here, not a shortcut -- strictly more
 //! moving parts (binary + daemon + host-network plumbing + a second orphan
 //! class + pull latency) than the native path it would be a fallback for,
@@ -833,22 +833,25 @@ fn spawn_output_watcher(
 }
 
 /// cloudflared logs a line containing "Registered tunnel connection" once
-/// the tunnel is live, and lines containing "connection error"/"failed to
-/// " on a fatal startup failure (for example an invalid token). Matched
-/// case-insensitively against both stdout and stderr, since cloudflared's
-/// log destination has varied across versions and this adapter does not pin
-/// one.
+/// the tunnel is live. A line with one of the phrases below maps to a fixed
+/// reason; the raw line is never passed on. The two token phrases are a best
+/// effort: cloudflared's source does not print them verbatim, and a bad token
+/// can instead end the process or never register. The exit and timeout paths
+/// refuse those cases. Matched case-insensitively against both stdout and
+/// stderr, since cloudflared's log destination has varied across versions and
+/// this adapter does not pin one.
 fn watch_stream<R: std::io::Read>(reader: BufReader<R>, connected: mpsc::Sender<Result<(), String>>) {
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let lower = line.to_ascii_lowercase();
         if lower.contains("registered tunnel connection") {
             let _ = connected.send(Ok(()));
-        } else if lower.contains("failed to parse token")
-            || lower.contains("invalid tunnel token")
-            || lower.contains("unauthorized")
-        {
-            let _ = connected.send(Err(line));
+        } else if lower.contains("failed to parse token") {
+            let _ = connected.send(Err("tunnel token could not be parsed".to_string()));
+        } else if lower.contains("invalid tunnel token") {
+            let _ = connected.send(Err("invalid tunnel token".to_string()));
+        } else if lower.contains("unauthorized") {
+            let _ = connected.send(Err("tunnel authorization was denied".to_string()));
         }
     }
 }
@@ -1112,11 +1115,17 @@ mod tests {
     }
 
     #[test]
-    fn watch_stream_reports_failure_on_an_invalid_token_line() {
-        let sample = b"2026-09-20T00:00:00Z ERR Failed to parse token: invalid tunnel token\n";
-        let (tx, rx) = mpsc::channel();
-        watch_stream(BufReader::new(&sample[..]), tx);
-        assert!(matches!(rx.recv(), Ok(Err(reason)) if reason.to_ascii_lowercase().contains("token")));
+    fn watch_stream_reports_only_fixed_failure_reasons() {
+        for (sample, expected) in [
+            ("ERR Failed to parse token", "tunnel token could not be parsed"),
+            ("ERR INVALID TUNNEL TOKEN", "invalid tunnel token"),
+            ("ERR Unauthorized", "tunnel authorization was denied"),
+        ] {
+            let sample = format!("{sample}: opaque-marker\n");
+            let (tx, rx) = mpsc::channel();
+            watch_stream(BufReader::new(sample.as_bytes()), tx);
+            assert_eq!(rx.recv().unwrap(), Err(expected.to_string()));
+        }
     }
 
     #[test]
@@ -1127,10 +1136,8 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// The owner needs to know cloudflared is missing BEFORE picking this
-    /// option, not as a post-submit spawn error -- this is the exact check
-    /// `ri_environment` (`unified.rs`) runs at RS-spawn time to populate
-    /// `PDPP_CLOUDFLARED_BINARY_PRESENT`. Uses a controlled `PATH` value
+    /// The check `ensure_cloudflared_available` uses to prefer a system
+    /// `cloudflared` over a download. Uses a controlled `PATH` value
     /// (`binary_is_on_path`) rather than the real process `PATH`, since
     /// mutating that would be unsafe across parallel test threads.
     #[test]
@@ -1203,7 +1210,7 @@ mod tests {
     /// on connectivity. Instead, this only proves the NEGATIVE half of the
     /// preference decision -- that a present system binary is never
     /// consulted a second time and the closure is called at most once --
-    /// which is the actual bug class Tim's finding could have hidden (a
+    /// which is the actual bug class that finding could have hidden (a
     /// preference check that looks right but re-checks PATH after already
     /// deciding to download, potentially flip-flopping). The real download
     /// mechanics (checksum verification, extraction, caching) are already

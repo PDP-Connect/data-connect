@@ -216,9 +216,9 @@ test("projectStorageDisplayName treats registry URL connector labels as fallback
   );
 });
 
-test("projectStorageDisplayName treats legacy alias labels as fallback placeholders", () => {
+test("projectStorageDisplayName treats a label equal to the connector key as a fallback placeholder", () => {
   assert.equal(
-    projectStorageDisplayName("claude_code", {
+    projectStorageDisplayName("claude-code", {
       connectorId: "claude-code",
       connectorInstanceId: "cin_claude_code",
     }),

@@ -1,7 +1,7 @@
 # React Refactor Two - Implementation Plan
 
 Date: 2026-01-30
-Source: `docs/260130-react-refactor-implementation-gap.md`
+Source: a source doc since removed from the tree (see git history)
 Spec: `scripts/ralph/features/react-refactor-two/specs/react-refactor-two.md`
 
 ## Completion Summary

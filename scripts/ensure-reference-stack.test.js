@@ -18,6 +18,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  assertBundledNgrok,
   buildManifest,
   installStagedDependencies,
   launchScript,
@@ -164,7 +165,7 @@ function tauriHookFixture() {
         : "so"
   writeFileSync(
     fakeNpm,
-    `import { mkdirSync, writeFileSync } from "node:fs"\nimport { join } from "node:path"\n\nif (process.argv[2] === "install") {\n  const files = [\n    ["node_modules/tsx/package.json", "{}\\n"],\n    ["node_modules/patchright/package.json", "{}\\n"],\n    ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "sqlite\\n"],\n    ["node_modules/sqlite-vec/build/Release/vec0.${nativeExtension}", "vec\\n"],\n  ]\n  for (const [path, content] of files) {\n    const filePath = join(process.cwd(), path)\n    mkdirSync(join(filePath, ".."), { recursive: true })\n    writeFileSync(filePath, content)\n  }\n}\n`
+    `import { mkdirSync, writeFileSync } from "node:fs"\nimport { join } from "node:path"\n\nif (process.argv[2] === "install") {\n  const files = [\n    ["node_modules/tsx/package.json", "{}\\n"],\n    ["node_modules/patchright/package.json", "{}\\n"],\n    ["node_modules/@ngrok/ngrok/package.json", '{"name": "@ngrok/ngrok", "version": "1.7.0", "main": "fixture.node"}'],\n    ["node_modules/@ngrok/ngrok/fixture.node", "inert fixture"],\n    ["node_modules/@ngrok/ngrok-linux-x64-gnu/package.json", '{"name": "@ngrok/ngrok-linux-x64-gnu", "version": "1.7.0", "main": "fixture.node"}'],\n    ["node_modules/@ngrok/ngrok-linux-x64-gnu/fixture.node", "inert fixture"],\n    ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "sqlite\\n"],\n    ["node_modules/sqlite-vec/build/Release/vec0.${nativeExtension}", "vec\\n"],\n  ]\n  for (const [path, content] of files) {\n    const filePath = join(process.cwd(), path)\n    mkdirSync(join(filePath, ".."), { recursive: true })\n    writeFileSync(filePath, content)\n  }\n}\n`
   )
 
   return { fakeNpm, nodeBinary, root, target }
@@ -679,7 +680,12 @@ describe("reference stack staging contract", () => {
     writeFileSync(
       join(project, "reference-implementation", "package.json"),
       JSON.stringify({
-        dependencies: { tsx: "^4.23.13" },
+        dependencies: {
+          tsx: "^4.23.13",
+          "portable-archive": "file:vendor/portable.tgz",
+          "@ngrok/ngrok": "1.7.0",
+          "existing-archive": "file:./vendor/existing.tgz",
+        },
         optionalDependencies: { "@opendatalabs/remote-surface": "^1.5.2" },
       })
     )
@@ -734,10 +740,39 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
       invocation => invocation.args[0] === "install"
     )
     expect(install).toBeDefined()
+    expect(install.packageJson.dependencies["portable-archive"]).toBe("file:reference-implementation/vendor/portable.tgz")
+    expect(install.packageJson.dependencies["existing-archive"]).toBe("file:reference-implementation/vendor/existing.tgz")
+    expect(install.packageJson.dependencies["@ngrok/ngrok"]).toBe("1.7.0")
+    expect(install.packageJson.dependencies["@pdpp/polyfill-connectors"]).toBe(
+      "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
+    )
+    expect(install.args).not.toContain("--omit=optional")
     expect(install.args).toContain("--allow-git=all")
     expect(install.args).not.toContain("--no-package-lock")
     expect(install.packageJson.dependencies["@opendatalabs/remote-surface"]).toBe(
       "^1.5.2"
     )
   })
+})
+
+
+describe("bundled ngrok target dependencies", () => {
+  for (const [platform, arch, libc] of [["linux", "x64", "glibc"], ["linux", "arm64", "glibc"], ["darwin", "arm64", null], ["darwin", "x64", null], ["win32", "x64", null]]) {
+    it(`requires the wrapper and native package for ${platform}/${arch}`, () => {
+      const stage = mkdtempSync(join(tmpdir(), "reference-stack-ngrok-"))
+      temporaryRoots.push(stage)
+      const suffix = platform === "linux" ? "-gnu" : platform === "win32" ? "-msvc" : ""
+      const names = ["@ngrok/ngrok", `@ngrok/ngrok-${platform}-${arch}${suffix}`]
+      expect(() => assertBundledNgrok(stage, { platform, arch, libc })).toThrow(/missing/)
+      for (const name of names) {
+        const directory = join(stage, "node_modules", name)
+        mkdirSync(directory, { recursive: true })
+        writeFileSync(join(directory, "package.json"), JSON.stringify({ name, version: "1.7.0", main: "fixture.node" }))
+        writeFileSync(join(directory, "fixture.node"), "inert fixture")
+      }
+      expect(() => assertBundledNgrok(stage, { platform, arch, libc })).not.toThrow()
+      rmSync(join(stage, "node_modules", names[1], "fixture.node"))
+      expect(() => assertBundledNgrok(stage, { platform, arch, libc })).toThrow(/incomplete/)
+    })
+  }
 })

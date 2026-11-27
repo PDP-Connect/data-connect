@@ -32,7 +32,7 @@
 import { createRequire } from "node:module";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./shipped-manifests.ts";
 
 import {
   isExemptDataLoadPath,
@@ -55,10 +55,8 @@ export interface Violation {
 
 const PRODUCTION_SCAN_ROOTS = ["cli", "lib", "operations", "runtime", "scripts", "server"];
 
-// Reference-fixture manifests are still a real repo-relative directory. The
-// first-party polyfill manifests are NOT — they ship inside the
-// `@pdpp/polyfill-connectors` package, read via its own `readPolyfillManifests()`
-// export (see the two functions below), never by walking a repo path.
+// Reference-fixture manifests are a repo-relative directory. Shipped connector
+// manifests come from the pinned RI snapshot through the shared test helper.
 const REFERENCE_FIXTURE_MANIFEST_ROOT = "reference-implementation/fixtures/seed-manifests";
 
 /**
@@ -274,8 +272,7 @@ export function productionFiles({ repoRoot }: ScanRoots): string[] {
  * `src/`. Resolved through the package's own `./collectors` export (which
  * points at `src/collector-registry.ts`) rather than a hardcoded
  * `node_modules/...` path, so this follows the package wherever it is
- * installed from — the same posture as this file's `readPolyfillManifests()`
- * import.
+ * installed from.
  */
 export function sharedLibrarySrcDir(): string {
   const require = createRequire(import.meta.url);
@@ -364,12 +361,12 @@ function readReferenceFixtureManifests(repoRoot: string): Record<string, unknown
   return parsedManifests;
 }
 
-/** Every manifest `@pdpp/polyfill-connectors` ships, parsed. An unreadable
- * manifest set contributes zero entries (matching this scanner's posture for
- * the reference-fixture root above) rather than crashing the guard. */
+/** Every manifest in the pinned shipped-manifest snapshot, parsed. An unreadable
+ * snapshot contributes zero entries (matching this scanner's posture for the
+ * reference-fixture root above) rather than crashing the guard. */
 function readShippedPolyfillManifests(): Record<string, unknown>[] {
   try {
-    return readPolyfillManifests().map((entry) => entry.manifest as Record<string, unknown>);
+    return readShippedManifests().map((entry) => entry.manifest as Record<string, unknown>);
   } catch {
     return [];
   }
@@ -441,6 +438,17 @@ function lineTextAt(source: string, index: number): string {
   const end = source.indexOf("\n", index);
   return source.slice(start, end === -1 ? source.length : end).trim();
 }
+
+/**
+ * The one-time connector-id rename migration, exempt from rule (1) only.
+ * A migration that renames stored rows must name what it renames: it holds
+ * the four old -> new id pairs as private data, runs once at boot, and nothing
+ * at runtime reads them. It gates no connector and resolves no identity. The
+ * exemption is this exact file and this exact rule; every other rule still
+ * applies to it, and a rename that a later release needs belongs in its own
+ * migration, not in an extension of this one.
+ */
+const RENAME_MIGRATION_FILES = new Set(["reference-implementation/server/connector-id-rename-migration.ts"]);
 
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]*_(CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN|API_KEY|ACCESS_TOKEN|PASSWORD)$/;
 const ABSOLUTE_URL_HOST_RE = /^https?:\/\/([^/\s:]+)/;
@@ -519,12 +527,14 @@ export function scanFile(
 
   const isSharedLibraryFile = relPath.startsWith(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`);
   violations.push(
-    ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile).map((v) => ({
-      file: v.file,
-      line: v.line,
-      rule: v.rule,
-      snippet: v.snippet,
-    }))
+    ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile)
+      .filter((v) => !(RENAME_MIGRATION_FILES.has(relPath) && v.rule === "hardcoded-connector-identity-literal"))
+      .map((v) => ({
+        file: v.file,
+        line: v.line,
+        rule: v.rule,
+        snippet: v.snippet,
+      }))
   );
   violations.push(...scanFileDataLoads(absPath, relPath, repoRoot, connectorKeys, validationKinds, sanctionedSiteHits));
 

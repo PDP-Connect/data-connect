@@ -36,7 +36,7 @@
  * Registering the package as an explicit @source restores those classes. Paths
  * resolve relative to this CSS file.
  */
-@source "../../../../packages/operator-ui/src/**/*.{ts,tsx}";
+@source "../../../../reference-implementation/vendor/operator-ui/src/**/*.{ts,tsx}";
 
 /*
  * The Ink Carbon component library (@pdpp/brand-react) lives outside this app's
@@ -46,7 +46,7 @@
  * the same failure class as the operator-ui hero-collapse above. Path resolves
  * relative to this CSS file.
  */
-@source "../../../../packages/pdpp-brand-react/src/**/*.{ts,tsx}";
+@source "../../../../reference-implementation/vendor/brand-react/src/**/*.{ts,tsx}";
 
 @layer base {
   /* Systematic numeric treatment — tabular + lining figures so every amount,

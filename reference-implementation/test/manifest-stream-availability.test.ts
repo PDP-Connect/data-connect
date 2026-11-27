@@ -16,6 +16,7 @@ const TOP_LEVEL_REGEX_3 = /unsupported keys/;
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -80,8 +81,9 @@ async function registerConnectorManifest(asUrl: string, manifest: unknown): Prom
 }
 
 function makeManifest({ availability }: { availability?: unknown } = {}) {
-  return {
-    connector_id: "https://registry.pdpp.test/connectors/stream-availability",
+  return withFixtureSourceDeclaration({
+    connector_id: "stream-availability",
+    connector_key: "stream-availability",
     display_name: "Stream availability fixture",
     protocol_version: "0.1.0",
     runtime_requirements: { bindings: { network: { required: true } } },
@@ -102,7 +104,7 @@ function makeManifest({ availability }: { availability?: unknown } = {}) {
       },
     ],
     version: "0.1.0",
-  };
+  });
 }
 
 test("valid unsupported-in-mode stream availability is accepted", async () => {

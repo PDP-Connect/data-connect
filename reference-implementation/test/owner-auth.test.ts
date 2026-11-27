@@ -433,6 +433,33 @@ test("hosted first run stays locked until /setup claims the install once", async
   );
 });
 
+test("owner-auth: /setup rejects a common password and accepts a long unlisted one", async () => {
+  const setupToken = "setup-token-for-blocklist";
+  await withServer(
+    {
+      referenceOrigin: "https://setup.example.test",
+      trustedMetadataHosts: "localhost",
+      ownerSetupToken: setupToken,
+    },
+    async ({ asUrl }) => {
+      const claim = (password: string) =>
+        fetch(`${asUrl}/setup`, {
+          body: new URLSearchParams({ token: setupToken, password }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        });
+      const blocked = await claim("passwordpassword");
+      assert.equal(blocked.status, 400);
+      assert.match(await blocked.text(), /too common/u);
+      // A rejected password does not spend the one-time token.
+      const longPassword = "maple orbit canyon velvet ".repeat(3);
+      assert.ok(Array.from(longPassword).length >= 64);
+      assert.equal((await claim(longPassword)).status, 201);
+      assert.equal((await login(asUrl, longPassword)).status, 302);
+    }
+  );
+});
+
 test("owner-auth-required loopback first run stays locked until /setup claims the install once", async () => {
   const setupToken = "loopback-required-setup-token";
   const password = "a newly chosen loopback owner password";
@@ -1561,6 +1588,35 @@ test("owner-device approval is fenced against app-password rotation", async () =
     );
   } finally {
     releaseApproval();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("owner-auth: an app-managed password change rejects a common password and accepts 64+ characters", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pdpp-owner-password-blocklist-"));
+  const dbPath = join(directory, "owner.sqlite");
+  const oldPassword = "correct-horse-battery-staple";
+  try {
+    initDb(dbPath);
+    await setOwnerPassword(createOwnerPasswordVerifierStore(), oldPassword);
+    closeDb();
+    await withServer({ dbPath }, async ({ asUrl }) => {
+      const { cookie } = await login(asUrl, oldPassword);
+      assert.ok(cookie);
+      const change = (newPassword: string, currentPassword = oldPassword) =>
+        fetch(`${asUrl}/owner/password/change`, {
+          body: JSON.stringify({ currentPassword, newPassword }),
+          headers: { Accept: "application/json", "Content-Type": "application/json", Cookie: cookie },
+          method: "POST",
+        });
+      const blocked = await change("password1234567890");
+      assert.equal(blocked.status, 400);
+      assert.equal(((await blocked.json()) as { error?: { code?: string } }).error?.code, "owner_password_too_common");
+      assert.equal((await change("zzzzzzzzzzzzzzzzzzzzzzzq")).status, 204);
+      const long = "maple orbit canyon velvet ".repeat(3);
+      assert.equal((await change(long, "zzzzzzzzzzzzzzzzzzzzzzzq")).status, 204);
+    });
+  } finally {
     await rm(directory, { force: true, recursive: true });
   }
 });

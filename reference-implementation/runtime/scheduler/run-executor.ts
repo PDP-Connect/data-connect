@@ -119,6 +119,13 @@ export interface RunExecutorDeps {
     | null
     | undefined;
   setState: SetStateHandler;
+  /**
+   * Timer functions the attempt watchdog arms. Optional: defaults to the
+   * global timers, so callers that do not care are unaffected. A test injects a
+   * manual implementation to fire the watchdog at a chosen point instead of
+   * racing a real wall-clock budget against process startup.
+   */
+  watchdogTimers?: WatchdogTimers;
 }
 
 // ─── Public interface ─────────────────────────────────────────────────────────
@@ -198,7 +205,11 @@ function isAdmissionDeniedMessage(message: string): boolean {
 
 function coerceRunError(err: unknown): RunConnectorError {
   if (err instanceof RunConfigBlockedError) {
-    return { connector_error: describeRunConfigFailure(err.reason), failure_reason: err.reason, message: err.message };
+    return {
+      failure_reason: err.reason,
+      message: err.message,
+      runtime_retryable: describeRunConfigFailure(err.reason)?.retryable ?? false,
+    };
   }
   if (err && typeof err === "object") {
     const candidate = err as RunConnectorError;
@@ -364,6 +375,25 @@ async function invokeRunConnector(call: RunConnectorCall): Promise<RunConnectorR
 
 // ─── Attempt watchdog ─────────────────────────────────────────────────────────
 
+/**
+ * The watchdog's only timer need: run `callback` after `ms`, and be able to
+ * cancel it. `setTimeout` returns the canceller, so the seam owns no handle
+ * type and an implementation is never forced to fabricate a Node timer.
+ */
+export interface WatchdogTimers {
+  setTimeout: (callback: () => void, ms: number) => () => void;
+}
+
+// The production default. `unref` keeps a pending watchdog from holding the
+// process open on its own.
+const GLOBAL_WATCHDOG_TIMERS: WatchdogTimers = {
+  setTimeout: (callback, ms) => {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return () => clearTimeout(handle);
+  },
+};
+
 interface AttemptWatchdog {
   cancel: () => void;
   clear: () => void;
@@ -400,10 +430,13 @@ function clampTimerDelay(ms: number): number {
   return Math.min(ms, MAX_TIMER_DELAY_MS);
 }
 
-export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdog {
+export function createAttemptWatchdog(
+  maxRunWallClockMs: number,
+  timers: WatchdogTimers = GLOBAL_WATCHDOG_TIMERS
+): AttemptWatchdog {
   const cancellation = new AbortController();
   let timedOut = false;
-  let timer: NodeJS.Timeout | null = null;
+  let cancelTimer: (() => void) | null = null;
   // Local-only work no longer has provider progress to reset the primary
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
@@ -427,14 +460,11 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     if (!isBoundedWallClock(maxRunWallClockMs) || timedOut || localOnlyPhase || cancellation.signal.aborted) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, clampTimerDelay(maxRunWallClockMs));
-    timer.unref?.();
   };
 
   // Suppression is only real while a primary timer could still fire: with an
@@ -451,14 +481,11 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     ) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, clampTimerDelay(localOnlyPhaseMaxRunWallClockMs));
-    timer.unref?.();
   };
 
   if (isBoundedWallClock(maxRunWallClockMs)) {
@@ -472,17 +499,13 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
       }
     },
     clear() {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
+      cancelTimer?.();
+      cancelTimer = null;
     },
     markProgress(extra) {
       if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase && canSuppressPrimaryBudget()) {
         localOnlyPhase = true;
-        if (timer) {
-          clearTimeout(timer);
-        }
+        cancelTimer?.();
         armLocalOnlyPhaseCeiling();
         // TRUE only on the latching call — the caller emits the durable trace.
         return true;
@@ -510,7 +533,7 @@ function runTimedOutError(result: RunConnectorResult, maxRunWallClockMs: number)
     // known_gaps: [] / checkpoint_summary: null on every timed-out run
     // regardless of how much work it durably completed before being killed.
     checkpoint_summary: result.checkpoint_summary || null,
-    connector_error: result.connector_error || { message },
+    connector_error: result.connector_error || null,
     failure_reason: "run_timed_out",
     known_gaps: result.known_gaps || null,
     message,
@@ -799,6 +822,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     runManagedConnectorViaController,
     schedulerStore,
     setState,
+    watchdogTimers,
   } = deps;
 
   async function appendRunHistoryBestEffort(record: RunRecord, connectorId: string): Promise<void> {
@@ -1109,7 +1133,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const { connectorId, connectorInstanceId = connectorId } = schedule;
     const originalOnProgress = call.onProgress;
     const activeRunStore = selectActiveRunStore();
-    const watchdog = createAttemptWatchdog(maxRunWallClockMs);
+    const watchdog = createAttemptWatchdog(maxRunWallClockMs, watchdogTimers);
     // A cryptographically strong UUID keeps this fallback globally
     // collision-resistant: run_id is the sole uniqueness key for the durable
     // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
@@ -1364,6 +1388,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       connectorId,
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       connectorInstanceId: connectorInstanceId ?? null,
+      ...(runNowResult.failure_message ? { error: runNowResult.failure_message } : {}),
       failureReason: runNowResult.failure_reason || null,
       knownGaps: runNowResult.known_gaps || [],
       recordsEmitted: 0,
@@ -1424,6 +1449,19 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         return null;
       }
 
+      // Startup failure is actionable; capacity waits below remain skips.
+      if (runNowResult.status === "surface_failed") {
+        const failure = runNowResult.browser_surface_failure;
+        persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+        return recordAndNotifyDurably({
+          ...buildManagedRunTerminalRecord(connectorId, connectorInstanceId, startedAt, runNowResult, attempt),
+          error: failure
+            ? `browser_surface_failed: ${failure.code}: ${failure.message}`
+            : "browser_surface_failed: surface_failed",
+          failureReason: runNowResult.failure_reason ?? "surface_start_failed",
+        });
+      }
+
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {
         return recordAndNotify(
           buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId)
@@ -1437,6 +1475,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           connector_error: runNowResult.connector_error || null,
           failure_reason: runNowResult.failure_reason || null,
           known_gaps: runNowResult.known_gaps || null,
+          runtime_retryable: runNowResult.runtime_retryable ?? null,
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {

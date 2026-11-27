@@ -23,6 +23,7 @@ import {
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const CONNECTOR_ID = "record_ingest_admission_probe";
 const CONNECTOR_URI = "https://registry.pdpp.dev/connectors/record-ingest-admission-probe";
@@ -45,28 +46,31 @@ const ingestRecord = recordsModule.ingestRecord as unknown as IngestRecord;
 const registerConnector = authModule.registerConnector as unknown as (manifest: object) => Promise<string>;
 
 function manifest() {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: CONNECTOR_ID,
-    connector_key: CONNECTOR_ID,
-    display_name: "Record ingest admission probe",
-    manifest_uri: CONNECTOR_URI,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: STREAM,
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" }, value: { type: "string" } },
-          required: ["id", "value"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: CONNECTOR_ID,
+      connector_key: CONNECTOR_ID,
+      display_name: "Record ingest admission probe",
+      manifest_uri: CONNECTOR_URI,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: STREAM,
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" }, value: { type: "string" } },
+            required: ["id", "value"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: CONNECTOR_URI }
+  );
 }
 
 function record(id: string) {

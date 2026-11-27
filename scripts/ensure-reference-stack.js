@@ -372,10 +372,16 @@ function createStagedPackageJson(projectRoot, stageRoot) {
     readFileSync(join(projectRoot, "package.json"), "utf8")
   )
   dependencies.tsx = rootPackage.devDependencies?.tsx || "^4.23.13"
+  // Workspace-relative archives move one directory deeper in the staged runtime.
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const archive = /^file:(?:\.\/)?(vendor\/.*)$/.exec(specifier)?.[1]
+    if (archive) dependencies[name] = `file:reference-implementation/${archive}`
+  }
+  // A dev dependency of the reference implementation that the runtime still
+  // loads: connector manifests and the conformance roster that lets the owner
+  // add a browser-bound account.
   dependencies["@pdpp/polyfill-connectors"] =
     "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
-  dependencies["@pdpp/reference-contract"] =
-    "file:reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz"
   for (const [packageName] of LOCAL_PACKAGES) {
     dependencies[packageName] = localPackageSpecifier(packageName)
   }
@@ -614,6 +620,7 @@ const serverArgs = [
 ]
 const serverEnv = {
   ...process.env,
+  PDPP_LAUNCHER_PID: String(process.pid),
   NODE_ENV: "production",
   AS_PORT: process.env.AS_PORT || "0",
   RS_PORT: process.env.RS_PORT || "0",
@@ -665,7 +672,25 @@ export function writeLaunchScript(stageRoot) {
   copyFileSync(PARENT_LIFELINE_SOURCE, join(stageRoot, "parent-lifeline.mjs"))
 }
 
+// The wrapper and the native optional dependency must travel together. This
+// checks the staged target, not a developer's ambient node_modules.
+export function assertBundledNgrok(stageRoot, { platform = process.platform, arch = process.arch, libc = hostLibc() } = {}) {
+  const suffix = platform === "linux" ? `-${libc === "musl" ? "musl" : "gnu"}` : platform === "win32" ? "-msvc" : ""
+  const native = `@ngrok/ngrok-${platform}-${arch}${suffix}`
+  for (const name of ["@ngrok/ngrok", native]) {
+    const directory = join(stageRoot, "node_modules", name)
+    const manifestPath = join(directory, "package.json")
+    if (!existsSync(manifestPath)) fail(`ngrok package ${name} is missing from the staged dependency tree`)
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    if (manifest.name !== name || manifest.version !== "1.7.0" ||
+        !existsSync(join(directory, manifest.main || "index.js"))) {
+      fail(`ngrok package ${name} is incomplete or has the wrong version`)
+    }
+  }
+}
+
 function assertNativeFiles(stageRoot) {
+  assertBundledNgrok(stageRoot)
   for (const [name, relativePath] of Object.entries(
     nativeArtifactPaths(stageRoot)
   )) {

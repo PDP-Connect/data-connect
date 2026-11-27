@@ -46,6 +46,7 @@ import {
 } from "../server/records.ts";
 import { resolveClientStreamListBindingsOrEmpty } from "../server/routes/rs-read.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface RecordListWarning {
   code: string;
@@ -220,41 +221,44 @@ const INSTANCE_A = "cin_fanin_account_a";
 const INSTANCE_B = "cin_fanin_account_b";
 const INSTANCE_C = "cin_fanin_account_c";
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Fan-in Test Connector",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "received_at",
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      query: {
-        aggregations: {
-          count: true,
-          count_distinct: ["subject"],
-          group_by: ["subject"],
-          group_by_time: ["received_at"],
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Fan-in Test Connector",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "received_at",
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        query: {
+          aggregations: {
+            count: true,
+            count_distinct: ["subject"],
+            group_by: ["subject"],
+            group_by_time: ["received_at"],
+          },
         },
-      },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 const grant = {
   streams: [{ fields: ["id", "subject", "received_at"], instance_ids: [INSTANCE_A, INSTANCE_B], name: STREAM }],
@@ -804,7 +808,6 @@ test("listStreamsAcrossBindings emits one summary per (stream, connection_id)", 
   });
 });
 
-
 test("stream summaries restrict counts and timestamps to grant-visible records", async () => {
   await withSingleConnectionDb(async () => {
     const cases = [
@@ -822,15 +825,23 @@ test("stream summaries restrict counts and timestamps to grant-visible records",
       },
     ];
     for (const constraints of cases) {
-      const summaries = await listStreams(target(INSTANCE_A), {
-        streams: [{ name: STREAM, ...constraints }],
-      }, baseManifest);
+      const summaries = await listStreams(
+        target(INSTANCE_A),
+        {
+          streams: [{ name: STREAM, ...constraints }],
+        },
+        baseManifest
+      );
       assert.equal(summaries[0]?.record_count, 1);
       assert.equal(summaries[0]?.last_updated, "2026-05-18T12:00:00.000Z");
     }
-    const empty = await listStreams(target(INSTANCE_A), {
-      streams: [{ name: STREAM, resources: ["missing"] }],
-    }, baseManifest);
+    const empty = await listStreams(
+      target(INSTANCE_A),
+      {
+        streams: [{ name: STREAM, resources: ["missing"] }],
+      },
+      baseManifest
+    );
     assert.equal(empty[0]?.record_count, 0);
     assert.equal(empty[0]?.last_updated, null);
   });
@@ -881,11 +892,19 @@ test("stream summaries aggregate once per binding, preserving pinned grants and 
       streamStore,
     });
     assert.deepEqual(actual, expected);
-    assert.deepEqual([...calls], [[INSTANCE_A, 1], [INSTANCE_B, 1]]);
-    assert.deepEqual(actual.map((row) => row.record_count), [1, 1, 0, 0, 0]);
+    assert.deepEqual(
+      [...calls],
+      [
+        [INSTANCE_A, 1],
+        [INSTANCE_B, 1],
+      ]
+    );
+    assert.deepEqual(
+      actual.map((row) => row.record_count),
+      [1, 1, 0, 0, 0]
+    );
   });
 });
-
 
 test("stream summary storage work obeys one global concurrency bound", async () => {
   const bindings = Array.from({ length: 8 }, (_, index) => ({
@@ -922,12 +941,15 @@ test("stream summary storage work obeys one global concurrency bound", async () 
   };
   const summaries = await listStreamsAcrossBindings(bindings, multiGrant, multiManifest, {
     concurrency: 2,
-    resolveBindingsForStream: async ({ name }) => name === "unbound" ? [] : bindings,
+    resolveBindingsForStream: async ({ name }) => (name === "unbound" ? [] : bindings),
     streamStore,
   });
   assert.equal(maximum, 2);
   assert.equal(active, 0);
-  assert.deepEqual(calls, bindings.map((binding) => binding.connectorInstanceId));
+  assert.deepEqual(
+    calls,
+    bindings.map((binding) => binding.connectorInstanceId)
+  );
   assert.deepEqual(
     summaries.map((summary) => [summary.name, summary.connection_id, summary.record_count]),
     [STREAM, "tasks"].flatMap((name) => bindings.map((binding) => [name, binding.connectorInstanceId, 7]))

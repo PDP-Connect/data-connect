@@ -49,10 +49,10 @@ test("reconnect backs off and a buffering proxy is retried rarely", () => {
   assert.equal(reconnectDelayMs("unsupported", 0), 60_000)
 })
 
-test("the settings surfaces subscribe only to topics the server registers", async () => {
+test("source: shared-topic settings subscribe only to topics the server registers", async () => {
   const { readFile } = await import("node:fs/promises")
   const here = new URL("../settings/", import.meta.url)
-  for (const file of ["desktop-settings-setting.tsx", "remote-access-setting.tsx"]) {
+  for (const file of ["desktop-settings-setting.tsx"]) {
     const source = await readFile(new URL(file, here), "utf8")
     const topics = [...source.matchAll(/useLive(?:Query|Mutation)\("([^"]+)"/g)].map(match => match[1])
     assert.ok(topics.length > 0, `${file} subscribes to a live topic`)

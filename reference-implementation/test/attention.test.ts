@@ -416,11 +416,11 @@ test("missing local device — blocked device attention is push-eligible, health
       auto_detect: true,
       dedupe_key: "conn_a:missing_local_device",
       metadata: {
-        device_label: "Simon laptop",
+        device_label: "laptop",
         device_token: "devtok_secret",
       },
       owner_action: "act_elsewhere",
-      owner_copy: "Start the Claude collector on Simon laptop",
+      owner_copy: "Start the Claude collector on laptop",
       progress_posture: "blocked",
       reason_code: "missing_local_device",
       response_contract: "none",
@@ -432,7 +432,7 @@ test("missing local device — blocked device attention is push-eligible, health
   assert.equal(isHealthRelevant(rec, NOW), true);
 
   const payload = pushPayload(rec, {
-    connection_display: "Claude Code on Simon laptop",
+    connection_display: "Claude Code on laptop",
     dashboard_origin: "https://dash.example.com",
   });
   assert.ok(payload, "missing local device should produce a non-secret owner-action push");

@@ -255,7 +255,7 @@ describe("captureBlobArtifact", () => {
     const body = randomBytes(64 * 1024);
 
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -289,7 +289,7 @@ describe("captureBlobArtifact", () => {
     // makes the re-spool a no-op and the queue id deterministic.
     const outbox = makeOutbox(root);
     const first = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -299,7 +299,7 @@ describe("captureBlobArtifact", () => {
       stream: "attachments",
     });
     const second = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -322,7 +322,7 @@ describe("captureBlobArtifact", () => {
 
     const outbox = makeOutbox(root);
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: [body],
       mimeType: "text/plain",
       outbox,
@@ -356,7 +356,7 @@ describe("captureBlobArtifact", () => {
     writeFileSync(sourcePath, body);
 
     const captured = await captureBlobArtifact({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       content: createReadStream(sourcePath),
       mimeType: "text/plain",
       outbox,

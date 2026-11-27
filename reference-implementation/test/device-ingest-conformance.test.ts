@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { withReauthoredFixtureDeclaration } from "./helpers/fixture-source-declaration.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -876,7 +877,6 @@ interface DiagnosticsSnapshot {
     outbox_diagnostics: unknown;
     outbox_state: unknown;
     local_collector_gaps: unknown;
-    local_collector_coverage: unknown;
     last_error: unknown;
   };
 }
@@ -1107,7 +1107,6 @@ function createDriver({
           last_heartbeat_at: source.last_heartbeat_at,
           last_heartbeat_status: source.last_heartbeat_status,
           last_ingest_at: source.last_ingest_at,
-          local_collector_coverage: source.local_collector_coverage,
           local_collector_gaps: source.local_collector_gaps,
           outbox_diagnostics: source.outbox_diagnostics,
           outbox_state: source.outbox_state,
@@ -1441,7 +1440,8 @@ async function configureMessagesManifest(
   messages.query.search.lexical_fields = ["content"];
   messages.query.search.semantic_fields = ["content"];
   mutation?.(messages, manifest);
-  await driver.registerManifest(manifest);
+  const reauthored = withReauthoredFixtureDeclaration(manifest);
+  await driver.registerManifest(reauthored);
   const persisted = (await driver.manifest()) as ConnectorManifestMutable;
   const persistedMessages = mustExist(
     persisted.streams.find((stream) => stream.name === "messages"),
@@ -1449,7 +1449,7 @@ async function configureMessagesManifest(
   );
   assert.deepEqual(persistedMessages.query.search.lexical_fields, messages.query.search.lexical_fields);
   assert.deepEqual(persistedMessages.query.search.semantic_fields, messages.query.search.semantic_fields);
-  return manifest;
+  return reauthored;
 }
 
 async function enrollConfiguredDevice(
@@ -1482,7 +1482,6 @@ function diagnosticFreshnessInputs(diagnostics: DiagnosticsSnapshot) {
       last_error: diagnostics.source.last_error,
       last_heartbeat_at: diagnostics.source.last_heartbeat_at,
       last_heartbeat_status: diagnostics.source.last_heartbeat_status,
-      local_collector_coverage: diagnostics.source.local_collector_coverage,
       local_collector_gaps: diagnostics.source.local_collector_gaps,
       outbox_diagnostics: diagnostics.source.outbox_diagnostics,
       outbox_state: diagnostics.source.outbox_state,
@@ -2432,7 +2431,7 @@ async function generationManifests(
   stream.consent_time_field = "updated_at";
   stream.query.search.lexical_fields = ["role"];
   stream.query.search.semantic_fields = ["role"];
-  return { m1, m2 };
+  return { m1, m2: withReauthoredFixtureDeclaration(m2) };
 }
 
 function generationRecord(

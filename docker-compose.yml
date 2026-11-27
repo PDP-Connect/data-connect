@@ -206,7 +206,7 @@ services:
       - pdpp-home:/root/.pdpp
       # File connector imports. Override the host-side paths with
       # PDPP_DOCKER_CLAUDE_CODE_HOME / PDPP_DOCKER_CODEX_HOME when running
-      # claude_code or codex inside this Docker service.
+      # claude-code or codex inside this Docker service.
       - ${PDPP_DOCKER_CLAUDE_CODE_HOME:-./packages/polyfill-connectors/.pdpp-imports/claude}:/imports/claude:ro
       - ${PDPP_DOCKER_CODEX_HOME:-./packages/polyfill-connectors/.pdpp-imports/codex}:/imports/codex:ro
       # Optional external-tool mount. slackdump is AGPL-licensed and is not

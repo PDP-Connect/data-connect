@@ -55,6 +55,23 @@ export type CountOtherConnections = (input: {
   readonly ownerSubjectId: string;
 }) => Promise<number> | number;
 
+/**
+ * How many of an owner's connections, other than `target`, are of the same
+ * connector. A connection stores its connector id as a key or a registry URL;
+ * both count as the one connector.
+ */
+export function countOtherConnectionsOfConnector(
+  instances: ReadonlyArray<{ connectorInstanceId: string; connectorId: string }>,
+  target: { connectorInstanceId: string; connectorKey: string },
+  canonicalize: (connectorId: string) => string | null
+): number {
+  return instances.filter(
+    (instance) =>
+      instance.connectorInstanceId !== target.connectorInstanceId &&
+      (canonicalize(instance.connectorId) ?? instance.connectorId) === target.connectorKey
+  ).length;
+}
+
 export type BrowserProfilePurger = (input: BrowserProfilePurgeInput) => Promise<BrowserProfilePurgeResult>;
 
 interface PurgeLogger {

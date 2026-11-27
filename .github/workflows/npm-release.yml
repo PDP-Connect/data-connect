@@ -159,6 +159,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # mcp-server's artifact receipt binds a merge-base with a fixed
+          # commit, which a shallow clone does not have.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js

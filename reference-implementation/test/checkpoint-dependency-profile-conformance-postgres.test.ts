@@ -138,7 +138,7 @@ if (POSTGRES_URL) {
     });
   });
 
-  test("SQLite/Postgres parity scenario (Postgres side): only a DETAIL_COVERAGE_KEY_SETS connector needs a record behind a hydrated key", async () => {
+  test("SQLite/Postgres parity scenario (Postgres side): a hydrated key credits by assertion whether or not the manifest declares DETAIL_COVERAGE_KEY_SETS", async () => {
     await withScenarioServer(baseUrl, async (server) => {
       const asUrl = `http://localhost:${server.asPort}`;
       const rsUrl = `http://localhost:${server.rsPort}`;

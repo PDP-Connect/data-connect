@@ -310,7 +310,7 @@ function RunEndedSurface({
       <section className={sectionClass}>
         <p className="pdpp-eyebrow text-muted-foreground">run {statusLabel}</p>
         <h1 className="pdpp-heading mt-3 flex items-center gap-2 text-balance text-foreground">
-          {connector ? <ConnectorMark icon={connector.icon} name={subject} /> : null}
+          {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
           <span>{title}</span>
         </h1>
         <p className="mt-3 text-muted-foreground text-sm leading-6">{description}</p>
@@ -416,7 +416,7 @@ function UnavailableStreamSurface({ connector, runId }: { connector: ConnectorCo
           {connector ? (
             <>
               <span className="mr-1 inline-flex items-center gap-2 align-middle">
-                <ConnectorMark icon={connector.icon} name={connector.displayName} />
+                <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
                 {connector.displayName}
               </span>{" "}
               needs browser control. Keep this page open while the secure browser prepares. The page updates

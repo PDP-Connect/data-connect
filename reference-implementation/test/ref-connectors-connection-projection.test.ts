@@ -1825,7 +1825,7 @@ test(
   })
 );
 
-// ChatGPT-shaped case (Tim's live symptom): a connector that is BOTH
+// ChatGPT-shaped case (a live symptom): a connector that is BOTH
 // static-secret-capable AND browser-bound, enrolled with a `browser_collector`
 // binding, with no stored credential. The steady-state repair the owner is
 // routed to MUST be a durable credential reauth/capture action — NOT a
@@ -1969,14 +1969,14 @@ test(
   "ChatGPT-shaped browser_collector connection with no credential does NOT project credential_required (binding-first: session repair, not static-secret capture)",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
-    // Mirror the live dondochaka shape exactly: source_kind is `account`, and the
+    // Mirror the live janedoe shape exactly: source_kind is `account`, and the
     // browser_collector fact lives in source_binding.kind (not source_kind). This
     // connection logs in via the browser session (e.g. Google SSO), so an absent
     // credential row is normal — NOT a "capture a username/password" repair need.
     await seedInstance({
       connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
       connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
-      displayName: "ChatGPT - dondochaka-like",
+      displayName: "ChatGPT - janedoe-like",
       sourceBinding: { device: "personal", kind: "browser_collector" },
       sourceBindingKey: "browser-static-secret",
       sourceKind: "account",
@@ -2009,7 +2009,7 @@ test(
   })
 );
 
-// Live wedge regression (dondochaka, cin_e4ab231c7d49b8f59e4c80ed): after an
+// Live wedge regression (janedoe, cin_3f6a8c1e5d9b2047a6c0e8d4): after an
 // attended browser-session repair times out, the next scheduled run's
 // DOM/API auth probe reports a definitive auth failure (401/unauthorized)
 // wrapped in ChatGPT's `_session_failed` terminal-error prefix. The known-gap
@@ -2023,13 +2023,13 @@ test(
 // repair instead, per reference-connection-health's connection-binding-scoped
 // stored-credential-presence rule.
 test(
-  "ChatGPT-shaped browser_collector connection with no credential row: a generic credential_rejected reason still projects browser_session repair, never stored_credential (binding authority beats message text)",
+  "ChatGPT-shaped browser_collector connection with no credential row: a connector-reported 401 gap routes to no credential repair, neither stored_credential nor browser_session (Section 5.11)",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
     await seedInstance({
       connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
       connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
-      displayName: "ChatGPT - dondochaka-like",
+      displayName: "ChatGPT - janedoe-like",
       sourceBinding: { device: "personal", kind: "browser_collector" },
       sourceBindingKey: "browser-static-secret",
       sourceKind: "account",
@@ -2072,38 +2072,37 @@ test(
     const scoped = await getConnectorSummaryForRoute(CHATGPT_SHAPED_INSTANCE_ID);
     assert.ok(scoped, "the browser_collector connection projects a summary");
 
+    // Collection Profile Section 5.11: the `refresh_credentials` hint and the
+    // "apiFetch got 401" text in the gap are connector claims. Neither proves a
+    // credential was rejected, and this connection has no runtime credential
+    // rejection, so no credential repair of either kind is projected. The gap
+    // still shows as a failed run and as a coverage gap.
     const credentials = scoped.connection_health.conditions?.find((c) => c.type === "CredentialsValid");
-    assert.equal(credentials?.status, "false");
+    assert.equal(credentials?.status, "unknown");
+    assert.equal(credentials?.reason, CONNECTION_CONDITION_REASONS.CREDENTIALS_NOT_PROBED);
+    assert.equal(credentials?.remediation, null, "a connector-reported 401 must not route to any credential repair");
     assert.notEqual(
       credentials?.reason,
       CONNECTION_CONDITION_REASONS.CREDENTIAL_REJECTED,
-      "a definitive auth failure wrapped in session_failed must not collapse to credential_rejected"
+      "a connector-reported 401 must not collapse to credential_rejected"
     );
     assert.equal(
-      credentials?.remediation?.surface?.kind,
-      "browser_session",
-      "browser-session-bound connection must repair by session, never stored_credential capture"
+      scoped.connection_health.conditions?.find((c) => c.type === "CollectionSucceeded")?.status,
+      "false",
+      "the failed run is still reported"
     );
-    assert.doesNotMatch(credentials?.message ?? "", REJECTED_PATTERN);
     assert.equal(
-      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth")?.surface?.kind,
-      "browser_session"
+      scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth").length,
+      0,
+      "no reauth action is derived from connector text"
     );
-
-    // No prior attended-repair interaction was seeded (it timed out and
-    // resolved/expired) and no run is currently active: the connection must
-    // read as idle-blocked, never as an in-progress "Collecting" state, and
-    // must carry exactly one reauth action — not a second, conflicting
-    // credential-capture action for the same failure.
-    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention after a timed-out repair");
+    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention");
     assert.equal(scoped.connection_health.badges.syncing, false, "no active run is in flight");
     assert.doesNotMatch(
       scoped.rendered_verdict.progress.headline,
       COLLECTING_PATTERN,
-      "idle blocked connection must not claim active collection"
+      "an idle connection must not claim active collection"
     );
-    const reauthActions = scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth");
-    assert.equal(reauthActions.length, 1, "exactly one reauth action — no conflicting stored-credential action too");
   })
 );
 
@@ -2344,8 +2343,8 @@ test(
 // `--device-label`. Nothing ever composed the connector name into it, so naming
 // depended entirely on what the client happened to send:
 //
-//     peregrine Codex   | codex    <- owner typed the connector name by hand
-//     peregrine         | signal   <- owner forgot; the row said nothing about
+//     workstation Codex   | codex    <- owner typed the connector name by hand
+//     workstation         | signal   <- owner forgot; the row said nothing about
 //                                     WHAT it collects (owner: "it should have
 //                                     been called 'signal' then")
 //
@@ -2360,9 +2359,9 @@ test(
     // The Signal-shaped case: the owner typed only a hostname.
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
@@ -2370,7 +2369,7 @@ test(
     assert.ok(row);
     assert.equal(
       row.display_name,
-      "peregrine Connection First Records",
+      "workstation Connection First Records",
       "a device row must identify both its device and its connector"
     );
     // The connector-type name stays a separate field — this composes for
@@ -2383,18 +2382,18 @@ test(
   "B8: a device label that already names the connector is not duplicated",
   withTmpDb(async () => {
     seedConnector();
-    // The "peregrine Codex" case: the owner already typed the connector name.
+    // The "workstation Codex" case: the owner already typed the connector name.
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine Connection First Records",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation Connection First Records",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "peregrine Connection First Records");
+    assert.equal(row.display_name, "workstation Connection First Records");
   })
 );
 
@@ -2404,15 +2403,15 @@ test(
     seedConnector();
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine connection-first-records",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation connection-first-records",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "peregrine connection-first-records");
+    assert.equal(row.display_name, "workstation connection-first-records");
   })
 );
 
@@ -2444,8 +2443,8 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
@@ -2466,7 +2465,7 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
@@ -2482,7 +2481,7 @@ test(
     const b = rows.find((r) => r.connector_instance_id === PERSONAL_INSTANCE_ID);
     assert.ok(a);
     assert.ok(b);
-    assert.equal(a.display_name, "Connection First Records - gezalsatx@yahoo.com");
+    assert.equal(a.display_name, "Connection First Records - jane.doe@example.com");
     assert.equal(b.display_name, "Connection First Records - owner@example.com");
     assert.notEqual(a.display_name, b.display_name, "two accounts of one connector must never render identically");
   })
@@ -2495,14 +2494,14 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "Shopping",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "Shopping - gezalsatx@yahoo.com", "the owner's own name is preserved, not replaced");
+    assert.equal(row.display_name, "Shopping - jane.doe@example.com", "the owner's own name is preserved, not replaced");
   })
 );
 
@@ -2512,15 +2511,15 @@ test(
     seedConnector();
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "Amazon gezalsatx@yahoo.com",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      displayName: "Amazon jane.doe@example.com",
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "Amazon gezalsatx@yahoo.com");
+    assert.equal(row.display_name, "Amazon jane.doe@example.com");
   })
 );
 

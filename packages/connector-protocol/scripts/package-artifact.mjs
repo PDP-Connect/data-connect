@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runGit } from "./git-runner.mjs";
 
 const execFile = promisify(execFileCallback);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,8 +98,34 @@ export async function computeDeclarationDigest() {
   return await computeDeclarationDigestAt(packageRoot);
 }
 
-async function readPackageManifest() {
-  return JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+async function readPackageManifest(root = packageRoot) {
+  return JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+}
+
+export async function assertPackageDirectoriesCommitted(roots = [packageRoot]) {
+  const paths = roots.map((root) => relative(repoRoot, root));
+  const { stdout } = await runGit(
+    [
+      "status",
+      "--porcelain=v1",
+      "--no-renames",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      ...paths,
+      ...paths.map((path) => `:(exclude)${path}/artifact.json`),
+    ],
+    { cwd: repoRoot }
+  );
+  const changedFiles = stdout
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => entry.slice(3));
+  if (changedFiles.length > 0) {
+    throw new Error(
+      `Cannot generate artifact metadata with uncommitted package files; commit first:\n${changedFiles.join("\n")}`
+    );
+  }
 }
 
 /**
@@ -137,7 +164,7 @@ async function cloneCommittedSourceTree(ref = "HEAD") {
   // buffer through the `input` option to a second execFile call is prone to
   // hanging (no consumer draining the child's stdout fast enough while its
   // stdin is still being written). A temp file avoids that pipe entirely.
-  await execFile("git", ["archive", "--output", archivePath, ref, "--", packageRelPath], {
+  await runGit(["archive", "--output", archivePath, ref, "--", packageRelPath], {
     cwd: repoRoot,
   });
   await execFile("tar", ["-xf", archivePath, "-C", cloneDir]);
@@ -250,7 +277,9 @@ export function assertArtifactMetadata(metadata, manifest, sourceInputsSha256, d
  * which is a strictly weaker (and, on its own, misleading) claim.
  */
 async function reproducibleArtifact() {
-  const clones = [await cloneCommittedSourceTree(), await cloneCommittedSourceTree()];
+  const { stdout } = await runGit(["rev-parse", "HEAD"], { cwd: repoRoot });
+  const ref = stdout.trim();
+  const clones = [await cloneCommittedSourceTree(ref), await cloneCommittedSourceTree(ref)];
   try {
     const [firstClone, secondClone] = clones;
     await buildPackage(firstClone.clonedPackageRoot);
@@ -276,16 +305,20 @@ async function reproducibleArtifact() {
         `npm pack is not reproducible across two independent clean-tree builds: ${JSON.stringify({ first, second })}`
       );
     }
-    return { artifact: first, declarationsSha256: firstDeclarations };
+    return {
+      artifact: first,
+      declarationsSha256: firstDeclarations,
+      manifest: await readPackageManifest(firstClone.clonedPackageRoot),
+      sourceInputsSha256: await computeSourceInputsDigest(firstClone.clonedPackageRoot),
+    };
   } finally {
     await Promise.all(clones.map((clone) => rm(clone.cloneDir, { force: true, recursive: true })));
   }
 }
 
 export async function generateArtifactMetadata() {
-  const manifest = await readPackageManifest();
-  const sourceInputsSha256 = await computeSourceInputsDigest();
-  const { artifact, declarationsSha256 } = await reproducibleArtifact();
+  await assertPackageDirectoriesCommitted();
+  const { artifact, declarationsSha256, manifest, sourceInputsSha256 } = await reproducibleArtifact();
   const metadata = {
     artifact_filename: artifact.filename,
     artifact_sha1: artifact.sha1,
@@ -303,9 +336,7 @@ export async function generateArtifactMetadata() {
 
 export async function verifyArtifactMetadata() {
   const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
-  const manifest = await readPackageManifest();
-  const sourceInputsSha256 = await computeSourceInputsDigest();
-  const { artifact, declarationsSha256 } = await reproducibleArtifact();
+  const { artifact, declarationsSha256, manifest, sourceInputsSha256 } = await reproducibleArtifact();
   assertArtifactMetadata(metadata, manifest, sourceInputsSha256, declarationsSha256, artifact);
   return metadata;
 }

@@ -150,12 +150,19 @@ const MANIFEST_ROOTS = [
  * external state read at request time, never RI-committed source or
  * RI-committed JSON, so it was never a candidate for this allowlist either
  * (see `reference-implementation/server/version-disposition.ts`'s own module
- * doc comment). Left as an explicit empty Map (not deleted) so a future
- * legitimate RI-owned sibling registry has an obvious, documented place to
- * register — adding an entry here is a real security decision, same bar as
- * `SANCTIONED_GENERIC_DATA_READ_CALL_SITES` below.
+ * doc comment). The canonical Collection Profile observation schema is now
+ * registered for its exact runtime loader. It describes protocol shapes, not
+ * provider policy; the content check still rejects connector identity in it.
+ * Additional entries require the same review as the generic read sites below.
  */
-const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
+const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["reference-implementation/runtime/observations.ts", new Set([
+    "reference-implementation/runtime/observation.schema.json",
+  ])],
+  ["reference-implementation/runtime/binding-declarations.ts", new Set([
+    "reference-implementation/runtime/connector-manifest.schema.json",
+  ])],
+]);
 
 const POLYFILL_MANIFEST_READ_SITE = 'reference-implementation/server/polyfill-manifest-reconcile.ts::readManifestJson::readFile(path, "utf8")';
 
@@ -256,17 +263,24 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
   // readConfinedFile(file, limit) in local-source.ts: readSync on the
-  // descriptor of file.path. Its only caller, readManifest(root), passes
-  // checkConfinedFile(root, MANIFEST_PATH, ...) --
-  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
-  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
-  // developer-supplied absolute directory path given to the public
-  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
-  // already allowlisted above (cache.ts:125, common.ts:35): the path is
-  // caller-supplied, the filename component is an RI-owned generic literal,
-  // and this feature is explicitly unsigned/unregistered developer tooling
-  // (see this file's own module doc comment), not connector catalog data.
+  // descriptor of file.path after checkConfinedFile and a dev/ino check.
+  // readManifest(root) uses the fixed "profile/collection-profile.json"
+  // under canonicalRoot(sourcePath), the developer-supplied directory.
+  // The installed-connector callers in index.ts (readVerifiedStoredFile,
+  // withVerifiedSourceDeclaration, sourceDeclarationDigestOf,
+  // readVerifiedRecord and normalizeCoreInstallLayout) use the same checked
+  // reader for that profile and "source-declaration.json" under confined
+  // active/staged artifact roots. assertStoredRecordMetadata fixes the active
+  // manifestPath to the same generic literal. These are RI-owned structural
+  // filenames; their content is runtime-selected connector metadata, never
+  // an RI-committed connector catalog or provider policy. No second descriptor
+  // read site is needed for installed versus developer-local sources.
   'reference-implementation/server/connector-install/local-source.ts::readConfinedFile::readSync(fd, buffer, length, buffer.length - length, null)',
+  // readVerifiedSpoolBlob() reads a runtime BLOB payload through a descriptor
+  // opened only after its filename is constrained to one spool basename and
+  // the spool directory is checked before and after opening. The bytes are
+  // caller-produced run data, not an RI-owned policy resource.
+  'reference-implementation/runtime/host-blob-spool.ts::readVerifiedSpoolBlob::readSync(fd, bytes, offset, Math.min(READ_CHUNK_BYTES, bytes.length - offset), null)',
   // SQLite file checks: readSync compares the 16-byte SQLite header or
   // streams the file into a SHA-256 digest. The bytes never reach a parser,
   // so they cannot carry connector or provider identity.
@@ -337,26 +351,6 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // fabricating a bogus relative-path violation instead of this correct,
   // narrower "genuinely unresolvable, but provably a code load" one).
   "reference-implementation/scripts/hermetic/guard.ts::guardUndiciDispatcher::import(pathToFileURL(resolved).href)",
-  // readPolyfillManifests() in generate-connector-registry.ts:
-  // readFileSync(resolve(manifestsDir, file), "utf8") where `manifestsDir =
-  // process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..",
-  // "manifests")` -- a LogicalExpression (`||`) fallback this scanner's
-  // constant-folder does not evaluate (no rule anywhere folds `||`; only `+`
-  // string concatenation is a value-producing operator here, matching the
-  // sibling identity scanner's own posture). Both branches are legitimate,
-  // non-connector-identity paths: the env var is explicit OPERATOR
-  // OVERRIDE input (same class as `version-disposition.ts:238`'s
-  // `PDPP_COMPACTION_RESIDUE_REVIEW_PATH` above), and the fallback resolves
-  // via `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`
-  // (`packageSrcDir`, one line above) into the real installed
-  // `@pdpp/polyfill-connectors` package's own shipped manifests directory --
-  // this scanner's `POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER`/
-  // `MANIFEST_ROOTS` already sanction that exact directory when reached
-  // directly (see `runtime/controller.ts`'s equivalent, resolver-provable
-  // call site); this one is functionally identical but ONE level of `||`
-  // indirection deeper than the bounded folder follows. Verified by direct
-  // inspection, not by the scanner.
-  'reference-implementation/scripts/generate-connector-registry.ts::readPolyfillManifests::readFileSync(resolve(manifestsDir, file), "utf8")',
   // main(manifestPath, repoRoot) in check-test-backends.ts: readFileSync(manifestPath,
   // "utf8") where `manifestPath` is the operator's own CLI positional
   // argument (process.argv[2]), same class as deploy-canary.ts:606 and
@@ -858,8 +852,7 @@ function isImportMetaUrl(node: Node): boolean {
 /**
  * The ONE `import.meta.resolve(...)` specifier this scanner recognizes as an
  * anchored directory fragment: `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`,
- * the real production shape `runtime/controller.ts` and
- * `scripts/generate-connector-registry.ts` both use to locate the
+ * the real production shape `runtime/controller.ts` uses to locate the
  * `@pdpp/polyfill-connectors` package's shipped manifests without hardcoding
  * a repo-relative path to it (that package is a PINNED TARBALL DEPENDENCY —
  * see `reference-implementation/package.json`'s `@pdpp/polyfill-connectors`
@@ -1383,6 +1376,42 @@ function isProhibitedEvasionMechanismCall(
   return false;
 }
 
+function importedManifestParserBindings(program: Node, fileDir: string): ReadonlySet<string> {
+  const bindings = new Set<string>();
+  for (const stmt of nodeArrayField(program, "body")) {
+    const source = nodeField(stmt, "source");
+    if (
+      stmt.type !== "ImportDeclaration" || source?.type !== "StringLiteral" ||
+      joinRelative(fileDir, source.value as string) !== "reference-implementation/runtime/binding-declarations.ts"
+    ) {
+      continue;
+    }
+    for (const specifier of nodeArrayField(stmt, "specifiers")) {
+      if (specifier.type !== "ImportSpecifier" || !isIdentifier(nodeField(specifier, "imported") as Node, "parseManifestJsonText")) {
+        continue;
+      }
+      const local = nodeField(specifier, "local");
+      if (local?.type === "Identifier") {
+        bindings.add(local.name as string);
+      }
+    }
+  }
+  return bindings;
+}
+
+function isJsonParseCall(node: Node | null, manifestParserBindings: ReadonlySet<string>): boolean {
+  if (node?.type !== "CallExpression") {
+    return false;
+  }
+  const callee = nodeField(node, "callee");
+  return (
+    (callee?.type === "MemberExpression" &&
+      isIdentifier(nodeField(callee, "object") as Node, "JSON") &&
+      isIdentifier(nodeField(callee, "property") as Node, "parse")) ||
+    (callee?.type === "Identifier" && manifestParserBindings.has(callee.name as string))
+  );
+}
+
 /**
  * Scan one production file's AST for JSON/YAML-consuming data-load call
  * sites, independent of which JS syntax shape reaches the file.
@@ -1457,14 +1486,9 @@ export function scanFileDataLoads(
       isIdentifier(callee.property as Node, "toString")
     );
   }
+  const manifestParserBindings = importedManifestParserBindings(program, analysis.fileDir);
   function flowsIntoJsonParse(callNode: Node, parent: Node | null): boolean {
-    if (
-      parent?.type === "CallExpression" &&
-      // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `parent.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-      (parent.callee as Node)?.type === "MemberExpression" &&
-      isIdentifier((parent.callee as Node).object as Node, "JSON") &&
-      isIdentifier((parent.callee as Node).property as Node, "parse")
-    ) {
+    if (isJsonParseCall(parent, manifestParserBindings)) {
       return true;
     }
     const initNode = parent?.type === "AwaitExpression" ? parent : callNode;
@@ -1477,13 +1501,7 @@ export function scanFileDataLoads(
       if (found) {
         return;
       }
-      if (
-        n.type === "CallExpression" &&
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `n.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-        (n.callee as Node)?.type === "MemberExpression" &&
-        isIdentifier((n.callee as Node).object as Node, "JSON") &&
-        isIdentifier((n.callee as Node).property as Node, "parse")
-      ) {
+      if (isJsonParseCall(n, manifestParserBindings)) {
         const [arg] = nodeArrayField(n, "arguments");
         if (arg && (isIdentifier(arg, boundName) || isDecodedBinding(arg, boundName))) {
           found = true;

@@ -37,8 +37,8 @@ const BROWSER_COLLECTOR_MONOREPO_COPY =
   /PDPP monorepo checkout|pnpm --dir|packages\/polyfill-connectors|browser-collector run command/;
 const ENROLL_TESTID = /data-testid="collector-enroll-command"/;
 const RUN_TESTID_CLAUDE = /data-testid={`collector-run-command-/;
-const COLLECTOR_RUN_CONNECTORS_IMPORT_RE =
-  /import \{ SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as COLLECTOR_RUN_CONNECTORS \} from "\.\.\/lib\/connection-modality\.ts";/;
+const COLLECTOR_CONNECTOR_IDS_PROP = /collectorConnectorIds\.filter\(/;
+const KEY_LIST_IMPORT = /SUPPORTED_LOCAL_COLLECTOR_CONNECTORS|COLLECTOR_RUN_CONNECTORS/;
 
 test("enrollment form derives the canonical local collector commands via shared helpers", async () => {
   const src = await read(FORM_PATH);
@@ -79,25 +79,18 @@ test("enrollment form never renders a local-collector setup invocation", async (
   assert.doesNotMatch(src, /--sample/, "form must never render the unpublished --sample flag");
 });
 
-test("enrollment form advertises every connector bundled in the published @pdpp/local-collector npx path", async () => {
-  // Derived, not hardcoded. `LOCAL_COLLECTOR_DEFINITIONS` in
-  // packages/polyfill-connectors/src/collector-registry.ts is the single source
-  // of truth for what the published npx bundle actually ships. The form now
-  // imports its connector list directly from `SUPPORTED_LOCAL_COLLECTOR_CONNECTORS`
-  // (via connection-modality.ts) instead of pinning a separate literal, so the
-  // two cannot drift silently (a pinned literal is exactly how `signal` broke
-  // this test previously).
+test("enrollment form lists the connectors the server can enroll, passed in by the page", async () => {
+  // The page reads the server's connector templates and hands the enrollment
+  // keys to the form. The form holds no connector list of its own, so a
+  // connector added to the server needs no console change.
   const src = await read(FORM_PATH);
-  assert.match(
-    src,
-    COLLECTOR_RUN_CONNECTORS_IMPORT_RE,
-    "the form must import its connector list from SUPPORTED_LOCAL_COLLECTOR_CONNECTORS, not a pinned literal"
-  );
+  assert.match(src, COLLECTOR_CONNECTOR_IDS_PROP, "the form must list the connectors it is given");
+  assert.doesNotMatch(src, KEY_LIST_IMPORT, "the form must not import a connector key list");
 });
 
 test("enrollment action only mints packaged local collector enrollment codes", async () => {
   const src = await read(ACTIONS_PATH);
-  assert.match(src, /isSupportedLocalCollectorConnector\(connectorId\)/);
+  assert.match(src, /resolveLocalCollectorEnrollmentKey\(templates, connectorId\)/);
   assert.match(src, /only creates packaged local collector enrollments/);
   assert.doesNotMatch(src, /isSupportedBrowserCollectorConnector/);
 });

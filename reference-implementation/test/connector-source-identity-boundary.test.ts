@@ -1,0 +1,1394 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * Connector source identity at the registration boundary.
+ *
+ * A connector's Core source identity is the `source.id` of the SourceDeclaration
+ * the runtime retains for its connector key. Resolution order, on both write
+ * paths (`registerConnector` and the installer's `publishConnectorActivation`):
+ *
+ *   1. a retained declaration keeps its `source.id`; provenance cannot change it (the one exception,
+ *      a verified package moving a legacy projection, is in connector-source-identity-move.test.ts);
+ *   2. otherwise an explicit declaration or source.id supplies the current identity;
+ *   3. otherwise declared legacy_source_ids may supply a historical projection;
+ *   4. otherwise the key registers without minting a source identity.
+ *
+ * Covers both write paths.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { PoolClient } from "pg";
+import { executeAsPolyfillConnectorDetail } from "../operations/as-polyfill-connector-detail/index.ts";
+import { executeAsPolyfillConnectorRegister } from "../operations/as-polyfill-connector-register/index.ts";
+import {
+  __setRegisterConnectorPhaseHookForTest,
+  connectorDeclarationDigest,
+  getAcceptedDeclarationDigest,
+  getConnectorManifest,
+  normalizeConnectorManifestForStorage,
+  retainedStorageContext,
+  registerConnector,
+} from "../server/auth.ts";
+import {
+  getConnectorActivation,
+  publishConnectorActivation,
+} from "../server/connector-install/activation-authority.ts";
+import { createConnectorInstallStore, type ConnectorInstallRecord } from "../server/connector-install/index.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
+import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
+import {
+  closePostgresStorage,
+  getPostgresPool,
+  initPostgresStorage,
+  isPostgresStorageBackend,
+} from "../server/postgres-storage.ts";
+import { COLLECTION_PROFILE_URI, snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+
+const PUBLISHER = "https://publishers.example/accepted";
+const DOC_ONE = "https://docs.example/manifests/one.json";
+const DOC_TWO = "https://docs.example/manifests/two.json";
+const EXPLICIT_SOURCE = "https://sources.example/explicit/identity-boundary";
+const OTHER_SOURCE = "https://sources.example/other/identity-boundary";
+
+const INVALID_REQUEST = "invalid_request";
+const ALREADY_BOUND = /already bound to source/;
+const CANONICAL_KEY_MESSAGE = /connector_id must match connector_key/;
+const INVALID_SOURCE_DECLARATION = /Invalid SourceDeclaration/;
+const KEY_MATCH_MESSAGE = /connector_id must match connector_key/;
+const URL_KEY_MESSAGE = /is a URL with no connector_key/;
+
+/** The reviewed historical source identity of a shipped first-party connector. */
+function firstPartySource(slug: string): string {
+  return `https://registry.pdpp.dev/connectors/${slug}`;
+}
+
+function streamFor(name: string) {
+  return {
+    name,
+    primary_key: ["id"],
+    schema: {
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      type: "object",
+    },
+    selection: { fields: true, resources: true },
+    semantics: "append_only",
+  };
+}
+
+function fixtureLegacyIds(overrides: Record<string, unknown>): string[] | undefined {
+  const key = canonicalConnectorKey(overrides.connector_key ?? overrides.connector_id);
+  const owner = readPolyfillManifests().find(({ manifest }) => manifest.connector_key === key)?.manifest;
+  return typeof owner?.connector_id === "string" ? [owner.connector_id] : undefined;
+}
+
+function legacyManifest(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    capabilities: { human_interaction: [] },
+    display_name: "Identity boundary",
+    protocol_version: "0.1.0",
+    streams: [streamFor("items")],
+    version: "1.0.0",
+    legacy_source_ids: fixtureLegacyIds(overrides),
+    ...overrides,
+  };
+}
+
+/** A fully valid Core declaration, produced by the existing legacy projection. */
+function explicitDeclaration(connectorKey: string, sourceId: string, streams = [streamFor("items")]) {
+  return snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(
+    legacyManifest({
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      streams,
+    }),
+    {
+      connectorImplementationId: `https://implementations.example/connectors/${connectorKey}`,
+      publisherId: PUBLISHER,
+      sourceId,
+    }
+  );
+}
+
+function retainedSourceId(stored: Record<string, unknown> | null): string | undefined {
+  const declaration = stored?.source_declaration as { source?: { id?: unknown } } | undefined;
+  return typeof declaration?.source?.id === "string" ? declaration.source.id : undefined;
+}
+
+async function storedFor(connectorKey: string): Promise<Record<string, unknown> | null> {
+  return ((await getConnectorManifest(connectorKey)) as Record<string, unknown> | null) ?? null;
+}
+
+async function storedManifestBytes(connectorKey: string): Promise<string | undefined> {
+  return isPostgresStorageBackend()
+    ? (await getPostgresPool().query<{ manifest: string }>(
+        "SELECT manifest::text FROM connectors WHERE connector_id = $1",
+        [connectorKey]
+      )).rows[0]?.manifest
+    : getDb()
+        .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
+        .get<{ manifest: string }>(connectorKey)?.manifest;
+}
+
+async function storedConnectorRowFor(connectorKey: string): Promise<{
+  connector_id: string;
+  created_at: string;
+  manifest: Record<string, unknown>;
+} | null> {
+  const row = isPostgresStorageBackend()
+    ? (await getPostgresPool().query<{ connector_id: string; created_at: string; manifest: unknown }>(
+        "SELECT connector_id, created_at, manifest FROM connectors WHERE connector_id = $1",
+        [connectorKey]
+      )).rows[0]
+    : getDb()
+        .prepare("SELECT connector_id, created_at, manifest FROM connectors WHERE connector_id = ?")
+        .get<{ connector_id: string; created_at: string; manifest: string }>(connectorKey);
+  if (!row) {
+    return null;
+  }
+  const manifest = typeof row.manifest === "string" ? JSON.parse(row.manifest) : row.manifest;
+  return {
+    connector_id: row.connector_id,
+    created_at: row.created_at,
+    manifest: manifest as Record<string, unknown>,
+  };
+}
+
+async function assertRejectedWithoutWrite(
+  connectorKey: string,
+  attempt: () => Promise<unknown>,
+  messagePattern: RegExp
+): Promise<void> {
+  await assert.rejects(attempt, (error: unknown) => {
+    const err = error as { code?: unknown; message?: unknown };
+    assert.equal(err.code, INVALID_REQUEST);
+    assert.match(String(err.message), messagePattern);
+    return true;
+  });
+  assert.equal(await storedFor(connectorKey), null, "a rejected registration must not persist a manifest");
+}
+
+const SCENARIOS: Array<{ name: string; run: () => Promise<void> | void }> = [];
+
+function scenario(name: string, run: () => Promise<void> | void): void {
+  SCENARIOS.push({ name, run });
+}
+
+const PROVENANCE_VARIANTS: [string, Record<string, unknown>][] = [
+  ["provenance U1", { manifest_uri: DOC_ONE }],
+  ["provenance U2", { manifest_uri: DOC_TWO }],
+  ["no provenance", {}],
+];
+
+// Provenance never chooses a source; a new connector can register without one.
+for (const [label, provenance] of PROVENANCE_VARIANTS) {
+  scenario(`a fresh key without an identity registers without minting one (${label})`, async () => {
+    const key = "srcid-fresh-custom";
+    await registerConnector(legacyManifest({ connector_key: key, ...provenance }), { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor(key)), undefined);
+  });
+}
+
+scenario("an unmapped registry URL alias registers its key without minting a source", async () => {
+  await registerConnector(legacyManifest({ connector_id: "https://registry.pdpp.dev/connectors/srcid-fresh-url", manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("srcid-fresh-url")), undefined);
+});
+
+scenario("an explicit source.id is the current identity independently of provenance", async () => {
+  await registerConnector(legacyManifest({ connector_key: "srcid-current", source: { id: EXPLICIT_SOURCE }, manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("srcid-current")), EXPLICIT_SOURCE);
+});
+
+for (const path of ["registration", "activation"] as const) {
+  for (const moved of [false, true]) {
+    scenario(`an unchanged registry GET projection round-trips through ${path} byte-identically (retained move: ${moved})`, async () => {
+      const key = "srcid-projection-roundtrip";
+      const history = "urn:source:projection-roundtrip-history";
+      if (moved) {
+        await registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [history], manifest_uri: DOC_ONE }), { skipDerivedRepair: true });
+      }
+      const manifest = legacyManifest({
+        connector_key: key,
+        source: { id: EXPLICIT_SOURCE },
+        manifest_uri: DOC_ONE,
+        ...(moved ? { legacy_source_ids: [history], version: "1.1.0" } : {}),
+      });
+      if (path === "registration") {
+        await registerConnector(manifest, { skipDerivedRepair: true });
+      } else {
+        await publishConnectorActivation(installRecord(key, manifest));
+      }
+      const before = await storedManifestBytes(key);
+      const rowBefore = await storedConnectorRowFor(key);
+      const detail = await executeAsPolyfillConnectorDetail({ connectorId: key }, { getConnectorManifest });
+      assert.equal(detail.outcome, "success");
+      if (detail.outcome !== "success") throw new Error("registry GET failed");
+      assert.equal(
+        (detail.envelope.source_declaration as { publisher: { id: string } }).publisher.id,
+        "https://pdpp.dev/reference-implementation"
+      );
+      if (moved) {
+        const declaration = detail.envelope.source_declaration as { extensions: Record<string, { legacy_source_ids?: string[] }> };
+        assert.deepEqual(
+          declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids,
+          [history],
+          "registry GET contains the moved-from identity before the round trip"
+        );
+      }
+      // Object member order is not declaration content.
+      const returned = {
+        ...detail.envelope,
+        source_declaration: Object.fromEntries(
+          Object.entries(detail.envelope.source_declaration as Record<string, unknown>).reverse()
+        ),
+      };
+      if (path === "registration") {
+        const result = await postRegister(returned);
+        assert.equal(result.outcome, "success", JSON.stringify(result));
+      } else {
+        await publishConnectorActivation(installRecord(key, returned));
+      }
+      assert.equal(await storedManifestBytes(key), before, "the stored JSON bytes are unchanged");
+      assert.deepEqual(await storedConnectorRowFor(key), rowBefore);
+      assert.deepEqual(detail.envelope, await storedFor(key), "admission does not mutate the caller's declaration");
+    });
+  }
+
+  scenario(`a changed manifest with its old registry projection is refused through ${path}`, async () => {
+    const key = "srcid-stale-projection";
+    await registerConnector(legacyManifest({ connector_key: key, source: { id: EXPLICIT_SOURCE } }), { skipDerivedRepair: true });
+    const before = await storedManifestBytes(key);
+    const rowBefore = await storedConnectorRowFor(key);
+    const detail = await executeAsPolyfillConnectorDetail({ connectorId: key }, { getConnectorManifest });
+    assert.equal(detail.outcome, "success");
+    if (detail.outcome !== "success") throw new Error("registry GET failed");
+    const changed = { ...detail.envelope, version: "2.0.0" };
+    await assert.rejects(
+      () => path === "registration" ? postRegister(changed) : publishConnectorActivation(installRecord(key, changed)),
+      /publisher.*reserved.*remove source_declaration/
+    );
+    assert.equal(await storedManifestBytes(key), before);
+    assert.deepEqual(await storedConnectorRowFor(key), rowBefore);
+    assert.equal(await getConnectorActivation(key), null);
+  });
+
+  scenario(`an explicit declaration cannot claim the reserved projection publisher through ${path}`, async () => {
+    const key = "srcid-reserved-publisher";
+    const declaration = { ...explicitDeclaration(key, EXPLICIT_SOURCE), publisher: { id: "https://pdpp.dev/reference-implementation" } };
+    const manifest = legacyManifest({ connector_key: key, source_declaration: declaration });
+    await assert.rejects(
+      () => path === "registration"
+        ? registerConnector(manifest, { skipDerivedRepair: true })
+        : publishConnectorActivation({ ...installRecord(key, manifest), sourceDeclarationSha256: `sha256:${"a".repeat(64)}` }),
+      /publisher.*reserved/
+    );
+    assert.equal(await storedFor(key), null);
+    assert.equal(await getConnectorActivation(key), null);
+  });
+}
+
+for (const path of ["registration", "activation"] as const) {
+  scenario(`two shipped-style connectors can share a current source identity through ${path}`, async () => {
+    const api = legacyManifest({ connector_key: "shared-source-api", source: { id: EXPLICIT_SOURCE }, display_name: "Shared source API" });
+    const browser = legacyManifest({ connector_key: "shared-source-browser", source: { id: EXPLICIT_SOURCE }, display_name: "Shared source browser" });
+    await registerConnector(api, { skipDerivedRepair: true });
+    if (path === "registration") {
+      await registerConnector(browser, { skipDerivedRepair: true });
+    } else {
+      await publishConnectorActivation(installRecord("shared-source-browser", browser));
+    }
+    assert.equal(retainedSourceId(await storedFor("shared-source-api")), EXPLICIT_SOURCE);
+    assert.equal(retainedSourceId(await storedFor("shared-source-browser")), EXPLICIT_SOURCE);
+  });
+}
+
+scenario("an uninstalled connector's retained registration still owns its legacy identity", async () => {
+  await publishConnectorActivation(installRecord("srcid-uninstalled", legacyManifest({ connector_key: "srcid-uninstalled", source: { id: EXPLICIT_SOURCE }, legacy_source_ids: [OTHER_SOURCE] })));
+  await createConnectorInstallStore().deactivateAndRemoveActivation!("srcid-uninstalled");
+  assert.equal(await getConnectorActivation("srcid-uninstalled"), null);
+  assert.ok(await storedFor("srcid-uninstalled"));
+  await assertRejectedWithoutWrite("srcid-claimant", () => registerConnector(legacyManifest({ connector_key: "srcid-claimant", source: { id: OTHER_SOURCE } }), { skipDerivedRepair: true }), /already owned/);
+});
+
+// Causal guard: an explicit, valid declaration does not make an unknown URL an operational key.
+scenario("a URL-only connector_id with an explicit valid declaration is refused before any write", async () => {
+  const url = "https://sources.example/connectors/srcid-explicit-url";
+  const key = "srcid-explicit-url";
+  await assertRejectedWithoutWrite(
+    url,
+    () =>
+      registerConnector(
+        legacyManifest({
+          connector_id: url,
+          manifest_uri: DOC_ONE,
+          source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+        }),
+        { skipDerivedRepair: true }
+      ),
+    URL_KEY_MESSAGE
+  );
+  assert.equal(await storedFor(key), null, "the declared slug must not be registered either");
+});
+
+// Known first-party key: the declared source identity wins over any incoming provenance.
+for (const [label, provenance] of PROVENANCE_VARIANTS) {
+  scenario(`a first-party key takes its declared source identity regardless of provenance (${label})`, async () => {
+    const key = "amazon";
+    await registerConnector(
+      legacyManifest({
+        connector_id: key,
+        connector_key: key,
+        ...provenance,
+      }),
+      {
+        skipDerivedRepair: true,
+      }
+    );
+    assert.equal(retainedSourceId(await storedFor(key)), firstPartySource("amazon"));
+  });
+}
+
+scenario("a familiar key without a declaration gets no legacy identity", async () => {
+  await registerConnector(legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor("amazon")), undefined);
+});
+
+scenario("pre-projection registration keeps no identity until a matching manifest declares one", () => {
+  const previous = { connector_id: "amazon", connector_key: "amazon" };
+  const context = retainedStorageContext(previous);
+  const without = legacyManifest({ connector_key: "amazon", legacy_source_ids: undefined });
+  assert.equal(normalizeConnectorManifestForStorage(without, context).storedManifest.source_declaration, undefined);
+  assert.equal(retainedSourceId(normalizeConnectorManifestForStorage(legacyManifest({ connector_key: "amazon" }), context).storedManifest), firstPartySource("amazon"));
+  assert.throws(() => normalizeConnectorManifestForStorage(legacyManifest({ connector_key: "gmail" }), context), /does not match/);
+});
+
+scenario("a manifest update cannot drop a historical identity claimed by its registration", async () => {
+  const manifest = legacyManifest({ connector_key: "srcid-monotonic", source: { id: EXPLICIT_SOURCE }, legacy_source_ids: ["urn:source:historical"] });
+  await registerConnector(manifest, { skipDerivedRepair: true });
+  await assert.rejects(() => registerConnector({ ...manifest, legacy_source_ids: undefined, version: "1.1.0" }, { skipDerivedRepair: true }), /cannot drop.*identity/);
+  assert.deepEqual((await storedFor("srcid-monotonic"))?.legacy_source_ids, ["urn:source:historical"]);
+
+  const overlapId = "urn:source:monotonic-overlap";
+  await registerConnector(legacyManifest({ connector_key: "srcid-monotonic-overlap", legacy_source_ids: [overlapId] }), { skipDerivedRepair: true });
+  await registerConnector(legacyManifest({ connector_key: "srcid-monotonic-overlap", source: { id: overlapId }, version: "1.1.0" }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("srcid-overlap-claimant", () => registerConnector(
+    legacyManifest({ connector_key: "srcid-overlap-claimant", source: { id: overlapId } }), { skipDerivedRepair: true }
+  ), /already owned/);
+  const declaration = (await storedFor("srcid-monotonic-overlap"))?.source_declaration as {
+    extensions: Record<string, { legacy_source_ids?: string[] }>;
+  };
+  assert.deepEqual(declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids, [overlapId]);
+});
+
+scenario("a declared legacy identity cannot belong to another connector", async () => {
+  await registerConnector(legacyManifest({ connector_key: "amazon" }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("gmail", () => registerConnector(legacyManifest({ connector_key: "gmail", legacy_source_ids: [firstPartySource("amazon")] }), { skipDerivedRepair: true }), /already owned/);
+});
+
+scenario("a declared legacy identity cannot equal another connector's current identity", async () => {
+  await registerConnector(legacyManifest({ connector_key: "srcid-primary", source_declaration: explicitDeclaration("srcid-primary", EXPLICIT_SOURCE) }), { skipDerivedRepair: true });
+  await assertRejectedWithoutWrite("srcid-legacy", () => registerConnector(legacyManifest({ connector_key: "srcid-legacy", legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }), /already owned/);
+});
+
+for (const path of ["registration", "activation"] as const) {
+  scenario(`a pre-alias historical projection retains legacy membership when stated as current through ${path}`, async () => {
+    const { storedManifest } = normalizeConnectorManifestForStorage(
+      legacyManifest({ connector_key: "srcid-historical-owner", legacy_source_ids: [EXPLICIT_SOURCE] })
+    );
+    delete storedManifest.legacy_source_ids;
+    if (isPostgresStorageBackend()) {
+      await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)",
+        ["srcid-historical-owner", JSON.stringify(storedManifest)]);
+    } else {
+      getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)")
+        .run("srcid-historical-owner", JSON.stringify(storedManifest));
+    }
+    await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
+      legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
+      { skipDerivedRepair: true }
+    ), /already owned/);
+
+    const update = legacyManifest({ connector_key: "srcid-historical-owner", source: { id: EXPLICIT_SOURCE }, version: "1.1.0" });
+    if (path === "registration") {
+      await registerConnector(update, { skipDerivedRepair: true });
+    } else {
+      await publishConnectorActivation(installRecord("srcid-historical-owner", update));
+    }
+    await assertRejectedWithoutWrite("srcid-current-claimant", () => registerConnector(
+      legacyManifest({ connector_key: "srcid-current-claimant", source: { id: EXPLICIT_SOURCE } }),
+      { skipDerivedRepair: true }
+    ), /already owned/);
+    const retained = await storedFor("srcid-historical-owner");
+    assert.ok(retained);
+    assert.equal(retainedSourceId(retained), EXPLICIT_SOURCE);
+    const declaration = retained.source_declaration as { extensions: Record<string, { legacy_source_ids?: string[] }> };
+    assert.deepEqual(declaration.extensions[COLLECTION_PROFILE_URI]?.legacy_source_ids, [EXPLICIT_SOURCE]);
+    const replay = await postRegister(retained);
+    assert.equal(replay.outcome, "success", JSON.stringify(replay));
+  });
+}
+
+scenario("concurrent legacy identity claims by different keys commit exactly one", async () => {
+  const keys = ["srcid-owner-a", "srcid-owner-b"];
+  const results = await Promise.allSettled(
+    keys.map((key) => registerConnector(legacyManifest({ connector_key: key, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }))
+  );
+  const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+  const loserIndex = results.findIndex((result) => result.status === "rejected");
+  assert.notEqual(winnerIndex, -1, "one legacy identity claimant commits");
+  assert.notEqual(loserIndex, -1, "the other claimant is rejected");
+  const loser = rejectionOf(results[loserIndex]) as { code?: unknown; message?: unknown };
+  assert.equal(loser.code, INVALID_REQUEST);
+  assert.match(String(loser.message), /already owned/);
+
+  const storedRows = await Promise.all(keys.map((key) => storedFor(key)));
+  assert.equal(storedRows.filter(Boolean).length, 1, "the source has exactly one persisted owner");
+  assert.deepEqual(storedRows[winnerIndex]?.legacy_source_ids, [EXPLICIT_SOURCE]);
+  assert.equal(storedRows[loserIndex], null, "the refused claimant has no connector row");
+});
+
+scenario("registration and activation cannot claim the same legacy identity for different keys", async () => {
+  const registrationKey = "srcid-race-register-owner";
+  const activationKey = "srcid-race-activation-owner";
+  let settled: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  let blocker: PoolClient | undefined;
+  let blockerHasLock = false;
+
+  try {
+    if (isPostgresStorageBackend()) {
+      const client = await getPostgresPool().connect();
+      blocker = client;
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_source_ownership'))");
+      blockerHasLock = true;
+    }
+
+    const tasks = [
+      registerConnector(legacyManifest({ connector_key: registrationKey, legacy_source_ids: [EXPLICIT_SOURCE] }), { skipDerivedRepair: true }),
+      publishConnectorActivation(
+        installRecord(
+          activationKey,
+          legacyManifest({
+            connector_id: activationKey,
+            connector_key: activationKey,
+            legacy_source_ids: [EXPLICIT_SOURCE],
+          })
+        )
+      ),
+    ];
+    settled = Promise.allSettled(tasks);
+    if (blockerHasLock) {
+      await waitForOwnershipLockWaiters(2);
+    }
+
+    if (blockerHasLock && blocker) {
+      await blocker.query("COMMIT");
+      blockerHasLock = false;
+    }
+
+    const results = await settled;
+    const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+    const loserIndex = results.findIndex((result) => result.status === "rejected");
+    assert.notEqual(winnerIndex, -1, "one legacy identity claimant commits");
+    assert.notEqual(loserIndex, -1, "the other claimant is rejected");
+    const loser = rejectionOf(results[loserIndex]) as { code?: unknown; message?: unknown };
+    assert.equal(loser.code, INVALID_REQUEST);
+    assert.match(String(loser.message), /already owned/);
+
+    const storedRows = await Promise.all([storedFor(registrationKey), storedFor(activationKey)]);
+    assert.equal(storedRows.filter(Boolean).length, 1, "the legacy identity has exactly one persisted owner");
+    const winnerKey = winnerIndex === 0 ? registrationKey : activationKey;
+    const loserKey = loserIndex === 0 ? registrationKey : activationKey;
+    assert.equal(retainedSourceId(storedRows[winnerIndex] ?? null), EXPLICIT_SOURCE);
+    assert.equal(storedRows[loserIndex], null, "the refused claimant has no connector row");
+
+    const winnerActivation = await getConnectorActivation(winnerKey);
+    const loserActivation = await getConnectorActivation(loserKey);
+    if (winnerKey === activationKey) {
+      assert.equal(retainedSourceId(winnerActivation?.canonicalManifest ?? null), EXPLICIT_SOURCE);
+    } else {
+      assert.equal(winnerActivation, null, "registration does not publish an activation");
+    }
+    assert.equal(loserActivation, null, "the refused claimant has no activation row");
+  } finally {
+    if (blockerHasLock) {
+      await blocker?.query("ROLLBACK");
+    }
+    blocker?.release();
+    if (settled) {
+      await settled;
+    }
+  }
+});
+
+// Control: an explicit validated declaration is the supported route for a first-party key too.
+scenario("an explicit declaration wins over the manifest declaration on a first registration", async () => {
+  const key = "amazon";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// Retained identity: a provenance-only update keeps the retained source (no fresh synthesis involved).
+scenario("a provenance-only update keeps the retained source identity", async () => {
+  const key = "srcid-prov";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_ONE,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_TWO,
+      version: "1.1.0",
+    }),
+    { skipDerivedRepair: true }
+  );
+  assert.equal(
+    retainedSourceId(await storedFor(key)),
+    EXPLICIT_SOURCE,
+    "manifest_uri must not replace the retained source"
+  );
+});
+
+// Retained identity: a key-only update keeps the retained declaration.
+scenario("a key-only update keeps the retained declaration", async () => {
+  const key = "srcid-keyonly";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  await registerConnector(legacyManifest({ connector_key: key, version: "1.1.0" }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// Retained identity: an explicit different source identity cannot replace the retained one.
+scenario("an explicit different source identity cannot replace the retained one", async () => {
+  const key = "srcid-replace";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const before = await storedConnectorRowFor(key);
+  await assert.rejects(
+    () =>
+      registerConnector(
+        legacyManifest({
+          connector_id: key,
+          connector_key: key,
+          manifest_uri: DOC_ONE,
+          source_declaration: explicitDeclaration(key, OTHER_SOURCE),
+          version: "1.1.0",
+        }),
+        { skipDerivedRepair: true }
+      ),
+    (error: unknown) => {
+      const err = error as { code?: unknown; message?: unknown };
+      assert.equal(err.code, INVALID_REQUEST);
+      assert.match(String(err.message), ALREADY_BOUND);
+      return true;
+    }
+  );
+  assert.equal(
+    retainedSourceId(await storedFor(key)),
+    EXPLICIT_SOURCE,
+    "the retained source must survive the rejected update"
+  );
+  assert.deepEqual(await storedConnectorRowFor(key), before, "a rejected update leaves the complete connector row unchanged");
+});
+
+scenario("a pre-projection retained key mismatch leaves the stored row unchanged", async () => {
+  const key = "amazon";
+  const preProjection = legacyManifest({ connector_id: key, connector_key: key, legacy_source_ids: undefined });
+  if (isPostgresStorageBackend()) {
+    await getPostgresPool().query("INSERT INTO connectors(connector_id, manifest) VALUES($1, $2::jsonb)", [
+      key,
+      JSON.stringify(preProjection),
+    ]);
+  } else {
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)").run(key, JSON.stringify(preProjection));
+  }
+
+  const before = await storedConnectorRowFor(key);
+  assert.ok(before);
+  assert.equal(retainedSourceId(before.manifest), undefined, "the stored row predates source projection");
+  assert.throws(
+    () =>
+      normalizeConnectorManifestForStorage(
+        legacyManifest({ connector_id: "gmail", connector_key: "gmail" }),
+        retainedStorageContext(before.manifest)
+      ),
+    /does not match the retained connector key/
+  );
+  await assert.rejects(
+    () => registerConnector(legacyManifest({ connector_id: key, connector_key: "gmail" }), { skipDerivedRepair: true }),
+    CANONICAL_KEY_MESSAGE
+  );
+  assert.equal(await storedConnectorRowFor("gmail"), null, "a mismatched declaration publishes no other row");
+  assert.deepEqual(
+    await storedConnectorRowFor(key),
+    before,
+    "a rejected mismatched declaration cannot alter the retained row"
+  );
+});
+
+// Fail-before (explicit invalid): an explicit declaration is validated before it is retained.
+scenario("an invalid explicit SourceDeclaration is rejected before persistence", async () => {
+  const key = "srcid-invalid";
+  const invalid = {
+    ...explicitDeclaration(key, EXPLICIT_SOURCE),
+    protocol_version: "9.9.9",
+  };
+  await assertRejectedWithoutWrite(
+    key,
+    () =>
+      registerConnector(
+        legacyManifest({
+          connector_id: key,
+          connector_key: key,
+          manifest_uri: DOC_ONE,
+          source_declaration: invalid,
+        }),
+        { skipDerivedRepair: true }
+      ),
+    INVALID_SOURCE_DECLARATION
+  );
+});
+
+// Control: a valid explicit declaration keeps its identity when provenance changes.
+scenario("a valid explicit declaration keeps its source identity when provenance changes", async () => {
+  const key = "srcid-explicit";
+  const declaration = explicitDeclaration(key, EXPLICIT_SOURCE);
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_ONE,
+      source_declaration: declaration,
+    }),
+    { skipDerivedRepair: true }
+  );
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_TWO,
+      source_declaration: declaration,
+      version: "1.1.0",
+    }),
+    { skipDerivedRepair: true }
+  );
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// Control: a legitimate schema update keeps the source and yields a new declaration version.
+scenario("a schema update keeps the source identity and yields a new declaration version", async () => {
+  const key = "srcid-schema";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const first = (await storedFor(key))?.source_declaration as {
+    declaration_version: string;
+  };
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_ONE,
+      streams: [streamFor("items"), streamFor("more")],
+      version: "1.1.0",
+    }),
+    { skipDerivedRepair: true }
+  );
+  const second = (await storedFor(key))?.source_declaration as {
+    declaration_version: string;
+  };
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+  assert.notEqual(second.declaration_version, first.declaration_version);
+});
+
+// Control: the normalizer keeps a retained identity when given explicit context.
+scenario("the normalizer keeps a retained identity when given it as context", () => {
+  const key = "srcid-context";
+  const retained = explicitDeclaration(key, EXPLICIT_SOURCE);
+  const { storedManifest } = normalizeConnectorManifestForStorage(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_TWO,
+    }),
+    { retainedSourceDeclaration: retained }
+  );
+  assert.equal(retainedSourceId(storedManifest), EXPLICIT_SOURCE);
+});
+
+// Control: an alias with a different explicit key is rejected (existing validator guard).
+scenario("a known alias with a different explicit key is rejected", async () => {
+  await assertRejectedWithoutWrite(
+    "codex",
+    () =>
+      registerConnector(
+        legacyManifest({
+          connector_id: "claude_code",
+          connector_key: "codex",
+        }),
+        {
+          skipDerivedRepair: true,
+        }
+      ),
+    CANONICAL_KEY_MESSAGE
+  );
+});
+
+// Control: an explicit key with an unmapped, unequal custom URI is rejected (existing validator guard).
+scenario("an explicit key with an unmapped unequal custom URI is rejected", async () => {
+  await assertRejectedWithoutWrite(
+    "srcid-custom",
+    () =>
+      registerConnector(
+        legacyManifest({
+          connector_id: "https://example.org/manifest.json",
+          connector_key: "srcid-custom",
+        }),
+        {
+          skipDerivedRepair: true,
+        }
+      ),
+    KEY_MATCH_MESSAGE
+  );
+});
+
+// Control: a known alias with its canonical explicit key is accepted when the source comes from an explicit declaration.
+scenario("a known alias with its canonical explicit key is accepted", async () => {
+  await registerConnector(
+    legacyManifest({
+      connector_id: "claude-code",
+      connector_key: "claude-code",
+      source_declaration: explicitDeclaration("claude-code", EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const stored = await storedFor("claude-code");
+  assert.equal(stored?.connector_key, "claude-code");
+  assert.equal(retainedSourceId(stored), EXPLICIT_SOURCE);
+});
+
+// Control: an idempotent re-registration of the same content keeps everything.
+scenario("an idempotent re-registration keeps the retained identity", async () => {
+  const key = "srcid-idem";
+  const manifest = legacyManifest({
+    connector_id: key,
+    connector_key: key,
+    source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+  });
+  await registerConnector(manifest, { skipDerivedRepair: true });
+  await registerConnector(manifest, { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// Concurrency: two registrations that name different explicit sources cannot both commit.
+scenario("concurrent registrations of different explicit sources commit exactly one", async () => {
+  const key = "srcid-race";
+  const results = await Promise.allSettled([
+    registerConnector(
+      legacyManifest({
+        connector_id: key,
+        connector_key: key,
+        source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+      }),
+      { skipDerivedRepair: true }
+    ),
+    registerConnector(
+      legacyManifest({
+        connector_id: key,
+        connector_key: key,
+        source_declaration: explicitDeclaration(key, OTHER_SOURCE),
+      }),
+      { skipDerivedRepair: true }
+    ),
+  ]);
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  assert.equal(fulfilled.length, 1, "exactly one registration may commit");
+  const winner = retainedSourceId(await storedFor(key));
+  assert.ok(winner === EXPLICIT_SOURCE || winner === OTHER_SOURCE);
+});
+
+interface Deferred {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+function deferred(): Deferred {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+interface ParkedWriter {
+  readonly arrived: Deferred;
+  readonly released: Deferred;
+}
+
+/**
+ * Parks each registration of `connectorKey` at the stale-read point (after it observed the retained identity,
+ * before it persists) until the test releases it. Parking is keyed by the source the writer intends.
+ */
+function parkRegistrationsAtStaleRead(
+  connectorKey: string,
+  sourceIds: readonly string[]
+): {
+  readonly gate: (sourceId: string) => ParkedWriter;
+  readonly release: (sourceId: string) => void;
+  readonly reset: () => void;
+} {
+  const gates = new Map<string, ParkedWriter>(
+    sourceIds.map((sourceId) => [sourceId, { arrived: deferred(), released: deferred() }])
+  );
+  const gate = (sourceId: string): ParkedWriter => {
+    const found = gates.get(sourceId);
+    if (!found) {
+      throw new Error(`no parked writer for ${sourceId}`);
+    }
+    return found;
+  };
+  __setRegisterConnectorPhaseHookForTest(async (point, context) => {
+    if (point !== "before-manifest-persisted" || context.connectorId !== connectorKey) {
+      return;
+    }
+    const sourceId = retainedSourceId(context.manifest as Record<string, unknown>);
+    const writer = sourceId === undefined ? undefined : gates.get(sourceId);
+    if (!writer) {
+      return;
+    }
+    writer.arrived.resolve();
+    await writer.released.promise;
+  });
+  return {
+    gate,
+    release: (sourceId) => gate(sourceId).released.resolve(),
+    reset: () => {
+      __setRegisterConnectorPhaseHookForTest(null);
+      for (const writer of gates.values()) {
+        writer.released.resolve();
+      }
+    },
+  };
+}
+
+/**
+ * Resolves when the writer reaches its stale-read point. Fails if the writer settles first: then the
+ * interleaving was not replayed. Racing (not awaiting) keeps a late settlement from becoming an unhandled rejection.
+ */
+function parkedBefore(arrived: Promise<void>, writer: Promise<unknown>): Promise<void> {
+  return Promise.race([
+    arrived,
+    writer.then(() => {
+      throw new Error("a writer settled before the stale-read point: the interleaving was not replayed");
+    }),
+  ]);
+}
+
+function explicitRegistration(key: string, sourceId: string, extra: Record<string, unknown> = {}) {
+  return registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, sourceId),
+      ...extra,
+    }),
+    { skipDerivedRepair: true }
+  );
+}
+
+async function waitForOwnershipLockWaiters(expectedCount: number): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const result = await getPostgresPool().query<{ pid: string }>(
+      `SELECT DISTINCT a.pid::text AS pid
+       FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+       WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
+         AND l.classid = (((hashtext('connector_source_ownership')::bigint >> 32) & 4294967295)::oid)
+         AND l.objid = ((hashtext('connector_source_ownership')::bigint & 4294967295)::oid)
+         AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+         AND a.datname = current_database()`
+    );
+    if (result.rows.length >= expectedCount) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`expected ${expectedCount} distinct PostgreSQL writers waiting for source ownership`);
+}
+
+function rejectionOf(result: PromiseSettledResult<unknown> | undefined): unknown {
+  if (result?.status !== "rejected") {
+    throw new Error("expected a rejected ownership claimant");
+  }
+  return result.reason;
+}
+
+// Causal replay of the unlocked interleaving (source-identity-boundary-r5 model, Locked = FALSE): both writers read
+// "no retained identity" before either persists. The commit-time check must keep the first commit and refuse the
+// second, leaving the registry row byte-identical.
+scenario(
+  "two writers that both read no retained identity: the commit-time check keeps the first and refuses the second",
+  async () => {
+    const key = "srcid-race-replay";
+    const park = parkRegistrationsAtStaleRead(key, [EXPLICIT_SOURCE, OTHER_SOURCE]);
+    const writerA = explicitRegistration(key, EXPLICIT_SOURCE);
+    const writerB = explicitRegistration(key, OTHER_SOURCE);
+    try {
+      await Promise.all([
+        parkedBefore(park.gate(EXPLICIT_SOURCE).arrived.promise, writerA),
+        parkedBefore(park.gate(OTHER_SOURCE).arrived.promise, writerB),
+      ]);
+      park.release(EXPLICIT_SOURCE);
+      await writerA;
+      const afterA = JSON.stringify(await storedFor(key));
+      assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+
+      park.release(OTHER_SOURCE);
+      await assert.rejects(writerB, (error: unknown) => {
+        const err = error as { code?: unknown; message?: unknown };
+        assert.equal(err.code, INVALID_REQUEST);
+        assert.match(String(err.message), ALREADY_BOUND);
+        return true;
+      });
+      assert.equal(JSON.stringify(await storedFor(key)), afterA, "the refused writer must not change the registry row");
+      assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE, "the first writer's source survives");
+      assert.equal(await getConnectorActivation(key), null, "no activation is written by a registration");
+    } finally {
+      park.reset();
+      await Promise.allSettled([writerA, writerB]);
+    }
+  }
+);
+
+// Installer publish races a registration that read no identity. The registration resumes last and must be refused.
+scenario(
+  "a registration that read no identity before an installer publish is refused and the installer source survives",
+  async () => {
+    const key = "srcid-race-install";
+    const park = parkRegistrationsAtStaleRead(key, [EXPLICIT_SOURCE]);
+    const registration = explicitRegistration(key, EXPLICIT_SOURCE);
+    try {
+      await parkedBefore(park.gate(EXPLICIT_SOURCE).arrived.promise, registration);
+      await publishConnectorActivation(
+        installRecord(
+          key,
+          legacyManifest({
+            connector_id: key,
+            connector_key: key,
+            source_declaration: explicitDeclaration(key, OTHER_SOURCE),
+          })
+        )
+      );
+      park.release(EXPLICIT_SOURCE);
+      await assert.rejects(registration, (error: unknown) => {
+        const err = error as { code?: unknown; message?: unknown };
+        assert.equal(err.code, INVALID_REQUEST);
+        assert.match(String(err.message), ALREADY_BOUND);
+        return true;
+      });
+      assert.equal(retainedSourceId(await storedFor(key)), OTHER_SOURCE, "the installer's source is retained");
+      const activation = await getConnectorActivation(key);
+      assert.equal(retainedSourceId(activation?.canonicalManifest ?? null), OTHER_SOURCE);
+    } finally {
+      park.reset();
+      await Promise.allSettled([registration]);
+    }
+  }
+);
+
+// A seeded retained identity that differs from the manifest declaration must survive a schema/provenance update through the writer.
+scenario("a retained custom source for a mapped key survives a schema update without a declaration", async () => {
+  const key = "amazon";
+  await explicitRegistration(key, EXPLICIT_SOURCE);
+  const before = (await storedFor(key))?.source_declaration as { declaration_version: string } | undefined;
+  assert.notEqual(EXPLICIT_SOURCE, firstPartySource("amazon"), "the seed must differ from the manifest declaration");
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_TWO,
+      streams: [streamFor("items"), streamFor("more")],
+      version: "1.1.0",
+    }),
+    { skipDerivedRepair: true }
+  );
+  const stored = await storedFor(key);
+  const after = stored?.source_declaration as {
+    declaration_version: string;
+    publisher: { id: string };
+    streams: { name: string }[];
+  };
+  assert.equal(retainedSourceId(stored), EXPLICIT_SOURCE, "the retained custom source, not the map, is kept");
+  assert.equal(after.publisher.id, PUBLISHER, "the retained publisher is kept");
+  assert.deepEqual(
+    after.streams.map((stream) => stream.name),
+    ["items", "more"],
+    "the new schema is the one stored"
+  );
+  assert.equal(stored?.version, "1.1.0");
+  assert.notEqual(after.declaration_version, before?.declaration_version);
+  assert.equal(await getConnectorActivation(key), null);
+});
+
+scenario("prototype-shaped keys never acquire an implicit identity", () => {
+  for (const name of ["constructor", "toString", "valueOf", "srcid-not-mapped"]) {
+    assert.equal(normalizeConnectorManifestForStorage(legacyManifest({ connector_key: name, connector_id: name })).storedManifest.source_declaration, undefined);
+  }
+});
+
+// Null and undefined mean "unspecified" (documented normalizer behavior), never a request for a map fallback.
+async function assertAbsenceDeclaration(declaration: null | undefined): Promise<void> {
+  await registerConnector(
+    legacyManifest({ connector_id: "amazon", connector_key: "amazon", source_declaration: declaration }),
+    { skipDerivedRepair: true }
+  );
+  assert.equal(retainedSourceId(await storedFor("amazon")), firstPartySource("amazon"));
+  const key = "srcid-null-unmapped";
+  await registerConnector(legacyManifest({ connector_key: key, source_declaration: declaration }), { skipDerivedRepair: true });
+  assert.equal(retainedSourceId(await storedFor(key)), undefined);
+}
+
+scenario(
+  "a null or undefined declaration is absence: declared legacy identities apply, absent identities stay absent, retained keys keep",
+  async () => {
+    await assertAbsenceDeclaration(null);
+    await assertAbsenceDeclaration(undefined);
+    const key = "srcid-null-retained";
+    await explicitRegistration(key, EXPLICIT_SOURCE);
+    await registerConnector(
+      legacyManifest({ connector_id: key, connector_key: key, source_declaration: null, version: "1.1.0" }),
+      { skipDerivedRepair: true }
+    );
+    assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+  }
+);
+
+// Malformed nonnull declarations refuse before any write, and never fall back to the manifest declaration or provenance.
+for (const [label, malformed] of [
+  ["an empty object", {}],
+  ["a string", "declaration"],
+  ["a number", 42],
+  ["a boolean", true],
+  ["an array", []],
+] as const) {
+  scenario(`${label} as a declaration is refused before write on a mapped key (no map fallback)`, async () => {
+    await assertRejectedWithoutWrite(
+      "amazon",
+      () =>
+        registerConnector(
+          legacyManifest({ connector_id: "amazon", connector_key: "amazon", source_declaration: malformed }),
+          {
+            skipDerivedRepair: true,
+          }
+        ),
+      INVALID_SOURCE_DECLARATION
+    );
+  });
+}
+
+/** The POST /connectors operation, wired with the same dependencies the server mounts. */
+function postRegister(manifest: Record<string, unknown>) {
+  return executeAsPolyfillConnectorRegister(
+    { manifest },
+    {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
+      getConnectorManifest,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
+      registerConnector: (stored: Record<string, unknown>) => registerConnector(stored, { skipDerivedRepair: true }),
+      validateManifest: (stored: Record<string, unknown>) => validateConnectorManifest(stored),
+    }
+  );
+}
+
+// POST control: an identical re-POST of a retained connector is idempotent and keeps its source.
+scenario("an identical POST to a retained connector is idempotent and keeps its source", async () => {
+  const key = "srcid-post-idem";
+  const manifest = legacyManifest({
+    connector_id: key,
+    connector_key: key,
+    manifest_uri: DOC_ONE,
+    source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+  });
+  await registerConnector(manifest, { skipDerivedRepair: true });
+  const outcome = await postRegister(manifest);
+  assert.equal(outcome.outcome, "success", JSON.stringify(outcome));
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// POST control: a first-party identical re-POST with no declaration is idempotent under the declared source.
+scenario("an identical POST of a first-party connector without a declaration is idempotent", async () => {
+  const manifest = legacyManifest({
+    connector_id: "amazon",
+    connector_key: "amazon",
+    manifest_uri: DOC_ONE,
+  });
+  const first = await postRegister(manifest);
+  assert.equal(first.outcome, "success", JSON.stringify(first));
+  const second = await postRegister(manifest);
+  assert.equal(second.outcome, "success", JSON.stringify(second));
+  assert.equal(retainedSourceId(await storedFor("amazon")), firstPartySource("amazon"));
+});
+
+// POST: a version update without a declaration keeps the retained source, whatever provenance it names.
+scenario("a POST version update without a declaration keeps the retained source", async () => {
+  const key = "srcid-post-update";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const outcome = await postRegister(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_TWO,
+      version: "1.1.0",
+    })
+  );
+  assert.equal(outcome.outcome, "success", JSON.stringify(outcome));
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+});
+
+// POST by a known registry alias: an identical re-POST compares against the retained identity of its canonical key.
+// A lookup under the raw alias misses the retained row, takes the reviewed fresh-path source, and reports
+// equivocation for content the server already accepted.
+scenario(
+  "an identical POST by a known registry alias to a retained connector is idempotent and keeps its source",
+  async () => {
+    const key = "amazon";
+    const alias = `https://registry.pdpp.dev/connectors/${key}`;
+    // The retained declaration is the one a re-projection of this provenance produces (implementation id = manifest_uri),
+    // so an identical re-POST can be compared by digest.
+    const retained = snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(
+      legacyManifest({ connector_id: key, connector_key: key }),
+      { connectorImplementationId: alias, publisherId: PUBLISHER, sourceId: EXPLICIT_SOURCE }
+    );
+    await registerConnector(
+      legacyManifest({ connector_id: key, connector_key: key, manifest_uri: alias, source_declaration: retained }),
+      { skipDerivedRepair: true }
+    );
+    const outcome = await postRegister(legacyManifest({ connector_id: alias, manifest_uri: alias }));
+    assert.equal(outcome.outcome, "success", JSON.stringify(outcome));
+    assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE);
+  }
+);
+
+/** An installer record whose manifest is the given one; only the identity fields matter here. */
+function installRecord(connectorKey: string, manifest: Record<string, unknown>): ConnectorInstallRecord {
+  const hex = (digit: string) => `sha256:${digit.repeat(64)}`;
+  return {
+    activatedAt: "2026-11-02T00:00:00.000Z",
+    bindings: {},
+    configDigest: hex("0"),
+    connectorId: connectorKey,
+    digest: hex("1"),
+    entrypointPath: "/app/entrypoint.js",
+    entrypointSha256: hex("2"),
+    manifest,
+    manifestPath: "/app/manifest.json",
+    manifestSha256: hex("3"),
+    provenancePath: "/app/provenance.json",
+    provenanceSha256: hex("4"),
+    registry: "ghcr.io",
+    repository: `ghcr.io/example/connectors/${connectorKey}`,
+    root: `/var/lib/pdpp/${connectorKey}`,
+    tier: null,
+    version: "1.0.0",
+  };
+}
+
+// Installer: a retained source survives a provenance-only install.
+scenario("an installer publish keeps the retained source identity across a provenance change", async () => {
+  const key = "srcid-install-prov";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      manifest_uri: DOC_ONE,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  await publishConnectorActivation(
+    installRecord(
+      key,
+      legacyManifest({
+        connector_id: key,
+        connector_key: key,
+        manifest_uri: DOC_TWO,
+      })
+    )
+  );
+  assert.equal(retainedSourceId(await storedFor(key)), EXPLICIT_SOURCE, "the registry keeps the retained source");
+  const activation = await getConnectorActivation(key);
+  assert.equal(
+    retainedSourceId(activation?.canonicalManifest ?? null),
+    EXPLICIT_SOURCE,
+    "the activation records the same source"
+  );
+});
+
+// Installer: an explicit different identity is rejected before any write.
+scenario("an installer publish cannot rebind a retained source to an explicit different one", async () => {
+  const key = "srcid-install-replace";
+  await registerConnector(
+    legacyManifest({
+      connector_id: key,
+      connector_key: key,
+      source_declaration: explicitDeclaration(key, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const before = await storedConnectorRowFor(key);
+  await assert.rejects(
+    () =>
+      publishConnectorActivation(
+        installRecord(
+          key,
+          legacyManifest({
+            connector_id: key,
+            connector_key: key,
+            manifest_uri: DOC_ONE,
+            source_declaration: explicitDeclaration(key, OTHER_SOURCE),
+          })
+        )
+      ),
+    (error: unknown) => {
+      const err = error as { code?: unknown; message?: unknown };
+      assert.equal(err.code, INVALID_REQUEST);
+      assert.match(String(err.message), ALREADY_BOUND);
+      return true;
+    }
+  );
+  assert.deepEqual(await storedConnectorRowFor(key), before, "a rejected install leaves the complete connector row unchanged");
+  assert.equal(await getConnectorActivation(key), null, "no activation is written for a rejected publish");
+});
+
+scenario("an installer's legacy identity cannot claim another connector's current source identity", async () => {
+  const ownerKey = "srcid-install-owner";
+  const claimantKey = "srcid-install-claimant";
+  await registerConnector(
+    legacyManifest({
+      connector_id: ownerKey,
+      connector_key: ownerKey,
+      source_declaration: explicitDeclaration(ownerKey, EXPLICIT_SOURCE),
+    }),
+    { skipDerivedRepair: true }
+  );
+  const ownerBefore = await storedConnectorRowFor(ownerKey);
+  const claimantManifest = legacyManifest({
+    connector_id: claimantKey,
+    connector_key: claimantKey,
+    legacy_source_ids: [EXPLICIT_SOURCE],
+  });
+  assert.equal(claimantManifest.source_declaration, undefined, "the incoming package has no explicit SourceDeclaration");
+
+  await assert.rejects(
+    () => publishConnectorActivation(installRecord(claimantKey, claimantManifest)),
+    (error: unknown) => {
+      const err = error as { code?: unknown; message?: unknown };
+      assert.equal(err.code, INVALID_REQUEST);
+      assert.match(String(err.message), /already owned/);
+      return true;
+    }
+  );
+
+  assert.deepEqual(await storedConnectorRowFor(ownerKey), ownerBefore, "the original owner row is unchanged");
+  assert.equal(await storedFor(claimantKey), null, "the refused package has no connector row");
+  assert.equal(await getConnectorActivation(claimantKey), null, "the refused package has no activation row");
+});
+
+scenario("an installer publish accepts a fresh key without minting an identity", async () => {
+  const key = "srcid-install-fresh";
+  await publishConnectorActivation(installRecord(key, legacyManifest({ connector_key: key, manifest_uri: DOC_ONE })));
+  assert.equal(retainedSourceId(await storedFor(key)), undefined);
+  assert.ok(await getConnectorActivation(key));
+});
+
+test("SQLite: pre-projection stored registration updates without inventing an identity", async () => {
+  initDb(":memory:");
+  try {
+    const manifest = legacyManifest({ connector_key: "amazon", connector_id: "amazon", legacy_source_ids: undefined });
+    getDb().prepare("INSERT INTO connectors(connector_id, manifest) VALUES(?, ?)").run("amazon", JSON.stringify(manifest));
+    await registerConnector({ ...manifest, version: "1.1.0" }, { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor("amazon")), undefined);
+    await registerConnector({ ...manifest, version: "1.2.0", legacy_source_ids: [firstPartySource("amazon")] }, { skipDerivedRepair: true });
+    assert.equal(retainedSourceId(await storedFor("amazon")), firstPartySource("amazon"));
+  } finally { closeDb(); }
+});
+
+for (const entry of SCENARIOS) {
+  test(`SQLite: ${entry.name}`, async () => {
+    initDb(":memory:");
+    try {
+      await entry.run();
+    } finally {
+      closeDb();
+    }
+  });
+
+  test(`PostgreSQL: ${entry.name} (skipped: PDPP_TEST_POSTGRES_URL unset)`, {
+    skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  }, async () => {
+    const url = process.env.PDPP_TEST_POSTGRES_URL;
+    assert.ok(url);
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: url,
+        databaseName: `pdpp_test_srcid_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+        templateName: null,
+      },
+      async (databaseUrl) => {
+        initDb(":memory:");
+        try {
+          await initPostgresStorage({ backend: "postgres", databaseUrl });
+          await entry.run();
+        } finally {
+          await closePostgresStorage();
+          closeDb();
+        }
+      }
+    );
+  });
+}

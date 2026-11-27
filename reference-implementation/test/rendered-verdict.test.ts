@@ -192,6 +192,7 @@ function stream(overrides: Partial<StreamRollup> = {}): StreamRollup {
     gap_retryable: overrides.gap_retryable ?? false,
     priority: overrides.priority ?? "required",
     ...(overrides.recovery_action === undefined ? {} : { recovery_action: overrides.recovery_action }),
+    ...(overrides.reported_collected === undefined ? {} : { reported_collected: overrides.reported_collected }),
     stream_id: overrides.stream_id ?? "s1",
     unfillable_accounted: overrides.unfillable_accounted ?? false,
   };
@@ -671,32 +672,49 @@ test("tone: unknown coverage on an ordinary (still-refreshing) source keeps the 
   assert.equal(v.streams[0]?.statement, "Coverage has not been measured yet.");
 });
 
-test("tone: unknown coverage from a stale local collector build names the fix, not the generic YET copy", () => {
-  // Production shape (design-notes/source-state-truth-2026-08-18.md,
-  // peregrine Claude Code): a local-device collector build that predates the
-  // `coverage_diagnostics` stream the server now requires re-runs forever and
-  // lands in the exact same unmeasured state every time. The generic "not
-  // measured YET" copy implies the next scheduled run resolves it, which is
-  // false here — only an updated collector build does.
-  const staleCollectorCoverage = condition({
-    id: "SourceCoverageComplete:coverage_unknown_stale_collector",
-    message: "This local collector build predates coverage evidence the server now requires. Update the collector.",
-    reason: CONNECTION_CONDITION_REASONS.COVERAGE_UNKNOWN_STALE_COLLECTOR,
+test("tone: connector-reported collection is shown as the connector's report, never Healthy", () => {
+  // The runtime holds no evidence of its own for this source: coverage is
+  // `unknown` with the reported-collected cause. The pill must not say
+  // Healthy, must not say "Not measured" (nothing is missing), and the
+  // statement must attribute the claim to the connector.
+  const reportedCollected = condition({
+    id: "SourceCoverageComplete:coverage_reported_collected",
+    message: "The connector reports it collected every store in its latest run.",
+    reason: CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED,
     status: "unknown",
     type: "SourceCoverageComplete",
   });
   const snap = snapshot({
     axes: { coverage: "unknown", freshness: "fresh" },
-    conditions: [staleCollectorCoverage],
-    forward_disposition: "unmeasured",
-    state: "idle",
+    conditions: [reportedCollected],
+    forward_disposition: "complete",
+    state: "unknown",
+    unknown_reasons: [CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED],
   });
-  const v = synthesizeRenderedVerdict(snap, [stream({ coverage: "unknown" })], null, true);
-  assert.notEqual(v.forward_statement, "Coverage has not been measured yet.");
+  const v = synthesizeRenderedVerdict(snap, [stream({ coverage: "unknown", reported_collected: true })], null, true);
+  assert.equal(v.pill.tone, "grey");
+  assert.equal(v.pill.label, "Collected, not independently checked");
+  assert.match(v.forward_statement ?? "", /connector reports/i);
   assert.equal(
-    v.forward_statement,
-    "This local collector build predates coverage evidence the server now requires. Update the collector."
+    v.required_actions.some((action) => action.kind === "code_fix"),
+    false,
+    "a reported-only source owes no maintainer action"
   );
+  const row = v.streams.find((entry) => entry.stream_id === "s1");
+  assert.match(row?.statement ?? "", /connector reports/i);
+});
+
+test("tone: a connector report never masks a gap the runtime holds", () => {
+  // Contradiction: the connector says it collected everything, but the runtime
+  // holds an open gap. The gap wins; the pill is not the reported-collected one.
+  const snap = snapshot({
+    axes: { coverage: "gaps", freshness: "fresh" },
+    forward_disposition: "terminal",
+    state: "degraded",
+  });
+  const v = synthesizeRenderedVerdict(snap, [stream({ coverage: "gaps", reported_collected: true })], null, true);
+  assert.notEqual(v.pill.label, "Collected, not independently checked");
+  assert.notEqual(v.pill.label, "Healthy");
 });
 
 test("tone: active unknown coverage renders Checking because work is active", () => {
@@ -1077,7 +1095,7 @@ test("channel: stalled outbox state-read block asks for re-run, not dead-letter 
 });
 
 test("freshness: stalled local-device outbox with prior ingest evidence names the last known collection, not a false never-measured claim", () => {
-  // A local-device connection (Signal-shape: peregrine/cin_992b0c94cebeb3066ba42a6e)
+  // A local-device connection (Signal-shape: workstation/cin_7c3e1d5a9b2f4086d1e0a3c7)
   // whose outbox is stalled loses its heartbeat-derived freshness anchor by
   // design (a stall must never read `fresh`), so `axes.freshness` reads
   // `unknown` even though the device ingested real data days before the

@@ -44,6 +44,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 /**
  * `server/index.ts` exposes the migrated server surface. This test keeps the
@@ -167,33 +168,36 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   return body.access_token;
 }
 
-const MANIFEST = {
-  connector_id: "coverage-flush-ordering",
-  display_name: "Coverage Flush Ordering Regression",
-  manifest_uri: "https://sources.example/coverage-flush-ordering",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "conversations",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" }, title: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      name: "messages",
-      primary_key: ["id"],
-      schema: {
-        properties: { conversation_id: { type: "string" }, id: { type: "string" } },
-        required: ["id"],
-        type: "object",
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "coverage-flush-ordering",
+    display_name: "Coverage Flush Ordering Regression",
+    manifest_uri: "https://sources.example/coverage-flush-ordering",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "conversations",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" }, title: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        name: "messages",
+        primary_key: ["id"],
+        schema: {
+          properties: { conversation_id: { type: "string" }, id: { type: "string" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/coverage-flush-ordering" }
+);
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
 

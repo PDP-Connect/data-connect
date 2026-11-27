@@ -33,6 +33,14 @@ node reference-implementation/scripts/canary/deploy-canary.ts \
 so a misconfigured invocation refuses rather than targeting some other
 instance. A check whose environment is incomplete fails; it never guesses.
 
+Every manifest with an `http_health` check also needs `PDPP_CANARY_ORIGIN`,
+because the check's `url` is a path resolved against it, and the origin must be
+an `http:` or `https:` URL. This covers manifests with no `connector_run`
+check. `deploy-canary.ts` checks this right after the manifest is parsed and
+exits `2` before the build, the artifact check, or any container action, so a
+missing or malformed origin never reaches a deploy. If any check still throws
+after the swap, it counts as a failed check, so rollback and the receipt run.
+
 Exit code is `0` on pass or dry run, `1` on any blocking failure, artifact
 mismatch, or manifest rejection.
 
@@ -92,7 +100,8 @@ failing **blocking** check triggers rollback.
   the new bytes.
 - **`log_pattern`** — `pattern`, `maxOccurrences`, `sinceSeconds`. `0` means
   "must not appear"; a positive value allows an expected containment message.
-- **`http_health`** — `url`, `expectStatus`.
+- **`http_health`** — `url`, `expectStatus`. `url` is a path such as
+  `/owner/login`, resolved against `PDPP_CANARY_ORIGIN` (required).
 - **`connector_run`** — `connectionId`, `connectorSlug`, `timeoutSeconds`.
   Triggers a real run and waits for `succeeded`. A timeout reports `timeout`,
   not `failed`: an unfinished run is an unknown.

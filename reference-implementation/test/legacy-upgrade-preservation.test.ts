@@ -64,11 +64,10 @@ test("a developer-local source preserves the underscore legacy id apple_contacts
   const dataDir = join(dir, "data");
   mkdirSync(join(sourceRoot, "profile"), { recursive: true });
   mkdirSync(join(sourceRoot, "dist"), { recursive: true });
-  // The profile is the O-era manifest unchanged (connector_key apple_contacts).
-  writeFileSync(
-    join(sourceRoot, "profile", "collection-profile.json"),
-    JSON.stringify(legacyManifest("apple_contacts"))
-  );
+  // The profile is the shipped O-era manifest, unmodified. This is an upgrade: the retained historical
+  // registration seeded below already carries the source identity, and add/select must not change it.
+  // A fresh, unmapped local source with the same key would still need an explicit source_declaration.
+  writeFileSync(join(sourceRoot, "profile", "collection-profile.json"), JSON.stringify(legacyManifest("apple_contacts")));
   writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export default {};\n");
   const localStore = createFileLocalConnectorSourceStore(dataDir);
   const installStore = createFileConnectorInstallStore(dataDir);

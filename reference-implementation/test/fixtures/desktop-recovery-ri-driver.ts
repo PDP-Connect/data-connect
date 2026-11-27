@@ -22,15 +22,15 @@
  *     request (purpose argv[4], re-auth grant id argv[5] for a change) with
  *     the RI's own writer, writes `{ requestId }` to argv[3], and exits
  *     without starting a server.
- *   - `turn-on-remote-access`: signs in, mints an owner bearer, asks to turn
- *     remote access on from off, writes `{ status, code }` to argv[3], and
- *     exits.
+ *   - `turn-on-remote-access`: evaluates the owner-password gate the desktop
+ *     reachability host applies first, writes `{ status, code }` to argv[3]
+ *     (`owner_password_required` while the password is unset), and exits.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startServer } from "../../server/index.ts";
-import { requestOwnerPasswordWindow } from "../../server/owner-password-owner-set.ts";
+import { ownerPasswordOwnerSet, requestOwnerPasswordWindow } from "../../server/owner-password-owner-set.ts";
 
 const [mode, outputPath, seedPath] = process.argv.slice(2);
 const password = process.env.PDPP_OWNER_PASSWORD ?? "";
@@ -153,23 +153,11 @@ if (mode === "seed") {
 }
 
 if (mode === "turn-on-remote-access") {
-  const bearer = await mintOwnerBearer(asUrl, await login(asUrl));
-  const resp = await fetch(`${rsUrl}/v1/owner/remote-access/config`, {
-    body: JSON.stringify({
-      fields: {
-        PDPP_BIND_HOST: "127.0.0.1",
-        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
-        PDPP_TRUSTED_HOSTS: "vault.example.com",
-        PDPP_TRUSTED_PROXIES: "",
-      },
-      posture: "public_url",
-      provider: "user_supplied_origin",
-    }),
-    headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
-    method: "POST",
-  });
-  const body = (await resp.json()) as { error?: { code?: string } };
-  writeFileSync(outputPath, JSON.stringify({ code: body.error?.code ?? null, status: resp.status }));
+  // The legacy save route now always answers reachability_v2_required, and the
+  // reachability service is not mounted outside a managed desktop host. The
+  // gate that desktop-host.ts applies before any route work is this predicate.
+  const set = await ownerPasswordOwnerSet(dataDir);
+  writeFileSync(outputPath, JSON.stringify({ code: set ? null : "owner_password_required", status: 200 }));
   process.exit(0);
 }
 

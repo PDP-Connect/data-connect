@@ -27,6 +27,11 @@
 // reinterpreted. The route performs that declassification as part of the write,
 // so proof can never outlive the boundary it was measured against.
 
+import {
+  describeReceivedSince,
+  isDeclarableOwnerWindowSince,
+  OWNER_WINDOW_SINCE_REQUIREMENT,
+} from "../../runtime/owner-time-window.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 
 interface RouteRequest {
@@ -104,11 +109,12 @@ function parseScopeBody(body: unknown): { error: string } | { scope: { since?: s
   }
   const out: { since?: string; source_roots?: string[] } = {};
   if (body.since !== undefined && body.since !== null) {
-    if (typeof body.since !== "string" || !body.since.trim()) {
-      return { error: "since must be a non-empty ISO-8601 string" };
-    }
-    if (Number.isNaN(Date.parse(body.since.trim()))) {
-      return { error: `since is not a parseable instant: ${body.since}` };
+    // The offset is required because the runtime states this window in each
+    // stream's field type: a calendar day for a date field and an instant for
+    // a date-time field (Collection Profile 5.1). Only the owner knows the
+    // time zone that turns one into the other. See runtime/owner-time-window.ts.
+    if (typeof body.since !== "string" || !isDeclarableOwnerWindowSince(body.since.trim())) {
+      return { error: `since must be ${OWNER_WINDOW_SINCE_REQUIREMENT}; got: ${describeReceivedSince(body.since)}` };
     }
     out.since = body.since.trim();
   }

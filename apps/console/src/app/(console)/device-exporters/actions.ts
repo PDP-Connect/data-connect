@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { revalidatePath } from "next/cache";
-import { isSupportedLocalCollectorConnector } from "../lib/connection-modality.ts";
+import { loadLocalCollectorTemplates } from "../lib/load-local-collector-support.ts";
+import { resolveLocalCollectorEnrollmentKey } from "../lib/local-collector-support.ts";
 import { createDeviceEnrollmentCode, type DeviceEnrollmentCode, revokeDeviceExporter } from "../lib/ref-client.ts";
 
 type EnrollmentActionState =
@@ -24,7 +25,12 @@ export async function createEnrollmentCodeAction(
   if (!(connectorId && localBindingName)) {
     return { message: "Connector id and local binding name are required.", ok: false };
   }
-  if (!isSupportedLocalCollectorConnector(connectorId)) {
+  const templates = await loadLocalCollectorTemplates();
+  if (!templates) {
+    return { message: "Could not read the connector catalog from the server. Try again.", ok: false };
+  }
+  const enrollmentKey = resolveLocalCollectorEnrollmentKey(templates, connectorId);
+  if (!enrollmentKey) {
     return {
       message:
         "This setup form only creates packaged local collector enrollments. Browser-based sources will use the dashboard browser setup flow when it ships.",
@@ -39,7 +45,7 @@ export async function createEnrollmentCodeAction(
 
   try {
     const code = await createDeviceEnrollmentCode({
-      connector_id: connectorId,
+      connector_id: enrollmentKey,
       display_name: displayName || undefined,
       expires_in_seconds: expiresInSeconds,
       local_binding_name: localBindingName,

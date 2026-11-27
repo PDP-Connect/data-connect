@@ -20,6 +20,11 @@ import {
   postgresQuery,
   withPostgresTransaction,
 } from "../postgres-storage.ts";
+import {
+  type CollectionRevisionEventInput,
+  requirePostgresCollectionRevisionInTransaction,
+  requireSqliteCollectionRevisionInTransaction,
+} from "./collection-revision-store.ts";
 
 /** A raw database row (column-keyed) crossing the untyped storage boundary. */
 // biome-ignore lint/suspicious/noExplicitAny: raw db.js/postgres rows are untyped at this boundary.
@@ -524,6 +529,20 @@ function retryableReservationError(message = "device ingest reservation cannot b
   return err;
 }
 
+// A durable batch record is an observed collection event: it takes the next
+// collection revision in the record's own transaction, so no committed record
+// can sit behind a coverage proof it postdates.
+function batchRecordRevision(): CollectionRevisionEventInput {
+  return { at: new Date().toISOString(), event: "batch_record" };
+}
+
+// The accepted transition is the batch's replay decision. It takes its
+// revision in the same transaction.
+function batchAcceptedRevision(record: Row): CollectionRevisionEventInput {
+  return { at: record.acceptedAt ?? new Date().toISOString(), event: "batch_accepted" };
+}
+
+/** Advance the durable prefix and take the record's collection revision. Call on the record's open transaction. */
 export function advanceSqliteDeviceIngestPrefix(record: Row, inputIndex: number): void {
   const result = exec(referenceQueries.deviceExportersAdvanceProcessingPrefix, [
     ...reservationIdentityBinds(record),
@@ -534,6 +553,7 @@ export function advanceSqliteDeviceIngestPrefix(record: Row, inputIndex: number)
     (err as Error & { code?: string }).code = "device_ingest_retryable";
     throw err;
   }
+  requireSqliteCollectionRevisionInTransaction(getDb(), record.connectorInstanceId, batchRecordRevision());
 }
 
 interface PostgresTransactionClient {
@@ -559,6 +579,9 @@ export async function advancePostgresDeviceIngestPrefix(
     (err as Error & { code?: string }).code = "device_ingest_retryable";
     throw err;
   }
+  // The record transaction already holds the connection row lock (its
+  // admission check reads it FOR UPDATE), so this takes no new lock.
+  await requirePostgresCollectionRevisionInTransaction(client, record.connectorInstanceId, batchRecordRevision());
 }
 
 export function createSqliteDeviceExporterStore() {
@@ -584,6 +607,11 @@ export function createSqliteDeviceExporterStore() {
         if (result.changes !== 1) {
           throw retryableReservationError();
         }
+        requireSqliteCollectionRevisionInTransaction(
+          getDb(),
+          record.connectorInstanceId,
+          batchAcceptedRevision(record)
+        );
         return mapOutcome(sqliteOutcomeRow(record.deviceId, record.batchId));
       });
     },
@@ -949,6 +977,14 @@ export function createPostgresDeviceExporterStore() {
   return {
     completeProcessingBatch(record: Row) {
       return withPostgresTransaction(async (client: PostgresTransactionClient) => {
+        // The acceptance takes its collection revision first. That locks the
+        // connection row before the reservation row, the order every device
+        // record transaction already uses.
+        await requirePostgresCollectionRevisionInTransaction(
+          client,
+          record.connectorInstanceId,
+          batchAcceptedRevision(record)
+        );
         const reservation = await client.query(
           `SELECT manifest_fingerprint, semantic_capability_identity
              FROM device_ingest_batch_outcomes

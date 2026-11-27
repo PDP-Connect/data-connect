@@ -31,13 +31,13 @@ import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collecto
  */
 export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = Object.freeze([
   {
-    connector_id: "claude_code",
-    entry: "claude_code",
+    connector_id: "claude-code",
+    entry: "claude-code",
     bindings: {
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["sessions", "messages", "attachments", "memory_notes", "skills", "slash_commands", "file_history", "cache_inventory", "coverage_diagnostics", "backup_inventory", "config_inventory"],
+    streams: ["sessions", "messages", "attachments", "memory_notes", "skills", "slash_commands", "usage", "file_history", "cache_inventory", "backup_inventory", "config_inventory"],
     time_scopable_streams: ["sessions", "messages", "attachments"],
     source_root_scopable_streams: ["sessions", "messages", "attachments"],
     enforces_source_roots: true,
@@ -49,19 +49,19 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["sessions", "messages", "function_calls", "rules", "prompts", "skills", "history", "session_index", "shell_snapshots", "config_inventory", "cache_inventory", "coverage_diagnostics"],
+    streams: ["sessions", "messages", "function_calls", "rules", "prompts", "skills", "history", "session_index", "shell_snapshots", "config_inventory", "cache_inventory"],
     time_scopable_streams: ["sessions", "messages", "function_calls"],
     source_root_scopable_streams: ["sessions", "messages", "function_calls"],
     enforces_source_roots: true,
   },
   {
-    connector_id: "google_takeout",
-    entry: "google_takeout",
+    connector_id: "google-takeout",
+    entry: "google-takeout",
     bindings: {
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["location_history", "youtube_watch_history", "search_history", "photos", "coverage_diagnostics"],
+    streams: ["location_history", "youtube_watch_history", "search_history", "photos"],
     time_scopable_streams: ["location_history", "youtube_watch_history", "search_history", "photos"],
   },
   {
@@ -75,23 +75,23 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     time_scopable_streams: ["messages"],
   },
   {
-    connector_id: "apple_photos",
-    entry: "apple_photos",
+    connector_id: "apple-photos",
+    entry: "apple-photos",
     bindings: {
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["photos", "coverage_diagnostics"],
+    streams: ["photos"],
     time_scopable_streams: ["photos"],
   },
   {
-    connector_id: "google_messages",
-    entry: "google_messages",
+    connector_id: "google-messages",
+    entry: "google-messages",
     bindings: {
       "filesystem": { required: true },
     },
     protocol_capabilities: [],
-    streams: ["messages", "coverage_diagnostics"],
+    streams: ["messages"],
     time_scopable_streams: ["messages"],
   },
 ]);

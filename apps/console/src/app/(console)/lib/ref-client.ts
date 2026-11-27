@@ -97,7 +97,6 @@ export interface RunStatusEnvelope {
     connector_error_message: string | null;
     message: string | null;
     origin: string | null;
-    recovery_hint?: { action: "refresh_credentials"; retryable: false } | null;
     reason: string | null;
   } | null;
   /**
@@ -192,19 +191,11 @@ function normalizeRunFailure(value: unknown): RunStatusEnvelope["failure"] {
     return null;
   }
   const failure = value as Record<string, unknown>;
-  const recoveryHint =
-    failure.recovery_hint && typeof failure.recovery_hint === "object" && !Array.isArray(failure.recovery_hint)
-      ? (failure.recovery_hint as Record<string, unknown>)
-      : null;
   return {
     connector_error_message:
       typeof failure.connector_error_message === "string" ? failure.connector_error_message : null,
     message: typeof failure.message === "string" ? failure.message : null,
     origin: typeof failure.origin === "string" ? failure.origin : null,
-    recovery_hint:
-      recoveryHint?.action === "refresh_credentials" && recoveryHint.retryable === false
-        ? { action: "refresh_credentials", retryable: false }
-        : null,
     reason: typeof failure.reason === "string" ? failure.reason : null,
   };
 }
@@ -577,6 +568,12 @@ export interface RefCollectionReportEntry {
   considered: number | "unknown";
   /** Derived coverage condition, from the same vocabulary as the coverage axis. */
   coverage_condition: RefCoverageAxis;
+  /**
+   * True when `coverage_condition` is `unknown` only because the connector
+   * reported collecting this stream and the runtime did not enumerate the
+   * store. A labelled report, not missing evidence. Absent on older references.
+   */
+  coverage_reported_collected?: boolean;
   /** Manifest-declared coverage proof strategy, absent on older references. */
   coverage_strategy?:
     | "checkpoint_window"
@@ -665,6 +662,17 @@ export interface RefConnectorImplementation {
   state: "built_in" | "installed" | "local_source" | "not_installed" | "unknown";
 }
 
+/** See {@link RefConnectorSummary.coverage_as_of}. */
+export interface RefCoverageAsOf {
+  readonly artifact_digest: string;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
+  /** The sequence the server issued to the run at its start; it decides which proof can be current. */
+  readonly run_sequence: number;
+}
+
 export interface RefConnectorSummary {
   /**
    * Owner/control-plane acquisition provenance for manual imports, device
@@ -702,6 +710,13 @@ export interface RefConnectorSummary {
    * renders no horizons rather than inventing a state. Pass-through from
    * `server/ref-control.ts#projectConnectorSummaryConnectionHealth`.
    */
+  /**
+   * What the local coverage on this row is a fact about (`LocalCoverageAsOf`
+   * in reference `server/ref-control.ts`): the run, its release digest, and the
+   * collection revision and time it was committed at. `null` or absent when no
+   * current local proof backs the coverage shown.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   coverage_horizons?: readonly RefCoverageHorizon[];
   display_name: string;
   freshness: Record<string, unknown>;
@@ -983,6 +998,7 @@ export interface RefVerdictPill {
     | "Archived"
     | "Can't collect"
     | "Checking"
+    | "Collected, not independently checked"
     | "Healthy"
     | "Import complete"
     | "Missing data"
@@ -1347,6 +1363,12 @@ export interface RefConnectionHealthSnapshot {
    */
   collection_rate?: RefCollectionRateSnapshot | null;
   conditions?: readonly RefConnectionHealthCondition[];
+  /**
+   * What `axes.coverage` is a fact about: the same value as the summary's
+   * top-level `coverage_as_of`. Optional on the mirror because a reference
+   * predating the field omits it.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   /**
    * Additive, nullable source-pressure detail-gap backlog rollup
    * ({@link RefDetailGapBacklog}). `null` when no backlog evidence was supplied
@@ -1806,8 +1828,6 @@ export async function listExploreTimeline(
 /** Max page size the reference accepts (`CONNECTOR_SUMMARY_PAGE_LIMIT_MAX`). */
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
 const CONNECTOR_SUMMARY_DEFAULT_PAGE_LIMIT = 100;
-/** Accepted maximum for a repeated `connector_id` SET scope (design doc add-source-perf-design-agy-0730.md "Minimal contract"). */
-export const CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX = 100;
 
 /**
  * Named semantic profile on `GET /_ref/connectors` (Fable ruling §8, R8.1).
@@ -1846,7 +1866,7 @@ export interface RefConnectorRetainedCountSummariesResponse extends ListResponse
 
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1854,7 +1874,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorIdentitySummariesResponse>;
 export function listConnectorSummaries(options: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1862,7 +1882,7 @@ export function listConnectorSummaries(options: {
 }): Promise<RefConnectorRetainedCountSummariesResponse>;
 export function listConnectorSummaries(options?: {
   connectionRouteId?: string;
-  connectorId?: readonly string[];
+  connectorId?: string | readonly string[];
   cursor?: string;
   includeFleetHealth?: boolean;
   limit?: number;
@@ -1873,12 +1893,10 @@ export async function listConnectorSummaries(
   options: {
     connectionRouteId?: string;
     /**
-     * Bounded repeated-value SET scope on the paged (non-`connectionRouteId`)
-     * form — design doc "Minimal contract": 1..
-     * {@link CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX} canonical distinct ids,
-     * sent as repeated `connector_id` query values, never CSV-encoded.
+     * Optional connector scope, sent as repeated flat `connector_id` values.
+     * Omit to page through all owner-visible connections.
      */
-    connectorId?: readonly string[];
+    connectorId?: string | readonly string[];
     cursor?: string;
     includeFleetHealth?: boolean;
     limit?: number;

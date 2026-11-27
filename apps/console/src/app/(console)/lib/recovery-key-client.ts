@@ -5,7 +5,7 @@
  * Server-only client for the owner recovery-kit export route
  * (`/v1/owner/recovery-kit/export`, reference-implementation/server/routes/
  * owner-recovery-kit.ts). Same owner-bearer pattern as
- * `remote-access-client.ts`: mint the owner token from the dashboard's
+ * `owner-token.ts`: mint the owner token from the dashboard's
  * session cookie, then call the resource server directly.
  */
 
@@ -29,7 +29,7 @@ export async function exportRecoveryKitCode(): Promise<string> {
       method: "POST",
     })
   } catch (err) {
-    // biome-ignore lint/style/useErrorCause: matches remote-access-client.ts precedent.
+    // biome-ignore lint/style/useErrorCause: matches the shared owner client.
     throw new ReferenceServerUnreachableError(`Cannot reach resource server at ${getRsInternalUrl()}`, err)
   }
   if (!response.ok) {

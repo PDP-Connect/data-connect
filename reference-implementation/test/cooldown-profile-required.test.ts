@@ -38,7 +38,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import {
   assertCooldownProfile,
   computeConnectionSourcePressureCooldown,
@@ -55,7 +55,7 @@ const TOP_LEVEL_REGEX_3 = /\bcomputeConnectionSourcePressureCooldown\b/;
 const TOP_LEVEL_REGEX_4 = /\.(ts|js)$/;
 
 function loadRawManifest(name: string): Record<string, unknown> {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }

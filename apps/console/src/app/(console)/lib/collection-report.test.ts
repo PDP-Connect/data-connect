@@ -88,6 +88,21 @@ test("a duplicate stream name keeps the first entry", () => {
   assert.equal(byStream.get("items")?.collected, 5);
 });
 
+test("collectionReportHasOpenGaps treats a connector-reported stream as reported, not open", () => {
+  const reported = entry({
+    coverage_condition: "unknown",
+    coverage_reported_collected: true,
+    forward_disposition: "complete",
+    stream: "items",
+  });
+  assert.equal(collectionReportHasOpenGaps([reported]), false);
+  assert.equal(collectionReportHasOpenGaps([{ ...reported, pending_detail_gaps: 1 }]), true);
+  assert.equal(collectionReportHasOpenGaps([{ ...reported, coverage_reported_collected: false }]), true);
+  const facts = formatStreamCollectionFacts(reported);
+  assert.equal(facts.coverage.label, "Coverage · reported collected");
+  assert.equal(facts.coverage.tone, "neutral");
+});
+
 test("collectionReportHasOpenGaps distinguishes clean completion from unresolved coverage", () => {
   assert.equal(
     collectionReportHasOpenGaps([

@@ -2,7 +2,7 @@
 
 ## Source
 
-- `docs/260204-auth-page-react-spec.md`
+- a source doc since removed from the tree (see git history)
 
 ## Goals
 

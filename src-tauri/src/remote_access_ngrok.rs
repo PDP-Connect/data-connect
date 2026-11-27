@@ -99,8 +99,8 @@ impl NgrokTunnel {
 /// a dedicated background thread, independent of the thread that started the
 /// tunnel or the thread that later stops it.
 ///
-/// Why this exists -- confirmed from the ngrok crate's own source
-/// (`~/.tmp/ngrok-rust-src/ngrok/src/forwarder.rs`, `forward()`):
+/// Why this exists -- confirmed from the upstream ngrok crate source
+/// (`src/forwarder.rs`, `forward()`):
 /// `ForwarderBuilder::listen_and_forward()` (used by `listen_and_forward`
 /// below) calls `tunnel.listen()` to bind the endpoint -- which is what
 /// completes and lets this adapter log "ngrok tunnel is up" -- and THEN
@@ -973,8 +973,8 @@ mod tests {
     /// Confirmed live, 2026-09-19: "ngrok tunnel is up" logged successfully,
     /// then curl of that exact URL returned ERR_NGROK_3200 (endpoint
     /// offline) seconds later with no stop/error/restart logged in between.
-    /// Traced to the ngrok crate's own `forward()` (`~/.tmp/ngrok-rust-src/
-    /// ngrok/src/forwarder.rs`): it `tokio::spawn`s the actual forwarding
+    /// Traced to the upstream ngrok crate's `forward()` in `src/forwarder.rs`:
+    /// it `tokio::spawn`s the actual forwarding
     /// task onto whichever runtime is current, but this adapter's
     /// `start_on_runtime` only drove its `current_thread` runtime for the
     /// single `block_on` call that bound the tunnel -- once that call

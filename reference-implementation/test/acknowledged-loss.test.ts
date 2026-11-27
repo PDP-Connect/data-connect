@@ -36,14 +36,14 @@ const RECOVERY_PROMISE_RE = /next run|expected to fill|will be collected/i;
 
 const HEB_PURGE: AcknowledgedLossRecord = {
   acknowledgedAt: "2026-08-21T00:00:00.000Z",
-  acknowledgedBy: "Tim Nunamaker",
+  acknowledgedBy: "Jane Doe",
   cause: "provider_deleted_upstream",
   scope: "total",
 };
 
 const GROUPME_CONTRADICTORY: AcknowledgedLossRecord = {
   acknowledgedAt: "2026-08-21T00:00:00.000Z",
-  acknowledgedBy: "Tim Nunamaker",
+  acknowledgedBy: "Jane Doe",
   cause: "provider_data_contradictory",
   scope: "partial",
   streams: ["group_messages"],
@@ -204,7 +204,7 @@ test("acknowledged-loss: owner detail carries the durable structured record, not
     note: "Provider support confirmed the deletion.",
   });
   assert.equal(verdict.detail.acknowledged_loss?.cause, "provider_deleted_upstream");
-  assert.equal(verdict.detail.acknowledged_loss?.acknowledgedBy, "Tim Nunamaker");
+  assert.equal(verdict.detail.acknowledged_loss?.acknowledgedBy, "Jane Doe");
   assert.equal(verdict.detail.acknowledged_loss?.acknowledgedAt, "2026-08-21T00:00:00.000Z");
 });
 

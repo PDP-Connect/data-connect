@@ -42,7 +42,7 @@ function entry(overrides: Partial<ConnectorCatalogEntry>): ConnectorCatalogEntry
     disposition: "static_secret_connect",
     externalDocs: [],
     icon: null,
-    isKnownScaffold: false,
+    readiness: null,
     listingNote: null,
     modality: "api_network",
     nextStepKind: "capture_static_secret",
@@ -96,7 +96,7 @@ test("every setup action href resolves to a console page", () => {
   const cases: Partial<ConnectorCatalogEntry>[] = [
     { disposition: "static_secret_connect" },
     { disposition: "static_secret_experimental", supportState: "experimental" },
-    { disposition: "local_collector_enroll", enrollmentKey: "claude_code", setupModality: "local_collector" },
+    { disposition: "local_collector_enroll", enrollmentKey: "claude-code", setupModality: "local_collector" },
     { disposition: "manual_upload_connect", setupModality: "manual_or_upload" },
     { disposition: "browser_collector_manual", enrollmentKey: "reddit", modality: "browser_bound", setupModality: "browser_bound" },
     { disposition: "provider_auth_connect", setupModality: "provider_authorization" },

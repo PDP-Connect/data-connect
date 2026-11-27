@@ -159,7 +159,7 @@ function FailureCardPanel({ card, connectorIcons }: { card: FailureCard; connect
     <section className="rr-fix" data-cta={summary.cta} data-source-work={sourceWorkGroup}>
       <div className="rr-fix__body">
         <h3 className="rr-fix__title">
-          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[card.connectorId]} name={card.name} />
+          <ConnectorMark spacing="after" connectorId={card.connectorId} icon={connectorIcons[card.connectorId]} name={card.name} />
           {card.name} — {summary.triggerLabel}
         </h3>
         <p className="rr-fix__expl">{summary.prose}</p>
@@ -211,7 +211,7 @@ function PendingSetupCardPanel({ card, connectorIcons }: { card: PendingSetupCar
     <section className="rr-fix" data-source-work="needsOwner" data-testid="syncs-pending-setup-card">
       <div className="rr-fix__body">
         <h3 className="rr-fix__title">
-          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[card.connectorId]} name={card.name} />
+          <ConnectorMark spacing="after" connectorId={card.connectorId} icon={connectorIcons[card.connectorId]} name={card.name} />
           {card.name} — {card.statusLabel}
         </h3>
         <p className="rr-fix__expl">{card.what}</p>
@@ -299,7 +299,7 @@ function DuplicateSyncGroupPanel({ group, connectorIcons }: { group: DuplicateSy
     <aside className="rr-sync-duplicates" data-testid="syncs-duplicate-group">
       <span className="rr-sync-duplicates__eyebrow">Several sources need labels</span>
       <p className="rr-sync-duplicates__head">
-        <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.kind} />
+        <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.kind} />
         {group.total.toLocaleString()} unnamed {group.kind} sources are collapsed in this overview.
       </p>
       <p className="rr-sync-duplicates__note">
@@ -338,7 +338,14 @@ function RecentSyncRow({ connectorIcons, entry }: { connectorIcons: ConnectorIco
     <Link className="pdpp-table__row rr-recent-row" href={entry.href} prefetch={false}>
       <TableCell className="rr-recent-row__name">
         <span className="rr-recent-row__connection">
-          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={entry.connectorId ? connectorIcons[entry.connectorId] : null} name={entry.connectionName} />
+          {entry.connectorId ? (
+            <ConnectorMark
+              spacing="after"
+              connectorId={entry.connectorId}
+              icon={connectorIcons[entry.connectorId]}
+              name={entry.connectionName}
+            />
+          ) : null}
           {entry.connectionName}
         </span>
         <span className="rr-recent-row__run">{entry.runId}</span>
@@ -676,7 +683,7 @@ function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIc
       <div className="rr-sync-group__head">
         <span aria-hidden className={["rr-sync-group__dot", healthy ? "is-ok" : "is-fail"].join(" ")} />
         <span className="rr-sync-group__name">
-          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.name} />
+          <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.name} />
           {group.name}
         </span>
         <span className="rr-sync-group__cin">{group.connectionId}</span>

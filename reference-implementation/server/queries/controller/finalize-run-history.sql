@@ -12,6 +12,8 @@
 -- `WHERE run_id = ? AND status = 'running'` could finalize a DIFFERENT
 -- connection's still-running row that happens to share this run_id. See
 -- openspec/changes/generalize-run-history-write-authority.
+-- `actor_type` is the terminal event's actor_type: the run's provenance, read
+-- by the coverage selector (server/ref-control.ts coverageClassifyingRun).
 UPDATE run_history
 SET status = ?,
     completed_at = ?,
@@ -19,7 +21,9 @@ SET status = ?,
     connector_error_json = ?,
     failure_reason = ?,
     terminal_reason = ?,
-    facts_json = ?
+    facts_json = ?,
+    actor_type = ?,
+    scheduler_managed = CASE WHEN ? = 'local_device' THEN 0 ELSE scheduler_managed END
 WHERE run_id = ?
   AND connector_instance_id = ?
   AND status = 'running'

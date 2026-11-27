@@ -43,10 +43,10 @@ test("sanitizeDeviceExporterDiagnostic redacts sensitive keys at every depth", (
 
 test("sanitizeDeviceExporterDiagnostic redacts home/secret paths in strings", () => {
   assert.equal(
-    sanitizeDeviceExporterDiagnostic("failed reading /home/tim/.ssh/id_rsa now"),
+    sanitizeDeviceExporterDiagnostic("failed reading /home/owner/.ssh/id_rsa now"),
     "failed reading [REDACTED_PATH] now"
   );
-  assert.equal(sanitizeDeviceExporterDiagnostic("open /home/tim/logs/app.log failed"), "open [REDACTED_PATH] failed");
+  assert.equal(sanitizeDeviceExporterDiagnostic("open /home/owner/logs/app.log failed"), "open [REDACTED_PATH] failed");
 });
 
 test("sanitizeDeviceExporterDiagnostic passes scalars through and maps null", () => {

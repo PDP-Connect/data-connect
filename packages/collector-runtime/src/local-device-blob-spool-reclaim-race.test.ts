@@ -93,7 +93,7 @@ function makeHarness(): Harness {
 
 function capture(h: Harness, body: Buffer, recordKey: string) {
   return captureBlobArtifact({
-    connectorId: "claude_code",
+    connectorId: "claude-code",
     content: [body],
     mimeType: "text/plain",
     outbox: h.outbox,
@@ -162,7 +162,7 @@ describe("spool reclamation is disabled because it races capture", () => {
     const delivered = await drainCollectorOutbox({
       blobUpload: acceptUpload,
       client: inertClient,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,
@@ -222,7 +222,7 @@ describe("spool reclamation is disabled because it races capture", () => {
     const delivered = await drainCollectorOutbox({
       blobUpload: acceptUpload,
       client: inertClient,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,
@@ -244,7 +244,7 @@ describe("spool reclamation is disabled because it races capture", () => {
         drainCollectorOutbox({
           blobUpload: () => Promise.reject(new Error("network down")),
           client: inertClient,
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           holderId: "holder-1",
           outbox: h.outbox,
           policy,
@@ -272,7 +272,7 @@ describe("spool reclamation is disabled because it races capture", () => {
     const result = await drainCollectorOutbox({
       blobUpload: acceptUpload,
       client: inertClient,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       holderId: "holder-1",
       outbox: h.outbox,
       policy,
@@ -311,7 +311,7 @@ describe("spool reference authority", () => {
     // The shape `resolveCollectorQueuePath` produces: one directory, one file
     // per connection, and a spool beside them serving all of them.
     const dir = "/state/pdpp/collectors";
-    const sharing = [`${dir}/claude_code.src-1.sqlite`, `${dir}/claude_code.src-2.sqlite`];
+    const sharing = [`${dir}/claude-code.src-1.sqlite`, `${dir}/claude-code.src-2.sqlite`];
 
     assert.throws(
       () =>
@@ -326,7 +326,7 @@ describe("spool reference authority", () => {
 
   it("accepts a reference set covering every queue that shares the spool", () => {
     const dir = "/state/pdpp/collectors";
-    const sharing = [`${dir}/claude_code.src-1.sqlite`, `${dir}/claude_code.src-2.sqlite`];
+    const sharing = [`${dir}/claude-code.src-1.sqlite`, `${dir}/claude-code.src-2.sqlite`];
 
     assert.doesNotThrow(() =>
       assertSpoolReferenceAuthorityIsComplete({

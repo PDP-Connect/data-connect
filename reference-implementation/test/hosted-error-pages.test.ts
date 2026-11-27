@@ -37,7 +37,7 @@ const ui: ConsentUiRenderer = {
   renderSurface: ({ children }) => `<section>${children}</section>`,
 };
 
-function render(code: string, description = "", providerName = "Tim's Data Server"): string {
+function render(code: string, description = "", providerName = "Alex's Data Server"): string {
   return renderHostedErrorPage({ code, description, providerName, ui });
 }
 
@@ -98,8 +98,8 @@ test("the page states that nothing was shared", () => {
 });
 
 test("the error page carries the instance brand, not the protocol's", () => {
-  const html = render("server_error", "", "Tim's Data Server");
-  assert.match(html, /Tim&#39;s Data Server/, "the instance names the page");
+  const html = render("server_error", "", "Alex's Data Server");
+  assert.match(html, /Alex&#39;s Data Server/, "the instance names the page");
   assert.equal(/<h1[^>]*>PDPP/.test(html), false, "PDPP does not headline the owner's error page");
 });
 

@@ -4,9 +4,9 @@
 /**
  * Shared local-media blob hydration: bounded local file read, content
  * hashing, MIME-by-extension guessing, and blob upload via the runtime's
- * reference-blob-uploader — extracted from google_takeout's photos stream so
- * every filesystem-bound connector emitting media bytes (google_takeout,
- * apple_photos, and future ones) hydrates through one code path rather than
+ * reference-blob-uploader — extracted from google-takeout's photos stream so
+ * every filesystem-bound connector emitting media bytes (google-takeout,
+ * apple-photos, and future ones) hydrates through one code path rather than
  * re-implementing the same read/hash/upload/error-sanitize logic per
  * connector. Hydration status vocabulary and size-cap semantics originate
  * here; connector-specific record shape stays out of this module.

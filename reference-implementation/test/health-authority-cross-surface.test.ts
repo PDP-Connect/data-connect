@@ -92,7 +92,7 @@ function fleetSummary(
   ownerState: OwnerState
 ): FleetSummary {
   return {
-    connection_health: snapshot,
+    connection_health: { ...snapshot, coverage_as_of: null },
     connection_id: id,
     connector_id: "test-connector",
     connector_instance_id: id,

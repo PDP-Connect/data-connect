@@ -6,12 +6,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import { __setConnectorInstanceWritePhaseHookForTest } from "../server/connector-instance-write-coordinator.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { mountRefRunCancel, type RunCancelResult } from "../server/routes/run-cancel.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -121,30 +121,33 @@ async function issueOwnerToken(asUrl: string, subjectId: string): Promise<string
 }
 
 function manifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    connector_key: connectorId,
-    display_name: "Hosted Rejection Coordinator Test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            value: { type: "string" },
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      connector_key: connectorId,
+      display_name: "Hosted Rejection Coordinator Test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
           },
-          required: ["id"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 async function withHarness(

@@ -59,7 +59,7 @@ export function expandSourceRoot(rawRoot: string): string {
  * otherwise sail through as a syntactically valid request that the
  * connector later matches against zero real directories, exactly the
  * silent-zero-coverage failure mode `source_roots` already had to be fixed
- * for once (see `claude_code`'s `projectDirMatchesSourceRoots`). Failing
+ * for once (see `claude-code`'s `projectDirMatchesSourceRoots`). Failing
  * locally, honestly, and before any network call is cheaper and clearer
  * than failing after a round trip.
  *

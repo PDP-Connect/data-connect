@@ -964,7 +964,7 @@ test("SQLite ConnectorInstanceStore.upsert migrates a legacy same-binding row in
     getDb()
       .prepare(
         `INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at)
-         VALUES(?, ?, 'codex', 'vivid-fish', 'active', 'local_device', ?, ?, ?, ?, NULL)`
+         VALUES(?, ?, 'codex', 'example-host', 'active', 'local_device', ?, ?, ?, ?, NULL)`
       )
       .run(
         legacyConnectorInstanceId,
@@ -973,7 +973,7 @@ test("SQLite ConnectorInstanceStore.upsert migrates a legacy same-binding row in
         JSON.stringify({
           device_id: "dexp_legacy",
           kind: "local_device",
-          local_binding_name: "vivid-fish",
+          local_binding_name: "example-host",
           source_instance_id: "dsrc_legacy",
         }),
         NOW,
@@ -988,9 +988,9 @@ test("SQLite ConnectorInstanceStore.upsert migrates a legacy same-binding row in
       connectorId: "codex",
       connectorInstanceId: legacyConnectorInstanceId,
       createdAt: NOW,
-      displayName: "vivid-fish",
+      displayName: "example-host",
       ownerSubjectId: "owner_1",
-      sourceBinding: { kind: "local_device", local_binding_name: "vivid-fish" },
+      sourceBinding: { kind: "local_device", local_binding_name: "example-host" },
       sourceBindingKey: "stable-key-kind-and-binding-name-only",
       sourceKind: "local_device",
       status: "active",
@@ -1008,7 +1008,7 @@ test("SQLite ConnectorInstanceStore.upsert migrates a legacy same-binding row in
       "stable-key-kind-and-binding-name-only",
       "the stale key must be migrated to the current stable key"
     );
-    assert.deepEqual(resolved.sourceBinding, { kind: "local_device", local_binding_name: "vivid-fish" });
+    assert.deepEqual(resolved.sourceBinding, { kind: "local_device", local_binding_name: "example-host" });
 
     const rows = getDb()
       .prepare(
@@ -1039,9 +1039,9 @@ test("SQLite ConnectorInstanceStore.upsert migrates a legacy same-binding row in
           connectorId: "codex",
           connectorInstanceId: unrelatedId,
           createdAt: NOW,
-          displayName: "vivid-fish-2",
+          displayName: "example-host-2",
           ownerSubjectId: "owner_1",
-          sourceBinding: { kind: "local_device", local_binding_name: "vivid-fish-2" },
+          sourceBinding: { kind: "local_device", local_binding_name: "example-host-2" },
           sourceBindingKey: "a-second-stable-key",
           sourceKind: "local_device",
           status: "active",

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
@@ -17,34 +18,38 @@ import {
   listDirtySearchIndexScopes,
   markSearchIndexDirtySqlite,
 } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function manifest(connectorId: string, semantic = false) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: "https://sources.example/" + connectorId,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        query: {
-          search: semantic
-            ? { lexical_fields: ["subject"], semantic_fields: ["subject"] }
-            : { lexical_fields: ["subject"] },
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: "https://sources.example/" + connectorId,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          query: {
+            search: semantic
+              ? { lexical_fields: ["subject"], semantic_fields: ["subject"] }
+              : { lexical_fields: ["subject"] },
+          },
+          schema: {
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        schema: {
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-          type: "object",
-        },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 async function seed(connectorId: string, instance: string, key = "k1") {
@@ -56,7 +61,7 @@ async function seed(connectorId: string, instance: string, key = "k1") {
       key,
       stream: "items",
     },
-    { deferIndexes: true },
+    { deferIndexes: true }
   );
   assert.equal(outcome.accepted, true);
 }
@@ -64,13 +69,13 @@ async function seed(connectorId: string, instance: string, key = "k1") {
 function mark(connectorId: string, instance: string) {
   markSearchIndexDirtySqlite(
     { connectorId, connectorInstanceId: instance, stream: "items" },
-    "2026-07-16T00:00:00.000Z",
+    "2026-07-16T00:00:00.000Z"
   );
 }
 
 async function scope(instance: string) {
   const result = (await listDirtySearchIndexScopes(100)).find(
-    (s) => s.connectorInstanceId === instance && s.stream === "items",
+    (s) => s.connectorInstanceId === instance && s.stream === "items"
   );
   assert.ok(result, "fixture must have an eligible dirty scope");
   return result;
@@ -120,7 +125,7 @@ test("G2: backend-unavailable vector-only cleanup debt cannot be acknowledged", 
         connectorInstanceId: instance,
         stream: "items",
       }),
-      true,
+      true
     );
     assert.equal(vectors().length, 1, "the unavailable pass must not claim absent vectors");
     configureSemanticBackend(backend);
@@ -131,7 +136,7 @@ test("G2: backend-unavailable vector-only cleanup debt cannot be acknowledged", 
         connectorInstanceId: instance,
         stream: "items",
       }),
-      false,
+      false
     );
   } finally {
     reset();

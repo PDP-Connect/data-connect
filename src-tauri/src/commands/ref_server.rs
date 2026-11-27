@@ -686,6 +686,19 @@ pub(crate) async fn login_reference_server_with_password_and_host(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    login_reference_server_with_client(&client, origin, password, trusted_host, session_label).await
+}
+
+/// `POST /owner/login` on the caller's `client`, which must not follow
+/// redirects (see `login_reference_server_with_password_and_host`). Lets a
+/// caller bound the request with its own timeouts.
+pub(crate) async fn login_reference_server_with_client(
+    client: &reqwest::Client,
+    origin: String,
+    password: &str,
+    trusted_host: Option<&str>,
+    session_label: Option<&str>,
+) -> Result<ReferenceServerLoginResult, String> {
     let login_url = format!("{}/owner/login", origin.trim_end_matches('/'));
     let mut request = client
         .post(&login_url)

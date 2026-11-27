@@ -33,6 +33,7 @@ import {
   admitOwnerRunConnection,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 /**
  * The two stub-RS retry tests below drive `runConnector` against a bare
@@ -158,32 +159,35 @@ function fakeAdmitRunConnection(
 
 /** Gmail-shaped: `messages` (self-mapped) with `message_bodies` a state_stream child. */
 function manifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "checkpoint_window",
-        name: "message_bodies",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-        state_stream: "messages",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "message_bodies",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "messages",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 /**
@@ -194,36 +198,39 @@ function manifest(connectorId: string) {
  * key every other test in this file uses.
  */
 function compoundKeyManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "checkpoint_window",
-        name: "message_bodies",
-        primary_key: ["part_a", "part_b"],
-        schema: {
-          properties: { part_a: { type: "string" }, part_b: { type: "string" } },
-          required: ["part_a", "part_b"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-        state_stream: "messages",
-      },
-    ],
-    version: "0.1.0",
-  };
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "message_bodies",
+          primary_key: ["part_a", "part_b"],
+          schema: {
+            properties: { part_a: { type: "string" }, part_b: { type: "string" } },
+            required: ["part_a", "part_b"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "messages",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
@@ -894,7 +901,11 @@ test("STREAM_EVIDENCE: a transient-manifest-drift-skipped stream's dropped batch
   try {
     const m = manifest("stream-evidence-drift-skip");
     await registerManifest(asUrl, m);
-    const driftedManifest = { ...m, version: "drifted", streams: m.streams.filter((stream) => stream.name !== "message_bodies") };
+    const driftedManifest = {
+      ...m,
+      version: "drifted",
+      streams: m.streams.filter((stream) => stream.name !== "message_bodies"),
+    };
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-stream-evidence-drift-skip-"));
     const connectorPath = writeConnectorStub(
       tmpDir,
@@ -1771,32 +1782,35 @@ const EVICTION_REGRESSION_STREAM_COUNT = 50;
  * children of `messages`, named `body_0`..`body_{N-1}`.
  */
 function manyStateStreamChildrenManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      ...Array.from({ length: EVICTION_REGRESSION_STREAM_COUNT }, (_, i) => ({
-        coverage_strategy: "checkpoint_window",
-        name: `body_${i}`,
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-        state_stream: "messages",
-      })),
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        ...Array.from({ length: EVICTION_REGRESSION_STREAM_COUNT }, (_, i) => ({
+          coverage_strategy: "checkpoint_window",
+          name: `body_${i}`,
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "messages",
+        })),
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 test("STREAM_EVIDENCE: the cross-invocation run_id registry never evicts — the FIRST of many entries is still rejected as a duplicate after many more are inserted", async () => {
@@ -2363,41 +2377,44 @@ test("mutation control: a DETAIL_GAP_RECOVERED for a DIFFERENT stream after STRE
   // not per run.
   const { server, asUrl, rsUrl, ownerToken } = await setupServer();
   try {
-    const m = {
-      capabilities: { human_interaction: [] },
-      connector_id: "stream-evidence-recovery-different-stream-ok",
-      display_name: "stream-evidence-recovery-different-stream-ok",
-      manifest_uri: "https://sources.example/stream-evidence-recovery-different-stream-ok",
-      protocol_version: "0.1.0",
-      streams: [
-        {
-          name: "messages",
-          primary_key: ["id"],
-          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-          selection: { fields: true, resources: true },
-          semantics: "mutable_state",
-        },
-        {
-          coverage_strategy: "checkpoint_window",
-          name: "message_bodies",
-          primary_key: ["id"],
-          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-          selection: { fields: true, resources: true },
-          semantics: "append_only",
-          state_stream: "messages",
-        },
-        {
-          coverage_strategy: "checkpoint_window",
-          name: "message_attachments",
-          primary_key: ["id"],
-          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-          selection: { fields: true, resources: true },
-          semantics: "append_only",
-          state_stream: "messages",
-        },
-      ],
-      version: "0.1.0",
-    };
+    const m = withFixtureSourceDeclaration(
+      {
+        capabilities: { human_interaction: [] },
+        connector_id: "stream-evidence-recovery-different-stream-ok",
+        display_name: "stream-evidence-recovery-different-stream-ok",
+        manifest_uri: "https://sources.example/stream-evidence-recovery-different-stream-ok",
+        protocol_version: "0.1.0",
+        streams: [
+          {
+            name: "messages",
+            primary_key: ["id"],
+            schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
+          },
+          {
+            coverage_strategy: "checkpoint_window",
+            name: "message_bodies",
+            primary_key: ["id"],
+            schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+            selection: { fields: true, resources: true },
+            semantics: "append_only",
+            state_stream: "messages",
+          },
+          {
+            coverage_strategy: "checkpoint_window",
+            name: "message_attachments",
+            primary_key: ["id"],
+            schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+            selection: { fields: true, resources: true },
+            semantics: "append_only",
+            state_stream: "messages",
+          },
+        ],
+        version: "0.1.0",
+      },
+      { sourceId: "https://sources.example/stream-evidence-recovery-different-stream-ok" }
+    );
     await registerManifest(asUrl, m as unknown as ReturnType<typeof manifest>);
     const store = getTestDetailGapStore();
     const seeded = await store.upsertPendingGap({

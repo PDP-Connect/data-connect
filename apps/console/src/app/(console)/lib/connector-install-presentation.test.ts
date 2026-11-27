@@ -35,7 +35,7 @@ function entry(
     displayName: connectorKey,
     disposition: "static_secret_connect",
     externalDocs: [],
-    isKnownScaffold: false,
+    readiness: null,
     listingNote: null,
     modality: "api_network",
     nextStepKind: "capture_static_secret",

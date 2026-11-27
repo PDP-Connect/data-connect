@@ -28,17 +28,26 @@
 import { createHash } from "node:crypto";
 import type { CollectionScope } from "@pdpp/reference-contract/evidence";
 import {
+  handleLocalDeviceRunStart,
   handleLocalDeviceTerminalCollection,
   handleLocalDeviceTerminalRunCommit,
+  type RegisteredCollectionProfileRelease,
 } from "../../operations/local-device-terminal-collection.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { type DeviceAttemptContext, fingerprintDeviceAttemptManifest } from "../device-ingest-attempt-context.ts";
 import { parseDeviceScopeRequest, resolveEnrollmentScope } from "../enrollment-scope-narrowing.ts";
 import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
+import type { PinnedLocalCollectorManifestResult } from "../local-collector-profiles.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
-import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
+import {
+  type CollectionRevisionEventInput,
+  isCollectionRevisionUnavailable,
+  issueCollectionRunSequence,
+  recordCollectionRevisionEvent,
+} from "../stores/collection-revision-store.ts";
+import { commitTerminalRun, findTerminalRunReceipt } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
   type EnrolledSourceKind,
@@ -477,18 +486,21 @@ interface ConnectorDetailGapStore {
   }) => Promise<GapRow[]>;
   listPendingGapsForConnector?: (connectorId: string, options: { limit: number }) => Promise<GapRow[]>;
   markGapStatus: (gapId: string, status: string, options: { runId?: string }) => Promise<GapRow>;
-  upsertPendingGap: (params: {
-    connectorId: string;
-    connectorInstanceId: string;
-    stream: string;
-    source: unknown;
-    detailLocator: unknown;
-    reason: string;
-    lastError: unknown;
-    discoveredRunId?: string;
-    lastRunId?: string;
-    retryable?: boolean;
-  }) => Promise<GapRow>;
+  upsertPendingGap: (
+    params: {
+      connectorId: string;
+      connectorInstanceId: string;
+      stream: string;
+      source: unknown;
+      detailLocator: unknown;
+      reason: string;
+      lastError: unknown;
+      discoveredRunId?: string;
+      lastRunId?: string;
+      retryable?: boolean;
+    },
+    options?: { readonly collectionRevision?: CollectionRevisionEventInput }
+  ) => Promise<GapRow>;
 }
 
 export interface MountRefDeviceExportersContext {
@@ -521,7 +533,11 @@ export interface MountRefDeviceExportersContext {
   enqueueDeviceIndexMaintenance: (connectorInstanceId: string, operation: () => Promise<void>) => Promise<void>;
 
   // Catalog entry registration at enroll time
-  ensureReferenceConnectorCatalogEntry: (connectorId: string, displayName: string | null) => Promise<void>;
+  ensureReferenceConnectorCatalogEntry: (
+    connectorId: string,
+    displayName: string | null,
+    pin: PinnedLocalCollectorManifestResult
+  ) => Promise<void>;
   generateReferenceSecret: (prefix: string, bytes: number) => string;
 
   // ID generation
@@ -530,6 +546,11 @@ export interface MountRefDeviceExportersContext {
   // connector. Used to derive the enrolled source kind from the manifest
   // bindings. Async to match the host's `getConnectorManifest`.
   getConnectorManifest: (connectorId: string) => Promise<SourceKindManifestLike | null> | SourceKindManifestLike | null;
+  getExpectedArtifactDigest?: (connectorId: string) => string | null;
+  getRegisteredCollectionProfileRelease?: (
+    connectorId: string,
+    connectorInstanceId: string
+  ) => RegisteredCollectionProfileRelease | null;
   getDefaultConnectorDetailGapStore: () => ConnectorDetailGapStore;
   getOwnerSubjectId: (req: unknown) => string;
   getSemanticCapabilityIdentity: () => string;
@@ -541,10 +562,6 @@ export interface MountRefDeviceExportersContext {
   ingestRecord: (storageTarget: StorageTarget, record: unknown, options?: unknown) => Promise<unknown>;
   isDeviceSemanticAttemptSupported: () => boolean;
 
-  // Safe local-collector coverage read (Section 5.3). Returns only the
-  // `{ store, stream, status }` triple per store — never paths, payloads,
-  // the coverage `reason` text, or secrets.
-  listLocalCoverageDiagnostics: (storageTarget: StorageTarget) => Promise<LocalCoverageRow[]>;
   maintainRecordIndexes: (
     storageTarget: StorageTarget,
     record: unknown,
@@ -570,7 +587,13 @@ export interface MountRefDeviceExportersContext {
   // `null` for connectors not in the local-collector catalog. Mirrors the
   // intent route so the enroll path classifies a local-collector connector even
   // before any registered connector manifest exists.
-  readReferenceLocalConnectorCatalogManifest: (connectorId: string) => SourceKindManifestLike | null;
+  readReferenceLocalConnectorCatalogManifestResult: (connectorId: string) => PinnedLocalCollectorManifestResult;
+  logInvalidPinnedLocalConnectorProfile: (diagnostic: {
+    connectorKey: string;
+    expectedDigest: string | null;
+    observedDigest: string | null;
+    reasonCategory: string;
+  }) => void;
   requireDeviceExporterCredential: MiddlewareHandler;
   // Auth middleware
   requireOwnerSession: MiddlewareHandler;
@@ -630,6 +653,17 @@ function deviceExporterSourceBindingIdentity(
   return { kind, local_binding_name: localBindingName };
 }
 
+// One rule for every enrollment write (mint, redeem, rotate): none happens
+// while the connector's pinned local profile is invalid. Each request reads the
+// pin once and passes that result to every check, so no write sees a state a
+// concurrent reinstall changed mid-request. A refused rotation leaves the
+// device's current credential working.
+function assertPinUsable(pin: PinnedLocalCollectorManifestResult): void {
+  if (pin.kind === "invalid_pin") {
+    throw Object.assign(new Error(pin.reason), { code: "local_collector_profile_repair_required" });
+  }
+}
+
 // Resolve the manifest for a connector being enrolled, then derive the enrolled
 // source kind from its bindings. Resolves the local-collector catalog first (so
 // claude-code/codex classify before any registered manifest exists), then falls
@@ -641,10 +675,11 @@ function deviceExporterSourceBindingIdentity(
 async function resolveEnrollmentSourceKind(
   ctx: MountRefDeviceExportersContext,
   connectorKey: string,
+  localResult: PinnedLocalCollectorManifestResult,
   requestedSourceKind?: string | null
 ): Promise<EnrolledSourceKind> {
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  const manifest = localManifest ?? (await ctx.getConnectorManifest(connectorKey));
+  assertPinUsable(localResult);
+  const manifest = localResult.kind === "verified" ? localResult.manifest : await ctx.getConnectorManifest(connectorKey);
   return resolveEnrolledSourceKind({ connectorId: connectorKey, manifest, requestedSourceKind });
 }
 
@@ -678,7 +713,8 @@ async function handleIdempotentReEnroll(
   res: RouteResponse,
   enrollment: ReEnrollableEnrollment,
   boundDeviceId: string | null,
-  now: Date
+  now: Date,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<"handled" | "not_handled"> {
   if (!boundDeviceId) {
     // No device bound yet for this code: not a recoverable retry target.
@@ -707,6 +743,9 @@ async function handleIdempotentReEnroll(
     return "not_handled";
   }
 
+  // Only a proven same-binding retry reaches the credential write, so any
+  // other replay keeps its existing response in a repair state.
+  assertPinUsable(pin);
   const credentialId = ctx.generateSpineId("dcred");
   const deviceToken = ctx.generateReferenceSecret("ldt", 32);
   await ctx.deviceExporterStore.rotateDeviceCredential({
@@ -767,6 +806,10 @@ async function handleIdempotentReEnroll(
 // enroll path should not reach the writer fence at all; this is defense-in-depth.
 // See decouple-device-enrollment-from-ingest-writer-admission design D3.
 function respondEnrollError(ctx: MountRefDeviceExportersContext, res: RouteResponse, err: unknown): void {
+  if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+    ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+    return;
+  }
   if ((err as { code?: unknown } | null)?.code === "connector_instance_busy") {
     res.setHeader("Retry-After", "2");
     ctx.pdppError(
@@ -832,7 +875,8 @@ async function performFirstEnrollment(
   body: Record<string, unknown>,
   enrollment: ReEnrollableEnrollment,
   now: Date,
-  effectiveScope: CollectionScope | null
+  effectiveScope: CollectionScope | null,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<void> {
   const collectorProtocolVersion = ctx.readCollectorProtocolHeader(req.headers);
   const candidateDeviceId = ctx.generateSpineId("dexp");
@@ -863,7 +907,7 @@ async function performFirstEnrollment(
   // adopted by a browser-collector enrollment sharing the same
   // owner/connector/binding, since the identity decision would have no way
   // to distinguish them.
-  const sourceKind = await resolveEnrollmentSourceKind(ctx, enrollConnectorKey);
+  const sourceKind = await resolveEnrollmentSourceKind(ctx, enrollConnectorKey, pin);
 
   const resolved = await ctx.deviceExporterStore.resolveOrCreateEnrollmentDevice({
     candidateDeviceId,
@@ -881,7 +925,7 @@ async function performFirstEnrollment(
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const sourceInstanceId = resolved.sourceInstanceId;
 
-  await ctx.ensureReferenceConnectorCatalogEntry(enrollConnectorKey, enrollment.displayName || displayName);
+  await ctx.ensureReferenceConnectorCatalogEntry(enrollConnectorKey, enrollment.displayName || displayName, pin);
   const sourceBindingIdentity = deviceExporterSourceBindingIdentity(enrollment.localBindingId, sourceKind);
   const connectorInstance = await ctx.createRequestConnectorInstanceStore().upsertForEnrollment({
     connectorId: enrollConnectorKey,
@@ -1003,7 +1047,7 @@ async function performFirstEnrollment(
       ctx.hashDeviceSecret(requireNonEmptyString(body.enrollment_code, "enrollment_code"))
     );
     if (winningEnrollment?.deviceId === deviceId) {
-      const retry = await handleIdempotentReEnroll(ctx, res, enrollment, deviceId, now);
+      const retry = await handleIdempotentReEnroll(ctx, res, enrollment, deviceId, now, pin);
       if (retry === "handled") {
         return;
       }
@@ -1061,9 +1105,18 @@ async function resolveConnectorMaximumStalenessSeconds(
   connectorId: string
 ): Promise<number | null> {
   const connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
-  const localManifest = ctx.readReferenceLocalConnectorCatalogManifest(connectorKey);
-  if (localManifest) {
-    return extractManifestMaximumStalenessSeconds(localManifest);
+  const localResult = ctx.readReferenceLocalConnectorCatalogManifestResult(connectorKey);
+  if (localResult.kind === "verified") {
+    return extractManifestMaximumStalenessSeconds(localResult.manifest);
+  }
+  if (localResult.kind === "invalid_pin") {
+    ctx.logInvalidPinnedLocalConnectorProfile({
+      connectorKey,
+      expectedDigest: localResult.expectedDigest,
+      observedDigest: localResult.observedDigest,
+      reasonCategory: localResult.reasonCategory,
+    });
+    return null;
   }
   try {
     const manifest = await ctx.getConnectorManifest(connectorKey);
@@ -1358,6 +1411,18 @@ async function compileDeviceAttemptContext(
     throw attemptContextError("connector manifest is unavailable for device ingest");
   }
   const streams = attemptStreamFacts(rawStreams);
+  // Older signed profiles can still send this retired protocol stream beside
+  // data. Accept its old identity shape without treating it as coverage proof.
+  const retiredCoverageDiagnostic = !streams.coverage_diagnostics;
+  if (retiredCoverageDiagnostic) {
+    streams.coverage_diagnostics = {
+      consentTimeField: null,
+      cursorField: null,
+      lexicalFields: [],
+      primaryKey: ["id"],
+      semanticFields: [],
+    };
+  }
   validateAttemptRecords(records, streams);
   const requiresSemanticWork = records.some((record) => {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
@@ -1369,6 +1434,7 @@ async function compileDeviceAttemptContext(
   }
   return {
     manifestFingerprint: fingerprintDeviceAttemptManifest(rawManifest),
+    retiredCoverageDiagnostic,
     semanticCapabilityIdentity: ctx.getSemanticCapabilityIdentity(),
     streams,
   };
@@ -1509,67 +1575,6 @@ function deviceBatchIdentityMatches(
 type GapStatMap = Map<string, { pending: number; lastUpdatedAt: string | null; reasons: Set<string> }>;
 type OutcomeStatMap = Map<string, { accepted: number; rejected: number; lastIngestAt: string | null }>;
 
-/** Safe per-store coverage triple read from `coverage_diagnostics` records. */
-export interface LocalCoverageRow {
-  status: string;
-  store: string;
-  stream: string | null;
-}
-
-/**
- * Per-source-instance local-completeness projection surfaced in the
- * device-exporter diagnostics (Section 5.3). Carries only safe coverage
- * statuses and counts; never raw paths, payloads, reasons, or secrets.
- * `observed` is false when the instance has no coverage records yet (no run
- * has requested `coverage_diagnostics`), so absence reads as absence.
- */
-interface LocalCoverageProjection {
-  by_store: Record<string, string>;
-  counts_by_status: Record<string, number>;
-  fully_accounted: boolean;
-  observed: boolean;
-  store_count: number;
-  unaccounted_stores: string[];
-}
-
-const COVERAGE_STATUSES = [
-  "collected",
-  "inventory_only",
-  "excluded",
-  "deferred",
-  "missing",
-  "unsupported",
-  "unaccounted",
-] as const;
-
-function summarizeLocalCoverage(rows: readonly LocalCoverageRow[]): LocalCoverageProjection {
-  const countsByStatus: Record<string, number> = {};
-  for (const status of COVERAGE_STATUSES) {
-    countsByStatus[status] = 0;
-  }
-  const byStore: Record<string, string> = {};
-  const unaccountedStores: string[] = [];
-  for (const row of rows) {
-    const status = (COVERAGE_STATUSES as readonly string[]).includes(row.status) ? row.status : "unaccounted";
-    countsByStatus[status] = (countsByStatus[status] ?? 0) + 1;
-    byStore[row.store] = status;
-    if (status === "unaccounted") {
-      unaccountedStores.push(row.store);
-    }
-  }
-  return {
-    by_store: byStore,
-    counts_by_status: countsByStatus,
-    // `fully_accounted` requires actually observing coverage. An empty
-    // coverage set is "nothing seen", not "everything accounted for".
-    fully_accounted: rows.length > 0 && unaccountedStores.length === 0,
-    observed: rows.length > 0,
-    store_count: rows.length,
-    // biome-ignore lint/suspicious/useArraySortCompare: Input ordering is intentionally the runtime’s established default string order.
-    unaccounted_stores: unaccountedStores.sort(),
-  };
-}
-
 function accumulateGapRow(stats: GapStatMap, gap: GapRow): void {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (gap?.status !== "pending") {
@@ -1621,86 +1626,6 @@ async function aggregateLocalCollectorGapStats(
   return { stats, unreliableIds };
 }
 
-/**
- * Resolve the connector instance for a source instance using the same
- * binding fallback as the projection, so coverage attaches to exactly the
- * instance whose storage holds the records.
- */
-function resolveConnectorInstanceForSource(
-  ctx: MountRefDeviceExportersContext,
-  source: SourceInstanceRow,
-  devicesById: Map<string, DeviceRow>,
-  connectorInstancesById: Map<string, ConnectorInstanceRow>,
-  connectorInstancesByBinding: Map<string, ConnectorInstanceRow>
-): ConnectorInstanceRow | undefined {
-  if (source.connectorInstanceId) {
-    return connectorInstancesById.get(source.connectorInstanceId);
-  }
-  if (!devicesById.get(source.deviceId)) {
-    return;
-  }
-  const identityKey = ctx.makeConnectorInstanceSourceBindingKey(
-    deviceExporterSourceBindingIdentity(source.localBindingId)
-  );
-  return connectorInstancesByBinding.get(`${source.connectorId}\nlocal_device\n${identityKey}`);
-}
-
-/**
- * Read safe local coverage diagnostics once per distinct connector instance
- * referenced by the owner's source instances. Failures to read one
- * instance must not break the whole diagnostics response, so a read error
- * yields no coverage for that instance (observed=false) rather than
- * throwing.
- */
-async function aggregateLocalCoverage(
-  ctx: MountRefDeviceExportersContext,
-  sourceInstances: readonly SourceInstanceRow[],
-  maps: {
-    connectorInstancesById: Map<string, ConnectorInstanceRow>;
-    connectorInstancesByBinding: Map<string, ConnectorInstanceRow>;
-  }
-): Promise<Map<string, LocalCoverageProjection>> {
-  const devicesById = new Map<string, DeviceRow>();
-  // projectSourceInstance only checks for device presence via the same
-  // map; build a presence-only view from the source rows themselves.
-  for (const source of sourceInstances) {
-    if (!devicesById.has(source.deviceId)) {
-      devicesById.set(source.deviceId, { deviceId: source.deviceId } as DeviceRow);
-    }
-  }
-
-  const targets = new Map<string, { connectorId: string; connectorInstanceId: string }>();
-  for (const source of sourceInstances) {
-    const instance = resolveConnectorInstanceForSource(
-      ctx,
-      source,
-      devicesById,
-      maps.connectorInstancesById,
-      maps.connectorInstancesByBinding
-    );
-    if (instance?.connectorInstanceId && !targets.has(instance.connectorInstanceId)) {
-      targets.set(instance.connectorInstanceId, {
-        connectorId: source.connectorId,
-        connectorInstanceId: instance.connectorInstanceId,
-      });
-    }
-  }
-
-  const coverage = new Map<string, LocalCoverageProjection>();
-  for (const { connectorId, connectorInstanceId } of targets.values()) {
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const rows = await ctx.listLocalCoverageDiagnostics(
-        referenceLocalDeviceStorageTarget(ctx, connectorId, connectorInstanceId)
-      );
-      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows));
-    } catch {
-      // Leave unset → EMPTY_LOCAL_COVERAGE (observed=false) in projection.
-    }
-  }
-  return coverage;
-}
-
 function aggregateOutcomeStats(outcomes: BatchOutcomeRow[]): OutcomeStatMap {
   const map: OutcomeStatMap = new Map();
   for (const outcome of outcomes) {
@@ -1732,7 +1657,6 @@ function projectSourceInstance(
   outcomeStats: OutcomeStatMap,
   gapStats: GapStatMap,
   unreliableIds: Set<string>,
-  coverageByConnectorInstance: Map<string, LocalCoverageProjection>,
   now: number
 ): unknown {
   const stats = outcomeStats.get(source.sourceInstanceId) ?? { accepted: 0, lastIngestAt: null, rejected: 0 };
@@ -1778,10 +1702,6 @@ function projectSourceInstance(
     last_heartbeat_status: source.lastHeartbeatStatus ?? null,
     last_ingest_at: stats.lastIngestAt,
     local_binding_name: source.localBindingId,
-    local_collector_coverage:
-      (connectorInstance?.connectorInstanceId
-        ? coverageByConnectorInstance.get(connectorInstance.connectorInstanceId)
-        : null) ?? EMPTY_LOCAL_COVERAGE,
     local_collector_gaps: {
       last_updated_at: gap ? gap.lastUpdatedAt : null,
       pending_count: gap ? gap.pending : 0,
@@ -1796,23 +1716,6 @@ function projectSourceInstance(
     source_instance_id: source.sourceInstanceId,
   };
 }
-
-/**
- * Coverage projection for a source instance that has no coverage records
- * yet (or whose connector instance could not be resolved). `observed`
- * false is the honest "no completeness signal seen" state.
- */
-const EMPTY_LOCAL_COVERAGE: LocalCoverageProjection = Object.freeze({
-  by_store: Object.freeze({}) as Record<string, string>,
-  counts_by_status: Object.freeze(Object.fromEntries(COVERAGE_STATUSES.map((status) => [status, 0]))) as Record<
-    string,
-    number
-  >,
-  fully_accounted: false,
-  observed: false,
-  store_count: 0,
-  unaccounted_stores: Object.freeze([]) as unknown as string[],
-});
 
 function projectDeviceExporter(
   device: DeviceRow,
@@ -1882,10 +1785,6 @@ async function buildDeviceExporterDiagnostics(
   const { stats: gapStats, unreliableIds } = await aggregateLocalCollectorGapStats(ctx, connectorIds);
   const outcomeStats = aggregateOutcomeStats(outcomes);
   const stalenessWindowsByConnector = await resolveStalenessWindowsByConnector(ctx, connectorIds);
-  const coverageByConnectorInstance = await aggregateLocalCoverage(ctx, sourceInstances, {
-    connectorInstancesByBinding,
-    connectorInstancesById,
-  });
 
   const sourcesByDevice = new Map<string, unknown[]>();
   for (const source of sourceInstances) {
@@ -1898,7 +1797,6 @@ async function buildDeviceExporterDiagnostics(
       outcomeStats,
       gapStats,
       unreliableIds,
-      coverageByConnectorInstance,
       now
     );
     const list = sourcesByDevice.get(source.deviceId) ?? [];
@@ -2149,6 +2047,7 @@ export function mountRefDeviceExporterEnrollmentCodes(app: AppLike, ctx: MountRe
         await resolveEnrollmentSourceKind(
           ctx,
           enrollConnectorKey,
+          ctx.readReferenceLocalConnectorCatalogManifestResult(enrollConnectorKey),
           typeof body.source_kind === "string" ? body.source_kind : null
         );
         const now = new Date();
@@ -2207,6 +2106,10 @@ export function mountRefDeviceExporterEnrollmentCodes(app: AppLike, ctx: MountRe
           object: "device_exporter_enrollment_code",
         });
       } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === "local_collector_profile_repair_required") {
+          ctx.pdppError(res, 409, "local_collector_profile_repair_required", (err as Error).message, "connector_id");
+          return;
+        }
         ctx.handleError(res, err);
       }
     }
@@ -2233,12 +2136,13 @@ async function respondIfConsumedCodeReplay(
   ctx: MountRefDeviceExportersContext,
   res: RouteResponse,
   enrollment: ReEnrollableEnrollment,
-  now: Date
+  now: Date,
+  pin: PinnedLocalCollectorManifestResult
 ): Promise<boolean> {
   if (enrollment.status !== "consumed") {
     return false;
   }
-  const retry = await handleIdempotentReEnroll(ctx, res, enrollment, enrollment.deviceId, now);
+  const retry = await handleIdempotentReEnroll(ctx, res, enrollment, enrollment.deviceId, now, pin);
   if (retry === "handled") {
     return true;
   }
@@ -2296,11 +2200,16 @@ export function mountRefDeviceExporterEnroll(app: AppLike, ctx: MountRefDeviceEx
           return;
         }
 
-        if (await respondIfConsumedCodeReplay(ctx, res, enrollment, now)) {
+        // The one pin read for this request: both the retry path and first
+        // redemption validate and register from this result.
+        const enrollConnectorKey = ctx.canonicalConnectorKey(enrollment.connectorId) ?? enrollment.connectorId;
+        const pin = ctx.readReferenceLocalConnectorCatalogManifestResult(enrollConnectorKey);
+
+        if (await respondIfConsumedCodeReplay(ctx, res, enrollment, now, pin)) {
           return;
         }
 
-        await performFirstEnrollment(ctx, req, res, body, enrollment, now, scopeVerdict.effective);
+        await performFirstEnrollment(ctx, req, res, body, enrollment, now, scopeVerdict.effective, pin);
       } catch (err) {
         respondEnrollError(ctx, res, err);
       }
@@ -2523,6 +2432,9 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
     ctx.requireDeviceExporterCredential,
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this boundary deliberately keeps credential, identity, hash, and response precedence visible together.
     async (req: RouteRequest, res: RouteResponse) => {
+      // Set once the device and source are authorized. Every later refusal is a
+      // batch the server received for this connection and did not admit.
+      let observedConnectorInstanceId: string | null = null;
       try {
         const deviceId = decodeURIComponent(req.params.deviceId as string);
         if (deviceId !== req.deviceExporter?.deviceId) {
@@ -2548,6 +2460,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           return;
         }
         const { sourceInstance, connectorInstance } = authorized;
+        observedConnectorInstanceId = connectorInstance.connectorInstanceId;
         const sourceConnectorMatches = sameConnectorType(ctx, sourceInstance.connectorId, requestConnectorId);
         // Reservation identity and attempt facts use the canonical connector
         // key, not the URL/legacy alias supplied by the collector. This keeps
@@ -2563,6 +2476,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
         if (!SHA256_HEX.test(bodyHash) || (bodyHash !== canonical.hash && bodyHash !== collectorEnvelopeHash)) {
+          await observeRefusedBatch(connectorInstance.connectorInstanceId);
           ctx.pdppError(
             res,
             400,
@@ -2585,6 +2499,23 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
       } catch (err) {
+        // A batch refused after authorization is an observed attempt, and its
+        // revision is its only durable effect. When that revision cannot be
+        // recorded (or an earlier one in this request failed), the device gets
+        // the retryable 503, never a definitive refusal the server cannot order.
+        if (
+          observedConnectorInstanceId &&
+          (isCollectionRevisionUnavailable(err) || !(await recordedRefusal(observedConnectorInstanceId)))
+        ) {
+          res.setHeader("Retry-After", "1");
+          ctx.pdppError(
+            res,
+            503,
+            "device_ingest_retryable",
+            "Device ingest is temporarily unavailable; retry the same batch"
+          );
+          return;
+        }
         if (err instanceof ctx.DeviceBatchConflictError) {
           ctx.pdppError(
             res,
@@ -2631,6 +2562,34 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
   );
 }
 
+/**
+ * Record a refused batch for an authorized connection, so it retires any
+ * earlier local coverage proof (see collection-revision-store.ts). The caller
+ * awaits this before it answers the device, so the device cannot send a later
+ * terminal commit that the server orders before this event. Throws
+ * `CollectionRevisionUnavailableError` when the revision is not recorded; the
+ * route's catch then answers 503 instead of the refusal.
+ */
+async function observeRefusedBatch(connectorInstanceId: string): Promise<void> {
+  await recordCollectionRevisionEvent(connectorInstanceId, {
+    at: new Date().toISOString(),
+    event: "batch_rejected",
+  });
+}
+
+/** `observeRefusedBatch` for the route's catch: false (and a server log line) when the revision is not recorded. */
+async function recordedRefusal(connectorInstanceId: string): Promise<boolean> {
+  try {
+    await observeRefusedBatch(connectorInstanceId);
+    return true;
+  } catch (error) {
+    console.warn(
+      `[device-exporters] refused batch not recorded; answering 503 connector_instance_id=${connectorInstanceId} code=${String((error as { code?: unknown } | null)?.code ?? "unknown")}`
+    );
+    return false;
+  }
+}
+
 async function processDeviceIngestBatch(
   ctx: MountRefDeviceExportersContext,
   res: RouteResponse,
@@ -2675,6 +2634,7 @@ async function processDeviceIngestBatch(
     const existing = await ctx.deviceExporterStore.getBatchOutcome(deviceId, batchId);
     if (existing) {
       if (!deviceBatchIdentityMatches(existing, identity)) {
+        await observeRefusedBatch(connectorInstanceId);
         ctx.pdppError(
           res,
           409,
@@ -2692,6 +2652,7 @@ async function processDeviceIngestBatch(
     // New malformed candidates retain the historical 400, but an existing
     // device/batch reservation owns conflict precedence.
     if (!sourceConnectorMatches) {
+      await observeRefusedBatch(connectorInstanceId);
       ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
       return;
     }
@@ -2866,6 +2827,11 @@ async function processDeviceIngestBatch(
         source_instance_id: sourceInstanceId,
         status: "accepted",
       };
+      // The accepted transition takes the batch's `batch_accepted` collection
+      // revision in its own transaction, as each record write above took its
+      // `batch_record` revision. It commits before the acknowledgement, and
+      // the device sends its terminal commit only after this response, so the
+      // commit always gets the later revision.
       maybeDeviceIngestStoreFault("before-complete-processing-batch");
       await ctx.deviceExporterStore.completeProcessingBatch({
         acceptedAt: new Date().toISOString(),
@@ -2893,6 +2859,12 @@ async function processDeviceIngestBatch(
             authoritativeFinalPlan,
             finalIndexPlanConcurrency(),
             async ({ record, inputIndex, version }) => {
+              const { stream } = record as { stream?: unknown };
+              if (attemptContext.retiredCoverageDiagnostic && stream === "coverage_diagnostics") {
+                // The current signed manifest no longer declares this stream.
+                // The dirty-scope reconciler removes any old index entries.
+                return;
+              }
               if (typeof version !== "number") {
                 // No durable version could be resolved for this key (e.g. it was
                 // never actually written this attempt and has no repair reread
@@ -3037,6 +3009,7 @@ export function mountRefDeviceExporterSourceInstanceStatePut(app: AppLike, ctx: 
   );
   mountRefDeviceExporterTerminalCollection(app, ctx);
   mountRefDeviceExporterTerminalRunCommit(app, ctx);
+  mountRefDeviceExporterRunStart(app, ctx);
 }
 
 // POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/terminal-collection
@@ -3070,7 +3043,24 @@ export function mountRefDeviceExporterTerminalRunCommit(app: AppLike, ctx: Mount
         ctx: {
           ...ctx,
           commitTerminalRun: ctx.commitTerminalRun ?? commitTerminalRun,
+          findTerminalRunReceipt,
         },
+        req,
+        res,
+        resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>
+          await resolveAuthorizedDeviceSource(ctx, req, res, deviceId, sourceInstanceId, { notFoundStatus: 404 }),
+      })
+  );
+}
+
+// POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts
+export function mountRefDeviceExporterRunStart(app: AppLike, ctx: MountRefDeviceExportersContext): void {
+  app.post(
+    "/_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts",
+    ctx.requireDeviceExporterCredential,
+    async (req: RouteRequest, res: RouteResponse) =>
+      await handleLocalDeviceRunStart({
+        ctx: { ...ctx, issueRunSequence: issueCollectionRunSequence },
         req,
         res,
         resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>
@@ -3198,20 +3188,26 @@ async function reportLocalCollectorGap(
     ...(details ? { details } : {}),
   };
   const store = ctx.getDefaultConnectorDetailGapStore();
-  const gap = await store.upsertPendingGap({
-    connectorId,
-    connectorInstanceId,
-    detailLocator,
-    lastError,
-    reason,
-    // The route requires a boolean (validateGapReportFields); an explicit false is
-    // kept in storage, never converted to a recoverable legacy NULL.
-    ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
-    source,
-    stream: syntheticStream,
-    ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
-    ...(lastRunId ? { lastRunId } : {}),
-  });
+  // A delivered failure report is an observed attempt: it retires any earlier
+  // coverage proof for this connection. The gap and its revision commit in one
+  // transaction; if the revision cannot be recorded, no gap is stored.
+  const gap = await store.upsertPendingGap(
+    {
+      connectorId,
+      connectorInstanceId,
+      detailLocator,
+      lastError,
+      reason,
+      // The route requires a boolean (validateGapReportFields); an explicit false is
+      // kept in storage, never converted to a recoverable legacy NULL.
+      ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
+      source,
+      stream: syntheticStream,
+      ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
+      ...(lastRunId ? { lastRunId } : {}),
+    },
+    { collectionRevision: { at: new Date().toISOString(), event: "failure_report", runId: lastRunId } }
+  );
   res.status(201).json({
     attempt_count: gap.attempt_count,
     connector_id: connectorId,

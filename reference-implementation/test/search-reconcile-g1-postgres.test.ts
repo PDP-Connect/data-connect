@@ -18,12 +18,13 @@ import {
   listDirtySearchIndexScopes,
   markSearchIndexDirtyPostgres,
 } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 function manifest(connectorId: string) {
-  return {
+  const value = {
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     display_name: connectorId,
@@ -45,6 +46,7 @@ function manifest(connectorId: string) {
     ],
     version: "0.1.0",
   };
+  return withFixtureSourceDeclaration(value, { sourceId: value.manifest_uri });
 }
 
 async function seed(connectorId: string, instance: string) {
@@ -113,7 +115,7 @@ test("G1 PostgreSQL: metadata-less lexical cleanup repairs only the exact connec
           ]);
           const [sourceStream] = original.streams;
           assert.ok(sourceStream);
-          const changed = {
+          const changed = withFixtureSourceDeclaration({
             ...original,
             streams: [
               {
@@ -122,7 +124,7 @@ test("G1 PostgreSQL: metadata-less lexical cleanup repairs only the exact connec
                 query: { search: {} },
               },
             ],
-          };
+          }, { sourceId: original.manifest_uri });
           await registerConnector(changed, {
             backfillRetrievalIndexes: false,
           });

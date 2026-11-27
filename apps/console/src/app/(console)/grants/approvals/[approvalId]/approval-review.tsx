@@ -136,7 +136,8 @@ function SingleArtifactFacts({ artifact, connectorIcons }: { artifact: SingleCon
           <dd>
             {artifact.source.kind === "connector" ? (
               <ConnectorMark
-                className="mr-2 inline-block size-5 align-[-0.2em]"
+                spacing="after"
+                sourceId={artifact.source.id}
                 icon={connectorIcons[artifact.source.id]}
                 name={artifact.source.id}
               />
@@ -203,7 +204,8 @@ function BatchArtifactFacts({ artifact, connectorIcons }: { artifact: BatchConse
             <dd>
               {source.source.kind === "connector" ? (
                 <ConnectorMark
-                  className="mr-2 inline-block size-5 align-[-0.2em]"
+                  spacing="after"
+                  sourceId={source.source.id}
                   icon={connectorIcons[source.source.id]}
                   name={source.source.id}
                 />

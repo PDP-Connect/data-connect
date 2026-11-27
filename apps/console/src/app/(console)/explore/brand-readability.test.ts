@@ -77,7 +77,7 @@ async function facetRowHtml(excluded: boolean): Promise<string> {
 			label: LONG_LABEL,
 			// The mark production passes (explore-canvas.tsx), not a stand-in.
 			leading: createElement(ConnectorMark, {
-				className: "size-5 shrink-0",
+				connectorId: "example",
 				icon: null,
 				name: "Example",
 			}),

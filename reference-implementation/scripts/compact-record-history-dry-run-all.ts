@@ -104,7 +104,7 @@ export interface DryRunRow {
 export function policiesForConnector(
   connectorInstanceId: string,
   connectorId: string,
-  policies: CompactionPolicy[] = COMPACTION_POLICIES
+  policies: readonly CompactionPolicy[] = COMPACTION_POLICIES
 ): DryRunScope[] {
   return policies
     .filter((p) => p.connectorIds.includes(connectorId))
@@ -191,7 +191,7 @@ interface ConnectionRow {
  */
 export async function listConnectionsWithPolicies(
   pool: pg.Pool,
-  policies: CompactionPolicy[] = COMPACTION_POLICIES
+  policies: readonly CompactionPolicy[] = COMPACTION_POLICIES
 ): Promise<ConnectionWithPolicy[]> {
   const eligibleConnectorIds = Array.from(new Set(policies.flatMap((p) => p.connectorIds)));
   const r = await pool.query<ConnectionRow>(

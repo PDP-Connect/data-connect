@@ -34,6 +34,7 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import {
   type ConnectorInstallStore,
   createConnectorInstallStore,
@@ -46,6 +47,7 @@ const JSON_EXTENSION_RE = /\.json$/;
 // loosely below since their full signatures land with the auth.js
 // migration slice. Until then we narrow the surface used here.
 import { getConnectorManifest, normalizeConnectorManifestForStorage, registerConnector } from "./auth.ts";
+import { pinnedLocalCollectorManifest } from "./local-collector-profiles.ts";
 // records.js is also still JavaScript. The invalidation helper is
 // scoped to the reconciliation flip path; see the design notes under
 // openspec/changes/reconcile-invalidates-stale-records/.
@@ -97,7 +99,8 @@ export interface PolyfillManifest {
 
 async function readManifestJson(path: string): Promise<PolyfillManifest> {
   const raw = await readFile(path, "utf8");
-  return JSON.parse(raw) as PolyfillManifest;
+  // A repeated key would otherwise collapse to its last value before any validation runs.
+  return parseManifestJsonText(raw) as PolyfillManifest;
 }
 
 function canonicalize(value: unknown): string {
@@ -650,9 +653,20 @@ async function reconcileChangedManifestEntry(
   };
 }
 
+/**
+ * A connector the local collector runs on the owner's device reconciles to its
+ * pinned profile, not to the catalog release an install or the shipped set
+ * carries. Otherwise every restart would replace the manifest the device's
+ * uploads are validated against.
+ */
+function pinnedOverLoaded(loaded: PolyfillManifest | null): PolyfillManifest | null {
+  const connectorId = loaded?.connector_id;
+  return (typeof connectorId === "string" ? pinnedLocalCollectorManifest(connectorId) : null) ?? loaded;
+}
+
 async function reconcileEntry(source: ShippedManifestSource, ctx: EntryContext): Promise<EntryDelta> {
   const { entryName } = source;
-  const shipped = await source.load();
+  const shipped = pinnedOverLoaded(await source.load());
   const loadedEntry = validateOrReconcileInvalidManifestEntry(shipped);
   if (loadedEntry.kind === "invalid") {
     return loadedEntry.delta;

@@ -28,6 +28,7 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -166,7 +167,7 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   const form = { "Content-Type": "application/x-www-form-urlencoded" };
   const { body: device } = await fetchJson<{ device_code: string; user_code: string }>(
     `${asUrl}/oauth/device_authorization`,
-    { body: new URLSearchParams({ client_id: clientId }).toString(), headers: form, method: "POST" },
+    { body: new URLSearchParams({ client_id: clientId }).toString(), headers: form, method: "POST" }
   );
   const approve = await fetch(`${asUrl}/device/approve`, {
     body: new URLSearchParams({ subject_id: OWNER_SUBJECT_ID, user_code: device.user_code }).toString(),
@@ -197,15 +198,18 @@ function streamDef(name: string) {
 }
 
 function manifestFor(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [streamDef("alpha"), streamDef("beta")],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [streamDef("alpha"), streamDef("beta")],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 // The connector emits two checkpoints per run. On START it records what it
@@ -242,7 +246,7 @@ rl.on('line', (line) => {
   rl.close();
 });
 `,
-    "utf8",
+    "utf8"
   );
   return connectorPath;
 }
@@ -256,7 +260,7 @@ interface TimelineEvent {
 async function runCursorAuditScenario(
   server: ClosableServer,
   connectorId: string,
-  diagnostic: (message: string) => void,
+  diagnostic: (message: string) => void
 ): Promise<void> {
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -331,7 +335,7 @@ async function runCursorAuditScenario(
     assert.deepEqual(state2.beta, { page: "beta-2" });
     // Printed so the same value can be compared across commits (before/after this change).
     diagnostic(
-      `persisted-state-digest ${createHash("sha256").update(JSON.stringify({ state1, state2 })).digest("hex")}`,
+      `persisted-state-digest ${createHash("sha256").update(JSON.stringify({ state1, state2 })).digest("hex")}`
     );
 
     // Spine: compact fact only, for both runs and both event types.
@@ -340,7 +344,7 @@ async function runCursorAuditScenario(
       [run2Id, state2],
     ] as const) {
       const { body: timeline } = await fetchJson<{ data: TimelineEvent[] }>(
-        `${asUrl}/_ref/runs/${encodeURIComponent(String(runId))}/timeline`,
+        `${asUrl}/_ref/runs/${encodeURIComponent(String(runId))}/timeline`
       );
       for (const eventType of ["run.state_staged", "run.state_advanced"]) {
         const events = timeline.data.filter((e) => e.event_type === eventType);
@@ -354,7 +358,7 @@ async function runCursorAuditScenario(
               bytes: cursorAuditFact(persisted[stream]).cursor_bytes,
               sha: cursorAuditFact(persisted[stream]).cursor_sha256,
             },
-            `${eventType}/${stream} audit fact matches the persisted cursor`,
+            `${eventType}/${stream} audit fact matches the persisted cursor`
           );
           assert.ok(JSON.stringify(event.data).length < 1000, `${eventType} event data stays small`);
         }
@@ -399,7 +403,7 @@ if (POSTGRES_URL) {
           await closeServer(server);
           await closePostgresStorage();
         }
-      },
+      }
     );
   });
 } else {

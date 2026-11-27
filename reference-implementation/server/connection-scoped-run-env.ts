@@ -15,10 +15,7 @@
  */
 
 import { stat } from "node:fs/promises";
-import {
-  loadCredentialProbeHelpers,
-  loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
-} from "./polyfill-connectors-runtime.ts";
+import { loadCredentialProbeHelpers } from "./polyfill-connectors-runtime.ts";
 import { resolveProviderAuthRunEnv } from "./stores/provider-auth-run-credentials.ts";
 import { resolveStaticSecretRunEnv, type StaticSecretCredentialStore } from "./stores/static-secret-run-credentials.ts";
 
@@ -66,15 +63,6 @@ function isManualUploadBinding(value: unknown): value is ManualUploadBinding {
     typeof binding.import_dir === "string" &&
     typeof binding.import_dir_env_var === "string"
   );
-}
-
-// Lazily loads the pure static-secret injection helpers from the
-// polyfill-connectors runner slice. The reference server reaches connector
-// code through the optional connector-runtime boundary. Development and
-// conformance runs may provide the polyfill package; production uses the
-// boundary's empty/fail-closed behavior until a catalog connector is active.
-export function loadStaticSecretInjectionHelpers() {
-  return loadOptionalStaticSecretInjectionHelpers();
 }
 
 // Build the route-facing static-secret credential prober. The reference-only

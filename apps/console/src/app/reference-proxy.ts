@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { existsSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
+import { SERVICE_CHALLENGE_PATH } from "pdpp-reference-implementation/reachability-service-challenge";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -212,6 +214,49 @@ export async function proxyReferenceRequest(
   } catch (error) {
     return unavailableResponse(request, target, error);
   }
+}
+
+const SERVICE_CHALLENGE_MAX_BYTES = 4096;
+const SERVICE_CHALLENGE_TIMEOUT_MS = 5000;
+
+// The gozar service challenge answer binds the Host the resource server
+// received, and fetch() always replaces Host with the upstream's. This one path
+// therefore uses node:http so the public Host reaches the resource server.
+export function proxyServiceChallenge(request: Request): Promise<Response> {
+  const source = new URL(request.url);
+  const upstreamUrl = new URL(`${SERVICE_CHALLENGE_PATH}${source.search}`, referenceBaseUrl("rs"));
+  const host = request.headers.get("host") ?? source.host;
+  return new Promise((resolve) => {
+    const upstream = httpRequest(
+      upstreamUrl,
+      { headers: { host }, method: "GET", timeout: SERVICE_CHALLENGE_TIMEOUT_MS },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > SERVICE_CHALLENGE_MAX_BYTES) {
+            upstream.destroy();
+            resolve(unavailableResponse(request, "rs", new Error("service challenge response too large")));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () =>
+          resolve(
+            new Response(Buffer.concat(chunks), {
+              headers: { "cache-control": "no-store", "content-type": "application/json" },
+              status: response.statusCode ?? 502,
+            })
+          )
+        );
+        response.on("error", (error) => resolve(unavailableResponse(request, "rs", error)));
+      }
+    );
+    upstream.on("timeout", () => upstream.destroy(new Error("service challenge timed out")));
+    upstream.on("error", (error) => resolve(unavailableResponse(request, "rs", error)));
+    upstream.end();
+  });
 }
 
 export async function proxyReferenceCatchAll(

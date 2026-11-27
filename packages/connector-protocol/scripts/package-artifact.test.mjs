@@ -2,20 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
-import { fileURLToPath } from "node:url";
-import {
-  assertArtifactMetadata,
-  buildPackage,
-  computeDeclarationDigest,
-  computeSourceInputsDigest,
-  verifyArtifactMetadata,
-} from "./package-artifact.mjs";
+import { createArtifactTestFixture } from "./package-artifact-fixture.mjs";
 
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const distDir = join(packageRoot, "dist");
+const COMMIT_FIRST_ERROR = /commit first/i;
 const HEX_256 = /^[0-9a-f]{64}$/;
 const HEX_512 = /^[0-9a-f]{128}$/;
 const HEX_160 = /^[0-9a-f]{40}$/;
@@ -23,29 +15,29 @@ const SOURCE_INPUTS_ERROR = /source_inputs_sha256/;
 const ARTIFACT_SOURCE_INPUTS_ERROR = /artifact metadata drift in source_inputs_sha256/;
 const ARTIFACT_DECLARATIONS_ERROR = /artifact metadata drift in declarations_sha256/;
 
-// `computeDeclarationDigest` reads from dist/**/*.d.ts. On a genuinely clean
-// checkout, dist/ does not exist yet, so every test below that inspects
-// declarations must build first — see the regression this closed: a clean
-// checkout with no pre-existing dist/ failed `npm test` outright before this
-// fix, confirmed under installed npm 12.0.2.
-before(async () => {
-  await buildPackage();
-});
-
-// The regression test below deletes this package's own dist/ to prove
-// verifyArtifactMetadata works from a clean checkout; it never rebuilds
-// packageRoot's own dist/ afterward (its clean-tree builds happen in
-// separate temp clones — see reproducibleArtifact). Rebuild once more here
-// so `npm test` leaves the working tree's dist/ present, matching state
-// before this file ran, rather than a test suite silently deleting a build
-// output other tooling (prepack, downstream vendoring builds) expects.
+// Source, manifest and dist mutations belong to this suite's disposable checkout.
+const fixture = await createArtifactTestFixture("connector-protocol");
 after(async () => {
+  await rm(fixture.root, { force: true, recursive: true });
+});
+const { packageRoot } = fixture;
+const distDir = join(packageRoot, "dist");
+const {
+  assertArtifactMetadata,
+  buildPackage,
+  computeDeclarationDigest,
+  computeSourceInputsDigest,
+  generateArtifactMetadata,
+  verifyArtifactMetadata,
+} = fixture.api;
+before(async (context) => {
+  context.diagnostic(`artifact fixture checkout: ${fixture.checkoutMs.toFixed(0)} ms`);
   await buildPackage();
 });
 
 test("committed package artifact metadata is internally bound to current source inputs", async () => {
-  const metadata = JSON.parse(await readFile(new URL("../artifact.json", import.meta.url), "utf8"));
-  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const metadata = JSON.parse(await readFile(join(packageRoot, "artifact.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   const sourceInputsSha256 = await computeSourceInputsDigest();
   const declarationsSha256 = await computeDeclarationDigest();
 
@@ -63,8 +55,8 @@ test("committed package artifact metadata is internally bound to current source 
 });
 
 test("artifact metadata rejects a changed source digest", async () => {
-  const metadata = JSON.parse(await readFile(new URL("../artifact.json", import.meta.url), "utf8"));
-  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const metadata = JSON.parse(await readFile(join(packageRoot, "artifact.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   const artifact = {
     filename: metadata.artifact_filename,
     sha1: metadata.artifact_sha1,
@@ -79,8 +71,8 @@ test("artifact metadata rejects a changed source digest", async () => {
 });
 
 test("artifact metadata rejects every mismatched identity or digest field", async () => {
-  const metadata = JSON.parse(await readFile(new URL("../artifact.json", import.meta.url), "utf8"));
-  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const metadata = JSON.parse(await readFile(join(packageRoot, "artifact.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   const sourceInputsSha256 = await computeSourceInputsDigest();
   const declarationsSha256 = await computeDeclarationDigest();
   const artifact = {
@@ -142,4 +134,48 @@ test("verifyArtifactMetadata succeeds against the real installed npm binary with
   assert.match(verified.artifact_sha256, HEX_256);
   assert.match(verified.artifact_sha512, HEX_512);
   assert.match(verified.artifact_sha1, HEX_160);
+});
+
+for (const untracked of [false, true]) {
+  test(`generate refuses ${untracked ? "untracked" : "modified"} package source and names it`, async () => {
+    const sourcePath = resolve(packageRoot, "src", untracked ? "artifact-untracked-fixture.ts" : "auth.ts");
+    const original = untracked ? null : await readFile(sourcePath);
+    const metadataPath = resolve(packageRoot, "artifact.json");
+    const metadata = await readFile(metadataPath);
+    try {
+      await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+      await assert.rejects(generateArtifactMetadata, (error) => {
+        assert.match(error.message, COMMIT_FIRST_ERROR);
+        assert.ok(error.message.includes(untracked ? "artifact-untracked-fixture.ts" : "auth.ts"));
+        return true;
+      });
+      assert.deepEqual(await readFile(metadataPath), metadata, "refusal must leave the receipt unchanged");
+    } finally {
+      if (untracked) {
+        await rm(sourcePath, { force: true });
+      } else {
+        await writeFile(sourcePath, original);
+      }
+      await writeFile(metadataPath, metadata);
+    }
+  });
+}
+
+test("receipt digest and identity match HEAD despite working-tree edits", async () => {
+  const sourcePath = resolve(packageRoot, "src", "auth.ts");
+  const manifestPath = resolve(packageRoot, "package.json");
+  const source = await readFile(sourcePath);
+  const manifest = await readFile(manifestPath, "utf8");
+  const committedDigest = await computeSourceInputsDigest();
+  try {
+    await appendFile(sourcePath, "\n// dirty artifact fixture\n");
+    assert.notEqual(await computeSourceInputsDigest(), committedDigest);
+    const metadata = await verifyArtifactMetadata();
+    assert.equal(metadata.source_inputs_sha256, committedDigest);
+    await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(manifest), version: "99.0.0" }));
+    assert.equal((await verifyArtifactMetadata()).package_version, JSON.parse(manifest).version);
+  } finally {
+    await writeFile(sourcePath, source);
+    await writeFile(manifestPath, manifest);
+  }
 });

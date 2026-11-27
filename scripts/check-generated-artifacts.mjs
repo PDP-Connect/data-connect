@@ -12,7 +12,6 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = join(root, "connectors", "lock.json");
 
 const checkedGeneratedPaths = [
-  "reference-implementation/server/generated/connector-registry.generated.ts",
   "reference-implementation/vendor/cli/src/ref/list-envelope.ts",
   "src/lib/platform/registry.generated.ts",
 ];
@@ -54,20 +53,6 @@ function assertGeneratedArtifactCurrent({ label, generator, trackedPath }) {
     rmSync(scratchDir, { force: true, recursive: true });
   }
 }
-
-assertGeneratedArtifactCurrent({
-  label: "reference implementation connector registry",
-  generator: {
-    command: "node",
-    args: [
-      "--experimental-strip-types",
-      "reference-implementation/scripts/generate-connector-registry.ts",
-    ],
-    refreshCommand:
-      "cd reference-implementation && node --experimental-strip-types scripts/generate-connector-registry.ts",
-  },
-  trackedPath: "reference-implementation/server/generated/connector-registry.generated.ts",
-});
 
 assertGeneratedArtifactCurrent({
   label: "CLI list-envelope copy",

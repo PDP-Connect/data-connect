@@ -65,7 +65,6 @@ function scenario({ ageMs, lastHeartbeatStatus }: { ageMs: number; lastHeartbeat
     freshness: { status: "current" },
     lastRun: null,
     lastSuccessfulRun: null,
-    localCoverage: null,
     localDeviceBacked: true,
     manifestStreams: [{ name: "messages" }],
     nowIso: NOW,

@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveManifestSensitivity } from "../server/connector-manifest-validation.ts";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -80,8 +81,9 @@ async function registerConnectorManifest(asUrl: string, manifest: unknown): Prom
 }
 
 function makeManifest(extra: Record<string, unknown> = {}) {
-  return {
-    connector_id: "https://registry.pdpp.test/connectors/sensitivity-fixture",
+  return withFixtureSourceDeclaration({
+    connector_id: "sensitivity-fixture",
+    connector_key: "sensitivity-fixture",
     display_name: "Sensitivity fixture",
     protocol_version: "0.1.0",
     streams: [
@@ -103,7 +105,7 @@ function makeManifest(extra: Record<string, unknown> = {}) {
     ],
     version: "0.1.0",
     ...extra,
-  };
+  });
 }
 
 test('manifest declaring sensitivity "sensitive" is accepted', async () => {

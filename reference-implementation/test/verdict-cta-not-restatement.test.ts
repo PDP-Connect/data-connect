@@ -4,7 +4,7 @@
 /**
  * An action's CTA must not restate the statement beside it.
  *
- * THE LIVE DEFECT (2026-08-25). `HEB - gezalsatx@yahoo.com` rendered, from ONE
+ * THE LIVE DEFECT (2026-08-25). `HEB - jane.doe@example.com` rendered, from ONE
  * `rendered_verdict` object, in one row:
  *
  *     pill:              "Can't collect"
@@ -120,7 +120,7 @@ function render(
 }
 
 /**
- * The `gezalsatx@yahoo.com` shape: a terminal coverage gap with no credential
+ * The `jane.doe@example.com` shape: a terminal coverage gap with no credential
  * failure, which is what makes `buildRequiredActions` emit the maintainer
  * `code_fix` whose CTA was the duplicate.
  */
@@ -202,30 +202,30 @@ test("the CTA carries no developer language", () => {
  *   - `owner@example.com` — the proven-empty guard fired (H-E-B served an
  *     empty history for an account that previously had orders), leaving a
  *     stale-but-covered source whose next step is a refresh.
- *   - `gezalsatx@yahoo.com` — a terminal coverage gap with no owner recovery
+ *   - `jane.doe@example.com` — a terminal coverage gap with no owner recovery
  *     path.
  *
  * If a copy change ever flattens these two into the same row, the owner loses
  * the only on-screen signal that one is his to act on and the other is not.
  */
 test("the two H-E-B rows still render different, honest verdicts", () => {
-  const gezalsatx = renderTerminalCoverage().verdict;
-  const tnunamak = render({ ...baseInput(), freshness: { axis: "stale" } }, [
+  const terminalCoverage = renderTerminalCoverage().verdict;
+  const staleAccount = render({ ...baseInput(), freshness: { axis: "stale" } }, [
     stream({ collected: 100, considered: 100, coverage: "complete" }),
   ]).verdict;
 
-  assert.notEqual(tnunamak.pill.label, gezalsatx.pill.label);
-  assert.notEqual(tnunamak.forward_statement, gezalsatx.forward_statement);
+  assert.notEqual(staleAccount.pill.label, terminalCoverage.pill.label);
+  assert.notEqual(staleAccount.forward_statement, terminalCoverage.forward_statement);
 
   // The refreshable account keeps its real owner action...
-  assert.equal(tnunamak.forward_statement, "Run a refresh to bring this up to date.");
-  const refresh = tnunamak.required_actions.find((action) => action.audience === "owner");
+  assert.equal(staleAccount.forward_statement, "Run a refresh to bring this up to date.");
+  const refresh = staleAccount.required_actions.find((action) => action.audience === "owner");
   assert.ok(refresh, "the stale account is owner-repairable and must keep its button");
   assert.equal(refresh.cta, "Refresh now");
 
   // ...while the terminal account still has no owner action at all.
-  assert.ok(!gezalsatx.required_actions.some((action) => action.audience === "owner"));
-  assert.equal(gezalsatx.pill.label, "Can't collect");
+  assert.ok(!terminalCoverage.required_actions.some((action) => action.audience === "owner"));
+  assert.equal(terminalCoverage.pill.label, "Can't collect");
 });
 
 /** The softened branch is untouched — it was never the duplicate. */

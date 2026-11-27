@@ -38,6 +38,7 @@ import {
   queryRecords as queryRecordsUntyped,
 } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // queryRecords/queryRecordsAcrossBindings are imported from checkJs:false
 // JS; their `manifest` parameters are inferred as exactly `null` from a
@@ -82,32 +83,35 @@ const STREAM = "messages";
 const INSTANCE_A = "cin_limit_clamp_account_a";
 const INSTANCE_B = "cin_limit_clamp_account_b";
 
-const manifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Limit-clamp Test Connector",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      cursor_field: "received_at",
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
-          received_at: { format: "date-time", type: "string" },
-          subject: { type: "string" },
+const manifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Limit-clamp Test Connector",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        cursor_field: "received_at",
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+            received_at: { format: "date-time", type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject", "received_at"],
+          type: "object",
         },
-        required: ["id", "subject", "received_at"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 const grant = {
   streams: [{ fields: ["id", "subject", "received_at"], name: STREAM }],

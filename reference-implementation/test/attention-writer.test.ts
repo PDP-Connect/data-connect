@@ -496,8 +496,8 @@ test(
     chmodSync(stubPath, 0o755);
 
     const manifest = {
+      capabilities: { human_interaction: ["otp"] },
       connector_id: "codex",
-      runtime_requirements: { bindings: { interactive: { required: false } } },
       streams: [
         {
           name: "conversations",

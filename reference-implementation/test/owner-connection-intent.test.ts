@@ -36,14 +36,18 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readShippedManifests } from "./helpers/shipped-manifests.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { __setLocalCollectorProfilesDirectoryForTest } from "../server/local-collector-profiles.ts";
 import { startServer } from "../server/index.ts";
+import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
@@ -105,6 +109,26 @@ async function withServer(fn: (ctx: { asUrl: string; rsUrl: string }) => Promise
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+  }
+}
+
+async function withBrokenCodexProfile(
+  profileState: "tampered" | "missing",
+  fn: () => Promise<void>
+): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "pdpp-local-profiles-"));
+  const sourceDirectory = new URL("../server/local-collector-profiles/", import.meta.url);
+  copyFileSync(new URL("codex.pin.json", sourceDirectory), join(directory, "codex.pin.json"));
+  if (profileState === "tampered") {
+    const bytes = readFileSync(new URL("codex.json", sourceDirectory));
+    writeFileSync(join(directory, "codex.json"), Buffer.concat([bytes, Buffer.from(" ")]));
+  }
+  __setLocalCollectorProfilesDirectoryForTest(directory);
+  try {
+    await fn();
+  } finally {
+    __setLocalCollectorProfilesDirectoryForTest(null);
+    rmSync(directory, { force: true, recursive: true });
   }
 }
 
@@ -278,34 +302,30 @@ interface PackageManifest extends ConnectorManifestLike {
 }
 
 function loadPackageManifest(name: string): PackageManifest {
-  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  const entry = readShippedManifests().find((candidate) => candidate.file === `${name}.json`);
   if (!entry) {
     throw new Error(`no polyfill manifest found for ${name}.json`);
   }
   return entry.manifest as PackageManifest;
 }
 
+/**
+ * Test-only explicit attribution. The declaration is the production legacy projection of the manifest's
+ * own content (streams keep only the Core members), not a copy of connector-only stream fields, which
+ * Core refuses. Source and publisher are fixture identities, never a production source.
+ */
 function withExplicitTestSourceDeclaration(manifest: PackageManifest): PackageManifest {
   if (manifest.source_declaration && typeof manifest.source_declaration === "object") {
     return manifest;
   }
   const connectorKey = canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id;
-  const streams = Array.isArray(manifest.streams)
-    ? manifest.streams.map((stream) => ({
-        ...stream,
-        ...(stream.semantics === "append" ? { semantics: "append_only" } : {}),
-      }))
-    : [];
   return {
     ...manifest,
-    source_declaration: {
-      declaration_version: `owner-connection-intent-test:${connectorKey}:v1`,
-      display: { name: typeof manifest.display_name === "string" ? manifest.display_name : connectorKey },
-      protocol_version: manifest.protocol_version,
-      publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-      source: { id: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`, kind: "connector" },
-      streams,
-    },
+    source_declaration: snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(manifest, {
+      connectorImplementationId: `https://implementations.example/connectors/${encodeURIComponent(connectorKey)}`,
+      publisherId: "https://pdpp.dev/reference-implementation/tests",
+      sourceId: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`,
+    }),
   };
 }
 
@@ -449,6 +469,42 @@ test("owner-agent initiates a local-collector connection and receives a real enr
   });
 });
 
+test("owner-agent reports a tampered local profile without consulting the registry or claiming proof", async () => {
+  await withBrokenCodexProfile("tampered", async () => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const ownerToken = await issueOwnerToken(asUrl);
+      await registerConnector(asUrl, loadPackageManifest("codex"));
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, { connector_id: "codex" });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 201);
+      assert.equal(body.proof_gate, null);
+      assert.equal(
+        body.next_step?.reason,
+        "The installed local connector profile failed verification. Reinstall the local collector to repair it."
+      );
+      assert.notEqual(body.next_step?.kind, "enroll_local_collector");
+    });
+  });
+});
+
+test("owner-agent reports a missing profile with a present pin as invalid instead of consulting the registry", async () => {
+  await withBrokenCodexProfile("missing", async () => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const ownerToken = await issueOwnerToken(asUrl);
+      await registerConnector(asUrl, loadPackageManifest("codex"));
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, { connector_id: "codex" });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 201);
+      assert.equal(body.proof_gate, null);
+      assert.equal(
+        body.next_step?.reason,
+        "The installed local connector profile is missing and could not be verified. Reinstall the local collector to repair it."
+      );
+      assert.notEqual(body.next_step?.kind, "enroll_local_collector");
+    });
+  });
+});
+
 test("the minted enrollment code is genuine: exchanging it materializes a real connection", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
@@ -555,19 +611,32 @@ test("omitting collection_scope at intent creation defaults the connection to re
   });
 });
 
-test("owner-agent intent rejects an unparseable collection_scope.since with a typed 400", async () => {
+test("owner-agent intent rejects a collection_scope.since without an offset with a typed 400", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
-    const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, {
-      collection_scope: { since: "last tuesday" },
-      connector_id: "codex",
-    });
-    const body = rawBody as IntentResponseBody;
-    assert.equal(status, 400);
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
-    assert.equal(body?.error?.code, "invalid_request");
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
-    assert.equal(body?.error?.param, "collection_scope");
+    // A full-date or a zoneless date-time names no instant: the runtime would
+    // have to guess the owner's time zone to bound a date-time field.
+    // An object whose toString is not callable must still get the typed 400,
+    // not a 500 from building the error message.
+    for (const since of [
+      "last tuesday",
+      "2026-09-05",
+      "2026-09-05T00:00:00",
+      { toString: null } as unknown as string,
+      42 as unknown as string,
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: each case is one request against the same server; order keeps failures readable.
+      const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, {
+        collection_scope: { since },
+        connector_id: "codex",
+      });
+      const body = rawBody as IntentResponseBody;
+      assert.equal(status, 400, String(JSON.stringify(since)));
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
+      assert.equal(body?.error?.code, "invalid_request");
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
+      assert.equal(body?.error?.param, "collection_scope");
+    }
 
     // A rejected intent must mint no enrollment code and materialize nothing.
     const rows = await createSqliteConnectorInstanceStore().listByOwner(OWNER_SUBJECT_ID);
@@ -597,7 +666,7 @@ test("owner-agent initiating Amazon gets browser runtime class plus static-secre
     // Amazon must be a registered connector for its manifest (and thus its
     // browser binding) to resolve. An operator with the Amazon connector
     // available is the motivating second-account case.
-    const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+    const amazonManifestEntry = readShippedManifests().find((candidate) => candidate.file === "amazon.json");
     if (!amazonManifestEntry) {
       throw new Error("no polyfill manifest found for amazon.json");
     }
@@ -782,7 +851,7 @@ test("owner-agent initiating a static-secret API connector gets a non-secret cap
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
     // gmail must be a registered connector for the manifest to resolve.
-    const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+    const gmailManifestEntry = readShippedManifests().find((candidate) => candidate.file === "gmail.json");
     if (!gmailManifestEntry) {
       throw new Error("no polyfill manifest found for gmail.json");
     }
@@ -1008,11 +1077,11 @@ test("owner-agent intent rejects display_name values over the contract length ca
 test("owner-agent intent rejects a client grant token with 403 and audits the failure", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     // Register codex so a client grant is well-formed against a real connector.
-    const codexManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "codex.json");
+    const codexManifestEntry = readShippedManifests().find((candidate) => candidate.file === "codex.json");
     if (!codexManifestEntry) {
       throw new Error("no polyfill manifest found for codex.json");
     }
-    const manifest = codexManifestEntry.manifest as PackageManifest;
+    const manifest = withExplicitTestSourceDeclaration(codexManifestEntry.manifest as PackageManifest);
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },
@@ -1025,7 +1094,13 @@ test("owner-agent intent rejects a client grant token with 403 and audits the fa
       sourceBindingKey: "the owner@example.com",
     });
     const streamName = manifest.streams?.[0]?.name || "sessions";
-    const clientToken = await approveClientGrant(asUrl, manifest.connector_id, streamName, "cin_codex_client_auth");
+    const sourceDeclaration = manifest.source_declaration as { source: { id: string } };
+    const clientToken = await approveClientGrant(
+      asUrl,
+      sourceDeclaration.source.id,
+      streamName,
+      "cin_codex_client_auth"
+    );
 
     const { status, body: rawBody, resp } = await createIntent(rsUrl, clientToken, { connector_id: "codex" });
     const body = rawBody as IntentResponseBody;

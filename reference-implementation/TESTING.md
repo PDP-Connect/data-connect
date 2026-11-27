@@ -33,11 +33,13 @@ server has none, unpack the package and name its root. This works on PostgreSQL 
 root access:
 
 ```
-(mkdir -p ~/.tmp/pgvector && cd ~/.tmp/pgvector &&
+export PGVECTOR_ROOT="$(mktemp -d)"
+(cd "$PGVECTOR_ROOT" &&
   apt-get download postgresql-18-pgvector &&
   dpkg-deb -x postgresql-18-pgvector_*.deb .)
-# then, from reference-implementation/:
-PDPP_TEST_PGVECTOR_ROOT=$HOME/.tmp/pgvector npm run test:postgres
+# from reference-implementation/:
+PDPP_TEST_PGVECTOR_ROOT="$PGVECTOR_ROOT" npm run test:postgres
+rm -rf "$PGVECTOR_ROOT"   # when done
 ```
 
 The path must be absolute. `scripts/test-postgres-private.sh` points the private cluster's
@@ -120,7 +122,7 @@ Since `test-sandbox` c1ae39d, `/tmp` paths passed as arguments are visible insid
 may live in `/tmp`.
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
   Postgres as seeded data; cold-required if it observes bootstrap or migration), update the counts in
-  `PG-PROFILE-51-REPORT.md`, and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
+  [`docs/260906-pg-profile-51-report.md`](../docs/260906-pg-profile-51-report.md), and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
   Then run `npm run test:postgres` once: it is the check that the file works under the runner.
 
 What the pass found (real product bugs, each fixed with its test):

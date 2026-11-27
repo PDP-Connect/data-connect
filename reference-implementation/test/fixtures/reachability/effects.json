@@ -1,0 +1,109 @@
+{
+  "recipe/probe": {
+    "cases": [
+      {
+        "args": ["status", "--json", "--peers=false"],
+        "output": "node-status"
+      },
+      {
+        "args": ["serve", "status", "--json"],
+        "output": "serve-config"
+      },
+      {
+        "args": ["-V"],
+        "result": {
+          "stdout": "",
+          "stderr": "OpenSSH_9.9p1\n",
+          "exitCode": 0
+        }
+      },
+      {
+        "args": ["--version"],
+        "result": {
+          "stdout": "cloudflared version 2026.1.0\n",
+          "stderr": "",
+          "exitCode": 0
+        }
+      }
+    ],
+    "nodeStatus": {
+      "BackendState": "Running",
+      "Self": {
+        "ID": "fixture-node",
+        "DNSName": "fixture.invalid.",
+        "TailscaleIPs": [],
+        "CapMap": {
+          "funnel": [],
+          "https": [],
+          "https://tailscale.com/cap/funnel-ports?ports=443,8443,10000": []
+        }
+      },
+      "CurrentTailnet": {
+        "MagicDNSSuffix": "fixture.invalid",
+        "MagicDNSEnabled": true
+      },
+      "CertDomains": ["fixture.invalid"]
+    },
+    "interfaces": {
+      "interfaces": {
+        "lo": [
+          {
+            "address": "127.0.0.1",
+            "netmask": "255.0.0.0",
+            "family": "IPv4",
+            "internal": true,
+            "cidr": "127.0.0.1/8"
+          }
+        ],
+        "eth0": [
+          {
+            "address": "192.0.2.10",
+            "netmask": "255.255.255.0",
+            "family": "IPv4",
+            "internal": false,
+            "cidr": "192.0.2.10/24"
+          }
+        ]
+      }
+    }
+  },
+  "local-api/request": {
+    "statusPath": "/localapi/v0/status?peers=false",
+    "configPath": "/localapi/v0/serve-config"
+  },
+  "spawn/run": {
+    "trialArgs": ["-R"],
+    "trials": [
+      {
+        "args": ["nokey@localhost.run"],
+        "origin": "https://fixture.lhr.life",
+        "stdout": "https://fixture.lhr.life\n"
+      },
+      {
+        "args": ["stable@proxy.tunnl.gg", "output=json"],
+        "origin": "https://fixture.tunnl.gg",
+        "stdout": "{\"event\":\"tunnel\",\"url\":\"https://fixture.tunnl.gg\"}\n"
+      }
+    ],
+    "publicArgs": ["funnel"],
+    "privateArgs": ["serve"],
+    "httpsPrefix": "--https=",
+    "startupOutput": "Press Ctrl+C to exit.\n"
+  },
+  "artifact/fetch": {
+    "content": "fixture prerequisite bytes"
+  },
+  "artifact/execute": {
+    "result": { "executed": true, "exitCode": 0 }
+  },
+  "sdk-listener/open": {
+    "safeFailureCode": "provider_unavailable"
+  },
+  "owner-inputs": {
+    "interface": { "from": "observed-interface-address" },
+    "firewall": { "from": "observed-interface-address" },
+    "gate-port": { "from": "free-local-port" },
+    "orchid.value": { "from": "free-local-port" },
+    "iris.value": { "from": "free-local-port" }
+  }
+}

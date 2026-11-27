@@ -1,0 +1,12 @@
+{
+  "network/fetch": {
+    "proxyOrigins": [
+      "https://a.fixture-orchid.invalid",
+      "https://b.fixture-orchid.invalid",
+      "https://c.fixture-orchid.invalid",
+      "https://a.fixture-iris.invalid",
+      "https://b.fixture-iris.invalid",
+      "https://c.fixture-iris.invalid"
+    ]
+  }
+}
