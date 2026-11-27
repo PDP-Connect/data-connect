@@ -52,7 +52,7 @@ const DASHBOARD_SHELL_RE = /RecordroomShellWithPalette/;
 // Any relative depth up to the dashboard `components/` directory (one to four
 // `../` hops, since the deepest covered segment is sources/[connector]/[stream]/…).
 // Data sources and Sync history use their own skeletons (the page header and rows of the real page).
-const SHARED_SKELETON_IMPORT_RE = /from "(?:(?:\.\.\/)+components\/route-loading\.ts|\.\/(?:sources-loading|sync-history-loading)-skeleton\.tsx)/;
+const SHARED_SKELETON_IMPORT_RE = /from "(?:(?:\.\.\/)+components\/route-loading\.ts|\.\/(?:sources-loading|sync-history-loading)-skeleton\.tsx|(?:\.\.\/)+components\/titled-detail-loading\.tsx)/;
 const ROLE_STATUS_RE = /role="status"/;
 const ARIA_BUSY_RE = /aria-busy="true"/;
 const ARIA_HIDDEN_RE = /aria-hidden/;
