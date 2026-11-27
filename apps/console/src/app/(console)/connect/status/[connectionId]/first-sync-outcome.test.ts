@@ -312,3 +312,21 @@ test("the trail on a source's own page ends with that source, not 'Add a data so
   assert.doesNotMatch(nav, /Add a data source/);
   assert.match(nav, /href="\/sources\/amazon\?connection_id=conn_1"/);
 });
+
+// Round 3, finding 1: the cause is one thing, the label is the kind of service's.
+test("known recovery matches setup kind", () => {
+  const keyGone = { ...withOrders, gaps: [{ kind: "skip_result", reason: "static_secret_credential_unavailable", message: "x" }] };
+  const key = firstSyncOutcome(status({ setup_kind: "static_secret" }), "Linear", keyGone);
+  assert.equal(key.kind === "partial" ? key.retry?.label : null, "Enter the key again");
+  assert.match(key.kind === "partial" ? key.retry?.href ?? "" : "", /^\/connect\/static-secret\/amazon\?connection_id=conn_1/);
+  const denied = { ...withOrders, gaps: [{ kind: "skip_result", reason: "access_denied", message: "x" }] };
+  const file = firstSyncOutcome(status({ setup_kind: "manual_upload" }), "Takeout", denied);
+  assert.equal(file.kind === "partial" ? file.retry?.label : null, "Choose another file");
+  assert.match(file.kind === "partial" ? file.retry?.href ?? "" : "", /^\/connect\/manual-upload\//);
+  assert.doesNotMatch(JSON.stringify(file), /[Ss]ign[- ]in/);
+  const failedKey = firstSyncOutcome(status({ setup_kind: "static_secret", setup_state: "first_sync_failed", last_error: { reason: "static_secret_credential_unavailable", remediation: "x" } }), "Linear", withOrders);
+  assert.equal(failedKey.kind === "failed" ? failedKey.retry.label : null, "Enter the key again");
+  const failedFile = firstSyncOutcome(status({ setup_kind: "manual_upload", setup_state: "first_sync_failed", last_error: { reason: "access_denied", remediation: "x" } }), "Takeout", withOrders);
+  assert.equal(failedFile.kind === "failed" ? failedFile.retry.label : null, "Choose another file");
+  assert.doesNotMatch(JSON.stringify(failedFile), /[Ss]ign[- ]in/);
+});

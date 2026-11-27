@@ -175,14 +175,42 @@ const NEEDS_YOU_STATES = new Set([
 	"awaiting_credential",
 ]);
 
-function plainGap(gap: KnownGap, name: string) {
+const COULD_NOT_COPY = "DataConnect could not copy this.";
+
+/**
+ * The cause is the same for every kind of service; the words and the button
+ * are the kind's. A file source never gets sign-in words, a saved-key source
+ * says "Enter the key again".
+ */
+function kindSentence(
+	status: ConnectionSetupStatus,
+	cause: { sentence: string; known: boolean },
+): string {
+	if (!cause.known) return COULD_NOT_COPY;
+	return status.setup_kind === "manual_upload" &&
+		/sign[- ]?in/i.test(cause.sentence)
+		? COULD_NOT_COPY
+		: cause.sentence;
+}
+
+function kindActionLabel(
+	status: ConnectionSetupStatus,
+	action: "Sign in again" | "Try again" | null,
+): string | null {
+	if (action === null) return null;
+	if (status.setup_kind === "manual_upload") return "Choose another file";
+	if (status.setup_kind === "static_secret") return "Enter the key again";
+	return action;
+}
+
+function plainGap(gap: KnownGap, name: string, status: ConnectionSetupStatus) {
 	const cause = resolveSyncCause(
 		{ error: gap.message, reason: gap.reason },
 		name,
 	);
 	return {
 		action: cause.known ? cause.action : null,
-		sentence: cause.known ? cause.sentence : "DataConnect could not copy this.",
+		sentence: kindSentence(status, cause),
 	};
 }
 
@@ -257,16 +285,15 @@ export function firstSyncOutcome(
 					? "Nothing is lost. Start again when you're ready."
 					: busy
 						? ""
-						: neverStarted ? `DataConnect could not open ${name}'s sign-in page.` : known ? cause.sentence : outcomeCopy.failedFallback,
+						: neverStarted ? `DataConnect could not open ${name}'s sign-in page.` : known ? kindSentence(status, cause) : outcomeCopy.failedFallback,
 			retry: {
 				href: retryHref,
 				label: stopped
 					? "Start again"
 					: timedOut
 						? `Sign in to ${name}`
-						: known && cause.action
-							? cause.action
-							: retryLabel(status),
+						: (known ? kindActionLabel(status, cause.action) : null) ??
+								retryLabel(status),
 			},
 			secondary:
 				stopped && collectedKinds(facts).length > 0
@@ -314,7 +341,7 @@ export function firstSyncOutcome(
 	const collected = collectedKinds(facts);
 	const missing = classifyKnownGaps(facts.gaps ?? []).coverageGaps.map(
 		(gap) => {
-			const plain = plainGap(gap, name);
+			const plain = plainGap(gap, name, status);
 			return {
 				action: plain.action,
 				label: gap.stream ? humanizeFieldLabel(gap.stream) : "Some data",
@@ -362,9 +389,9 @@ export function firstSyncOutcome(
 				label: outcomeCopy.seeData(name),
 			},
 			retry: gapAction
-				? { href: retryHref, label: gapAction }
+				? { href: retryHref, label: kindActionLabel(status, gapAction) ?? gapAction }
 				: missing.some((gap) => gap.retryable)
-					? { href: retryHref, label: outcomeCopy.retry }
+					? { href: retryHref, label: retryLabel(status) }
 					: null,
 			technical: technicalLink(status.run?.run_id),
 		};
