@@ -75,9 +75,12 @@ export type FirstSyncOutcome =
 				label: string;
 				message: string;
 				retryable: boolean;
+				/** The cause needs the person (sign-in again), so it cannot retry by itself. */
+				needsPerson: boolean;
 			}[];
 			readonly primary: OutcomeLink;
 			readonly retry: OutcomeLink | null;
+			readonly technical: OutcomeLink | null;
 	  }
 	| { readonly kind: "needs-you"; readonly next: OutcomeLink }
 	| {
@@ -87,6 +90,7 @@ export type FirstSyncOutcome =
 			readonly reason: string;
 			readonly retry: OutcomeLink;
 			readonly wentWrong: string | null;
+			readonly technical: OutcomeLink | null;
 	  }
 	| { readonly kind: "paused"; readonly open: OutcomeLink }
 	| { readonly kind: "revoked"; readonly addAnother: OutcomeLink };
@@ -171,12 +175,25 @@ const NEEDS_YOU_STATES = new Set([
 	"awaiting_credential",
 ]);
 
-function plainGapSentence(gap: KnownGap, name: string): string {
+function plainGap(gap: KnownGap, name: string) {
 	const cause = resolveSyncCause(
 		{ error: gap.message, reason: gap.reason },
 		name,
 	);
-	return cause.known ? cause.sentence : "DataConnect could not copy this.";
+	return {
+		action: cause.known ? cause.action : null,
+		sentence: cause.known ? cause.sentence : "DataConnect could not copy this.",
+	};
+}
+
+/** The raw text and codes live on the run's technical page; this is the way there. */
+function technicalLink(runId: string | null | undefined): OutcomeLink | null {
+	return runId
+		? {
+				href: `/syncs/${encodeURIComponent(runId)}/technical`,
+				label: "Technical details",
+			}
+		: null;
 }
 
 export function firstSyncOutcome(
@@ -222,8 +239,17 @@ export function firstSyncOutcome(
 				: busy
 					? "DataConnect was busy with another sign-in."
 					: undefined;
+		const cause = title
+			? null
+			: resolveSyncCause(
+					{ error: facts.failureReason, reason: status.last_error?.reason },
+					name,
+				);
+		const technical = technicalLink(status.run?.run_id);
+		const known = cause?.known === true;
 		return {
 			kind: "failed",
+			technical,
 			title,
 			reason: stopped
 				? "What was copied before you stopped is kept."
@@ -231,14 +257,16 @@ export function firstSyncOutcome(
 					? "Nothing is lost. Start again when you're ready."
 					: busy
 						? ""
-						: neverStarted ? `DataConnect could not open ${name}'s sign-in page.` : outcomeCopy.failedFallback,
+						: neverStarted ? `DataConnect could not open ${name}'s sign-in page.` : known ? cause.sentence : outcomeCopy.failedFallback,
 			retry: {
 				href: retryHref,
 				label: stopped
 					? "Start again"
 					: timedOut
 						? `Sign in to ${name}`
-						: retryLabel(status),
+						: known && cause.action
+							? cause.action
+							: retryLabel(status),
 			},
 			secondary:
 				stopped && collectedKinds(facts).length > 0
@@ -247,7 +275,12 @@ export function firstSyncOutcome(
 							label: outcomeCopy.seeData(name),
 						}
 					: undefined,
-			wentWrong: title ? null : status.last_error?.reason?.trim() || null,
+			// With a run id the raw reason belongs to the technical page only; the
+			// fold stays for a failure that has no run to link to.
+			wentWrong:
+				title || technical
+					? null
+					: status.last_error?.reason?.trim() || null,
 		};
 	}
 	if (NEEDS_YOU_STATES.has(status.setup_state)) {
@@ -280,14 +313,25 @@ export function firstSyncOutcome(
 	}
 	const collected = collectedKinds(facts);
 	const missing = classifyKnownGaps(facts.gaps ?? []).coverageGaps.map(
-		(gap) => ({
-			label: gap.stream ? humanizeFieldLabel(gap.stream) : "Some data",
-			// The service's own text and codes stay on the technical page. A cause we
-			// know gets its plain sentence; any other gets one generic sentence.
-			message: plainGapSentence(gap, name),
-			retryable: gap.recovery_hint?.retryable === true,
-		}),
+		(gap) => {
+			const plain = plainGap(gap, name);
+			return {
+				action: plain.action,
+				label: gap.stream ? humanizeFieldLabel(gap.stream) : "Some data",
+				// The service's own text and codes stay on the technical page. A cause we
+				// know gets its plain sentence; any other gets one generic sentence.
+				message: plain.sentence,
+				needsPerson: plain.action === "Sign in again",
+				retryable: gap.recovery_hint?.retryable === true,
+			};
+		},
 	);
+	// What the person can do: sign in again beats try again.
+	const gapAction = missing.some((gap) => gap.action === "Sign in again")
+		? "Sign in again"
+		: missing.some((gap) => gap.action === "Try again")
+			? "Try again"
+			: null;
 	const missingByKind = new Map<string, (typeof missing)[number]>();
 	for (const gap of missing) {
 		const previous = missingByKind.get(gap.label);
@@ -300,6 +344,7 @@ export function firstSyncOutcome(
 							previous.message === gap.message
 								? gap.message
 								: `${previous.message} ${gap.message}`,
+						needsPerson: previous.needsPerson || gap.needsPerson,
 						retryable: previous.retryable || gap.retryable,
 					}
 				: gap,
@@ -309,14 +354,19 @@ export function firstSyncOutcome(
 		return {
 			kind: "partial",
 			collected,
-			missing: [...missingByKind.values()],
+			missing: [...missingByKind.values()].map(
+				({ action: _action, ...gap }) => gap,
+			),
 			primary: {
 				href: sourceRecordsHref(status),
 				label: outcomeCopy.seeData(name),
 			},
-			retry: missing.some((gap) => gap.retryable)
-				? { href: retryHref, label: outcomeCopy.retry }
-				: null,
+			retry: gapAction
+				? { href: retryHref, label: gapAction }
+				: missing.some((gap) => gap.retryable)
+					? { href: retryHref, label: outcomeCopy.retry }
+					: null,
+			technical: technicalLink(status.run?.run_id),
 		};
 	const knownEmpty = facts.kinds !== null && collected.length === 0;
 	if (

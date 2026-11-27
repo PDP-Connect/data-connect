@@ -145,8 +145,13 @@ test("failed shows its reason under the headline and the server message only in 
   const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)));
   assert.match(html, /Amazon didn&#x27;t connect\./);
   assert.match(html, /Something went wrong while copying your data\./);
-  assert.match(html, /<details/);
-  assert.match(html, /What went wrong/);
+  // A run id exists: the raw reason lives on the technical page, not in a fold.
+  assert.doesNotMatch(html, /HTTP 429 from provider/);
+  assert.match(html, /\/syncs\/run_1\/technical/);
+  const noRun = firstSyncOutcome({ ...failedState.status, run: null }, "Amazon", withOrders);
+  const noRunHtml = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(noRun)));
+  assert.match(noRunHtml, /<details/);
+  assert.match(noRunHtml, /What went wrong/);
 });
 
 // Design Page 3: the result is the heading beside one logo; arrivals are a "What is here" style list;
@@ -232,7 +237,9 @@ test("a first connection that failed before its sign-in page opened says what di
   if (outcome.kind !== "failed") return;
   assert.equal(outcome.reason, "DataConnect could not open Northwind's sign-in page.");
   assert.equal(outcome.retry.label, "Try again");
-  assert.equal(outcome.wentWrong, failed.last_error?.reason);
+  // A run id exists: the raw reason moves to its technical page.
+  assert.equal(outcome.wentWrong, null);
+  assert.equal(outcome.technical?.href, "/syncs/run_1/technical");
   const afterCopy = firstSyncOutcome(failed, "Northwind", { ...facts, kinds: [{ count: 1, kind: "messages" }] });
   assert.ok(afterCopy.kind === "failed" && afterCopy.reason === "Something went wrong while copying your data.");
 });
@@ -248,7 +255,37 @@ test("partial: a gap's raw connector text is replaced by one plain sentence", as
   const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" }))).replace(/\s+/g, " ");
   assert.doesNotMatch(text, /venmo_session_failed|Staged stream|succe…|30000ms|CAPTCHA/);
   assert.match(text, /Venmo asked for a new sign-in\./);
-  assert.match(text, /It will try again the next time DataConnect checks Venmo\./);
+  // A sign-in cause needs the person: no promise of an automatic retry, a real action instead.
+  assert.doesNotMatch(text, /It will try again/);
+  assert.equal(outcome.kind === "partial" ? outcome.retry?.label : null, "Sign in again");
+  assert.match(outcome.kind === "partial" ? outcome.retry?.href ?? "" : "", /^\/connect\/browser-session\/amazon\/launch/);
+  assert.ok(/href="\/connect\/browser-session\/amazon\/launch[^"]*"[^>]*>(?:<!-- -->)?Sign in again/.test(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" }))));
+  assert.equal(outcome.kind === "partial" ? outcome.technical?.href : null, "/syncs/run_1/technical");
+  assert.match(text, /Technical details/);
+});
+test("partial: a cause that retries by itself still says so, with Try again", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const facts = { ...withOrders, gaps: [{ kind: "skip_result", reason: "stream_collection_failed", message: "x", recovery_hint: { retryable: true } }] };
+  const outcome = firstSyncOutcome(status(), "Amazon", facts);
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(outcome)))).replace(/\s+/g, " ");
+  assert.match(text, /It will try again the next time DataConnect checks Amazon\./);
+  assert.equal(outcome.kind === "partial" ? outcome.retry?.label : null, "Try again");
+});
+test("failed: a known cause gets its plain sentence and action, the raw reason stays on the technical page", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const failed = status({ setup_state: "first_sync_failed", last_error: { reason: "venmo_session_failed: venmo_login_did_not_complete", remediation: "x" } });
+  const outcome = firstSyncOutcome(failed, "Venmo", withOrders);
+  assert.equal(outcome.kind, "failed");
+  if (outcome.kind !== "failed") return;
+  assert.equal(outcome.reason, "Venmo asked for a new sign-in.");
+  assert.equal(outcome.retry.label, "Sign in again");
+  assert.equal(outcome.wentWrong, null);
+  assert.equal(outcome.technical?.href, "/syncs/run_1/technical");
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" })));
+  assert.doesNotMatch(text, /venmo_session_failed|What went wrong/);
+  assert.match(text, /Technical details/);
+  const noRun = firstSyncOutcome(status({ ...failed, run: null }), "Venmo", withOrders);
+  assert.ok(noRun.kind === "failed" && noRun.technical === null && noRun.wentWrong === failed.last_error?.reason);
 });
 test("partial: a gap with no known cause says DataConnect could not copy it", () => {
   const outcome = firstSyncOutcome(status(), "Northwind", { ...withOrders, gaps: [{ kind: "skip_result", stream: "returns", reason: "odd", message: "odd_code: raw detail" }] });

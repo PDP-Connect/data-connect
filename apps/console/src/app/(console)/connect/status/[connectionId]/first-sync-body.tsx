@@ -141,17 +141,34 @@ function Body({
 								<p className="text-foreground">{gap.label}</p>
 								<p className="pdpp-caption text-muted-foreground">
 									{gap.message}
-									{gap.retryable ? ` It will try again the next time DataConnect checks ${name}.` : ""}
+									{gap.retryable && !gap.needsPerson ? ` It will try again the next time DataConnect checks ${name}.` : ""}
 								</p>
 							</li>
 						))}
 					</DataList>
 					<div className="flex flex-wrap gap-2">
-						<LinkButton link={outcome.primary} primary />
-						{outcome.retry ? (
-							<LinkButton link={outcome.retry} primary={false} />
-						) : null}
+						{outcome.retry?.label === "Sign in again" ? (
+							<>
+								<LinkButton link={outcome.retry} primary />
+								<LinkButton link={outcome.primary} primary={false} />
+							</>
+						) : (
+							<>
+								<LinkButton link={outcome.primary} primary />
+								{outcome.retry ? (
+									<LinkButton link={outcome.retry} primary={false} />
+								) : null}
+							</>
+						)}
 					</div>
+					{outcome.technical ? (
+						<Link
+							className="pdpp-caption text-muted-foreground underline"
+							href={outcome.technical.href}
+						>
+							{outcome.technical.label}
+						</Link>
+					) : null}
 				</>
 			);
 		case "needs-you":
@@ -169,6 +186,14 @@ function Body({
 						) : null}
 					</div>
 					{outcome.wentWrong ? <WentWrong message={outcome.wentWrong} /> : null}
+					{outcome.technical ? (
+						<Link
+							className="pdpp-caption text-muted-foreground underline"
+							href={outcome.technical.href}
+						>
+							{outcome.technical.label}
+						</Link>
+					) : null}
 				</>
 			);
 		case "paused":
