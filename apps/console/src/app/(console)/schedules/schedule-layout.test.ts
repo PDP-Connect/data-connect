@@ -16,3 +16,7 @@ test("Change and Pause say what they act on", () => {
   assert.match(src, /aria-label=\{`Change how often/);
   assert.match(src, /aria-label=\{`\$\{enabled \? "Pause" : "Resume"\} syncing/);
 });
+
+test("the Schedules page words its count line with the shared summary function", () => {
+  assert.match(read("page.tsx"), /scheduleSummaryLine\(/);
+});
