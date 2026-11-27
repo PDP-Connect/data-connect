@@ -320,6 +320,14 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   if (source.last_run?.status === "failed") {
     return failedRunAnswer(source, options, name, true)!;
   }
+  if (resolver === "system_degraded" && source.rendered_verdict?.pill.label === "Needs refresh") {
+    // Nothing stopped: the last copy is old. Without a schedule, the person asks.
+    if (source.schedule?.enabled !== true) {
+      const text = `${when ? `Last synced ${when}. ` : ""}DataConnect checks ${name} only when you ask.`;
+      return { row: 17, words: text, tone: "plain", action: syncAction(source), sentence: { text, slot: null }, problem: false };
+    }
+    return { row: 17, words: withWhen("A refresh is due"), tone: "plain", action: syncAction(source), sentence: { text: `A refresh is due.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+  }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
     const base = label === "Missing optional data"

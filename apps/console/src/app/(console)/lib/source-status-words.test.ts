@@ -550,3 +550,20 @@ test("a sign-in that expired is the person's step even when the server blames th
   assert.equal(result.words, "Venmo asked for a new sign-in.");
   assert.equal(result.action?.label, "Sign in again");
 });
+
+test("an idle source that only syncs when asked is not broken", () => {
+  const idle = source({
+    connector_display_name: "Steam",
+    owner_state: { ...healthyState, resolver: "system_degraded" },
+    rendered_verdict: verdict("Needs refresh"),
+    connection_health: health({ last_success_at: "2026-11-14T12:00:00Z" }),
+    last_run: { event_count: 0, failure_reason: null, finished_at: "2026-11-14T12:00:00Z", first_at: "2026-11-14T12:00:00Z", last_at: "2026-11-14T12:00:00Z", run_id: "run-test", started_at: "2026-11-14T12:00:00Z", status: "succeeded" } as never,
+  });
+  const manual = sourceStatusWords({ ...idle, schedule: null }, { now: NOW });
+  assert.equal(manual.words, "Last synced 14 Nov. DataConnect checks Steam only when you ask.");
+  assert.deepEqual(manual.action, { kind: "sync_now", label: "Sync now", filled: false });
+  assert.equal(sourceStateSentence({ ...idle, schedule: null }, { now: NOW, name: "Steam" }).text, manual.words);
+  const scheduled = sourceStatusWords({ ...idle, schedule: automaticSchedule }, { now: NOW });
+  assert.equal(scheduled.words, "A refresh is due · last synced 14 Nov");
+  assert.deepEqual(scheduled.action, { kind: "sync_now", label: "Sync now", filled: false });
+});
