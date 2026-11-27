@@ -518,3 +518,11 @@ for(const state of AGREEMENT_STATES) {
     dom.window.close();
   });
 }
+
+test("a connector that must be installed again gives no schedule promise", async () => {
+  const { ScheduleSummary } = await import("./source-page.tsx");
+  const model = buildRecoveryDemoModel(19);
+  const html = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: "Steam", notInstalled: true, schedule: model.schedule, scheduleError: null, sourceInstances: [], now: new Date("2027-01-01") }));
+  assert.match(html, /Not checked until Steam is installed again\./);
+  assert.doesNotMatch(html, /checks Steam|Next check/);
+});

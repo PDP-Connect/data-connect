@@ -6,6 +6,7 @@
 import { IcButton } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
+import { connectorNotInstalledWords } from "../../lib/source-status-words.ts";
 import { installConnectorForSourceAction } from "./install-connector-action.ts";
 import { ACTION_ERROR_COPY } from "./source-detail-copy.ts";
 
@@ -65,7 +66,7 @@ export function ConnectorInstallPrompt({ actionLabel, showSentence = false, conn
       role={notice ? "status" : undefined}
     >
       {notice || showSentence ? <p className={`pdpp-caption min-w-0 break-words ${notice ? "font-medium" : "text-attention"}`}>
-        {`DataConnect needs to install ${displayName} again before it can sync.`}
+        {connectorNotInstalledWords(displayName)}
       </p> : null}
       {notice ? (
         <p className="pdpp-caption min-w-0 break-words text-muted-foreground">Your records stay.</p>

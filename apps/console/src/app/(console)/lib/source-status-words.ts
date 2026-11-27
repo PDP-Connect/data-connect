@@ -157,6 +157,15 @@ function refreshRow(source: RefConnectorSummary, name: string, when: string | nu
   return { row: 17, words: when ? `A refresh is due · last synced ${when}` : "A refresh is due", tone: "plain", action: syncAction(source), sentence: { text: `A refresh is due.${when ? ` ${syncedClause}` : ""}`, slot: null }, problem: false };
 }
 
+/**
+ * The one sentence for a connector that must be installed again. The status payload says only that
+ * the connector is not installed (`connector_implementation.state`), not why, so the first sentence
+ * says just that and does not invent a cause.
+ */
+export function connectorNotInstalledWords(name: string): string {
+  return `The part of DataConnect that reads ${name} is no longer installed. DataConnect needs to install ${name} again before it can sync.`;
+}
+
 function lifecycleRow(
   source: RefConnectorSummary,
   projection: ReturnType<typeof projectSourceActionability>,
@@ -172,7 +181,7 @@ function lifecycleRow(
   }
   if (projection.revoked) return { row: 3, words: "Disconnected", tone: "faint", action: action("set_up_again", "Set up again", false) , sentence: { text: "Disconnected. Your records stay.", slot: null }, problem: false };
   if (source.connector_implementation?.state === "not_installed") {
-    const text = `DataConnect needs to install ${name} again before it can sync.`;
+    const text = connectorNotInstalledWords(name);
     return { row: 4, words: text, tone: "attention", action: action("install", "Install again", true) , sentence: { text, slot: null }, problem: true };
   }
 

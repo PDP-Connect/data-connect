@@ -788,7 +788,7 @@ function ConnectorPageView({
   const neverConnected = sourceNeverConnected(source);
   const archived = source.source_visibility === "archived";
   const oneTime = source.source_kind === "manual" || source.rendered_verdict?.pill.label === "Import complete";
-  const pausable = !(revoked || paused || archived || oneTime) && Boolean(model.schedule) && model.schedule?.effective_mode !== "manual" && overview.connectionStatus === "active";
+  const pausable = !(revoked || paused || archived || oneTime || connectorNotInstalled) && Boolean(model.schedule) && model.schedule?.effective_mode !== "manual" && overview.connectionStatus === "active";
   // Stable rename selector: prefer the explicit instance id, fall back to the
   // connection id. Both address the same connection on the backend route.
   const renameSelector = connectorInstanceId ?? connectionId;
@@ -896,7 +896,7 @@ function ConnectorPageView({
         </div> : null}
       </Section> : null}
       {!neverConnected ? apps : null}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} notInstalled={installPromptShown} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
       {!archived && !neverConnected ? <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
@@ -1879,11 +1879,11 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
   );
 }
 
-export function ScheduleSummary({ displayName, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
-  displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
+export function ScheduleSummary({ displayName, notInstalled = false, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
+  notInstalled?: boolean; displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
 }) {
-  const text = disconnected ? "Not checked while disconnected." : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
-  const next = !disconnected && !paused && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
+  const text = disconnected ? "Not checked while disconnected." : notInstalled ? `Not checked until ${displayName} is installed again.` : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const next = !disconnected && !paused && !notInstalled && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
   const deviceName = device?.device_display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);
