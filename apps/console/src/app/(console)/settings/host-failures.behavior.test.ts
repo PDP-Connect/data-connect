@@ -403,6 +403,35 @@ test("boot listing timeout shows possibly live and offers a recovery check", asy
   });
 });
 
+test("a failed earlier-address check shows the page's error and the button works again", async () => {
+  const handler = host({
+    "/state": ok({ ...idleState, recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] } }),
+    "/recovery/check": fail("service_unavailable"),
+  });
+  await withScreen(handler, async ({ press, alerts, buttons, settle }) => {
+    await press(/^Check earlier addresses$/);
+    await settle();
+    assert.ok(alerts() > 0, "the failure is shown, not dropped");
+    assert.ok(buttons().includes("Check earlier addresses"));
+  });
+});
+
+test("the earlier-address check cannot be sent twice while it is pending", async () => {
+  let release: (value: Result) => void = () => {};
+  const pending = new Promise<Result>((resolve) => { release = resolve; });
+  const handler = host({
+    "/state": ok({ ...idleState, recovery: { pending: false, blockedBy: "recovery_timed_out", actions: ["check"] } }),
+    "/recovery/check": () => pending,
+  });
+  await withScreen(handler, async ({ press, calls, settle }) => {
+    await press(/^Check earlier addresses$/);
+    await press(/^Check earlier addresses$/).catch(() => {});
+    assert.equal(calls.filter((call) => call.url === "/recovery/check").length, 1);
+    release(ok({ closed: 0, failed: 0, reproved: 0 }));
+    await settle();
+  });
+});
+
 test("a headless host without desktop controls does not claim its service is down or local-only", async () => {
   await withScreen(host({
     "/host-settings": ok({ known: false, reason: "host-supervisor-unavailable" }),

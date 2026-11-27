@@ -192,6 +192,7 @@ export function RemoteAccessSetting({
   // The last read that got no answer, for Details under the stale line.
   const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
   const [error, setError] = useState<DisplayError | null>(null);
+  const [checkingEarlier, setCheckingEarlier] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   // After Cancel: the host is turning it off, or could not confirm it is off.
   const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
@@ -1068,6 +1069,19 @@ export function RemoteAccessSetting({
     void loadRef.current?.();
     setPrepRun((n) => n + 1);
   };
+  const checkEarlierAddresses = async () => {
+    if (checkingEarlier) return;
+    setCheckingEarlier(true);
+    setError(null);
+    try {
+      await send("/recovery/check", {});
+      refresh();
+    } catch (failure) {
+      setError(toDisplayError(failure, "action", undefined, "check"));
+    } finally {
+      setCheckingEarlier(false);
+    }
+  };
   const recover: Recover = {
     request,
     onTryAgain: refresh,
@@ -1208,7 +1222,7 @@ export function RemoteAccessSetting({
       ) : null)}
       {journalWarning && state.lifecycle?.cleanup !== "unconfirmed" ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
-        <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
+        <Button disabled={checkingEarlier || busy} onClick={() => void checkEarlierAddresses()}>Check earlier addresses</Button>
       ) : null}
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
         <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
@@ -1509,7 +1523,7 @@ export function RemoteAccessSetting({
       </section>
       </>}
       {technical && error ? <RecoveryContext.Provider value={recover}><ErrorNotice error={error} /></RecoveryContext.Provider> : null}
-      {technical ? <Diagnostics label="This computer">
+      {technical ? <Diagnostics label="Remote access details">
         {Object.entries(capabilities).map(([id, observation]) => (
           <p key={id}>
             {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
