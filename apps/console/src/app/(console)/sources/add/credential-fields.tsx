@@ -81,14 +81,19 @@ export function CredentialFields({
  */
 export function OptionalSignIn({
   checkboxName,
+  errorId,
   fields,
+  initiallySaving = false,
   name,
 }: {
   checkboxName: string;
+  /** Set when the form was rejected: the id of the alert that says why. */
+  errorId?: string | undefined;
   fields: readonly CredentialFieldSpec[];
+  initiallySaving?: boolean;
   name: string;
 }) {
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(initiallySaving);
   return (
     <div className="grid gap-3" data-testid="optional-sign-in">
       <label className="flex min-h-11 items-center gap-2" htmlFor="save-sign-in">
@@ -105,7 +110,7 @@ export function OptionalSignIn({
       </label>
       {saving ? (
         <>
-          <CredentialFields fields={fields} idPrefix="sign-in" required={false} />
+          <CredentialFields errorId={errorId} fields={fields} idPrefix="sign-in" required={false} />
           <p className="pdpp-caption text-muted-foreground">{signInCopy.storage(name)}</p>
         </>
       ) : null}

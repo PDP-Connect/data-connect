@@ -100,7 +100,7 @@ export function SignInConnectBody({
             <SubmitButton>{repairMode ? `Reconnect ${name}` : signInCopy.button(name)}</SubmitButton>
           </div>
           {capture && !capture.required ? (
-            <OptionalSignIn checkboxName={capture.checkboxName} fields={capture.fields} name={name} />
+            <OptionalSignIn checkboxName={capture.checkboxName} errorId={error ? CONNECT_ERROR_ID : undefined} fields={capture.fields} name={name} />
           ) : null}
         </form>
       </div>

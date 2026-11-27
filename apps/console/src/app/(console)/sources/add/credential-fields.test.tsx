@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CredentialFields } from "./credential-fields.tsx";
+import { CredentialFields, OptionalSignIn } from "./credential-fields.tsx";
 
 Object.assign(globalThis, { React });
 
@@ -58,4 +58,24 @@ test("when the form was rejected, each field is marked invalid and points at the
   );
   assert.match(html, /aria-invalid="true"/);
   assert.match(html, /aria-describedby="key-k-help connect-error"/);
+});
+
+// Round 7 review B4: the optional saved sign-in fields point at the rejection alert too.
+test("the optional saved sign-in fields are marked invalid and linked to the alert after a rejection", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionalSignIn, {
+      checkboxName: "save",
+      errorId: "connect-error",
+      fields: [{ autocomplete: null, label: "Password", name: "pw", placeholder: null, required: false, secret: true, type: "password" }],
+      initiallySaving: true,
+      name: "Venmo",
+    })
+  );
+  assert.match(html, /aria-invalid="true"/);
+  assert.match(html, /aria-describedby="connect-error"/);
+});
+test("the sign-in body hands the alert id to the optional fields", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./connect-bodies.tsx", import.meta.url), "utf8");
+  assert.match(src, /<OptionalSignIn checkboxName=\{capture\.checkboxName\} errorId=\{error \? CONNECT_ERROR_ID : undefined\}/);
 });
