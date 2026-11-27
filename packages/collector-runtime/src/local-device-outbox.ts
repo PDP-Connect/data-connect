@@ -305,6 +305,94 @@ export class LocalDeviceOutbox {
     this.#db.close();
   }
 
+  /**
+   * Begin a run's scan from `startKey` (its connector build, scope and prior
+   * state). Seen identities belong to one chain of runs, each starting where
+   * the previous acknowledged stop left the state. A run that starts anywhere
+   * else (an owner reset, a new build, a scope change, another writer) starts
+   * a new chain, so the old chain's seen identities are dropped.
+   */
+  startScanIdentityChain(input: { sourceInstanceId: string; startKey: string }): void {
+    const chain = this.#db
+      .prepare("SELECT next_start_key FROM local_device_scan_identity_chain WHERE source_instance_id = ?")
+      .get(input.sourceInstanceId);
+    if (!isRecord(chain) || chain.next_start_key === input.startKey) {
+      return;
+    }
+    this.clearScanIdentities({ sourceInstanceId: input.sourceInstanceId });
+  }
+
+  /**
+   * Record the identities of records a run just queued, tagged with `runId`,
+   * and return how many are not yet seen: no run of the current chain whose
+   * checkpoint was acknowledged ({@link LocalDeviceOutbox.commitScanIdentities})
+   * has queued them. Identities are 64-bit hashes, so the table holds one
+   * small row per distinct record version until the chain ends
+   * ({@link LocalDeviceOutbox.clearScanIdentities}).
+   */
+  recordScanIdentities(input: { identities: readonly bigint[]; runId: string; sourceInstanceId: string }): number {
+    if (input.identities.length === 0) {
+      return 0;
+    }
+    // Returns a row unless the identity is already seen (committed).
+    const upsert = this.#db.prepare(
+      `INSERT INTO local_device_scan_record_identity (source_instance_id, identity, run_id, committed)
+       VALUES (?, ?, ?, 0)
+       ON CONFLICT (source_instance_id, identity) DO UPDATE SET run_id = excluded.run_id WHERE committed = 0
+       RETURNING committed`
+    );
+    let unseen = 0;
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const identity of input.identities) {
+        if (upsert.get(input.sourceInstanceId, identity, input.runId) !== undefined) {
+          unseen += 1;
+        }
+      }
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+    return unseen;
+  }
+
+  /**
+   * Mark the identities `runId` queued as seen, once its checkpoint is
+   * acknowledged, and record `nextStartKey`, where the chain's next run
+   * starts.
+   */
+  commitScanIdentities(input: { nextStartKey: string; runId: string; sourceInstanceId: string }): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db
+        .prepare(
+          "UPDATE local_device_scan_record_identity SET committed = 1 WHERE source_instance_id = ? AND run_id = ? AND committed = 0"
+        )
+        .run(input.sourceInstanceId, input.runId);
+      this.#db
+        .prepare(
+          `INSERT INTO local_device_scan_identity_chain (source_instance_id, next_start_key) VALUES (?, ?)
+           ON CONFLICT (source_instance_id) DO UPDATE SET next_start_key = excluded.next_start_key`
+        )
+        .run(input.sourceInstanceId, input.nextStartKey);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** End the source's chain (a complete pass, or a run that left it): drop its identities. */
+  clearScanIdentities(input: { sourceInstanceId: string }): void {
+    this.#db
+      .prepare("DELETE FROM local_device_scan_record_identity WHERE source_instance_id = ?")
+      .run(input.sourceInstanceId);
+    this.#db
+      .prepare("DELETE FROM local_device_scan_identity_chain WHERE source_instance_id = ?")
+      .run(input.sourceInstanceId);
+  }
+
   enqueue(input: LocalDeviceOutboxEnqueueInput): LocalDeviceOutboxItem {
     const now = this.#now();
     const payloadJson = JSON.stringify(input.payload);
@@ -1415,6 +1503,7 @@ export class LocalDeviceOutbox {
       this.#applySchemaV3();
     }
     this.#applySchemaV4();
+    this.#applyScanRecordIdentityTables();
     if (version < CURRENT_SCHEMA_VERSION) {
       this.#db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`);
     }
@@ -1536,6 +1625,31 @@ export class LocalDeviceOutbox {
       }
       throw error;
     }
+  }
+
+  /**
+   * Record identities queued by each source's current chain of budget-stopped
+   * runs, and where that chain's next run starts (see
+   * {@link LocalDeviceOutbox.startScanIdentityChain}). Additive and
+   * `IF NOT EXISTS`, so it does not bump `user_version`: an older runner never
+   * reads these tables and keeps opening the file.
+   */
+  #applyScanRecordIdentityTables(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS local_device_scan_record_identity (
+        source_instance_id TEXT NOT NULL,
+        identity INTEGER NOT NULL,
+        run_id TEXT NOT NULL,
+        committed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_instance_id, identity)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS local_device_scan_record_identity_run_idx
+        ON local_device_scan_record_identity (source_instance_id, run_id);
+      CREATE TABLE IF NOT EXISTS local_device_scan_identity_chain (
+        source_instance_id TEXT PRIMARY KEY,
+        next_start_key TEXT NOT NULL
+      );
+    `);
   }
 
   /** Schema v4 — append-only retirement links for rebuilt terminal commits. */

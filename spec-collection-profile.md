@@ -107,7 +107,7 @@ The connector process transitions through the following states:
 | `waiting_for_interaction` | INTERACTION_RESPONSE received | Unblock; process response | `collecting` |
 | `waiting_for_interaction` | Emit INTERACTION | Protocol violation (see below) | `failed` |
 | `waiting_for_interaction` | Fatal error | Write to stderr; exit non-zero | `failed` |
-| Any | Runtime terminates process | (external) | `failed` |
+| Any | Runtime terminates process | (external) | `failed` (a [runtime budget stop](#runtime-budget-stop) is retryable) |
 
 **Protocol violations:**
 
@@ -115,7 +115,7 @@ The connector process transitions through the following states:
 - A connector that receives INTERACTION_RESPONSE while in `collecting` (no pending INTERACTION) SHOULD treat it as a fatal protocol error, write a diagnostic to stderr, and exit with non-zero status.
 - START is exactly-once. It MUST be the first message sent by the runtime. A connector that receives START while in any state other than `initializing` MUST treat it as a fatal protocol error.
 
-**Runtime behavior on failure:** The runtime MUST NOT persist STATE checkpoints from a run that terminates in the `failed` state, except for the certified stream-scoped failure described under [DONE](#done). State is otherwise persisted only after a successful DONE.
+**Runtime behavior on failure:** The runtime MUST NOT persist STATE checkpoints from a run that terminates in the `failed` state, except for the certified stream-scoped failure described under [DONE](#done) and the [runtime budget stop](#runtime-budget-stop). State is otherwise persisted only after a successful DONE.
 
 SKIP_RESULT is a message emitted while in the `collecting` state. It does not cause a state transition.
 
@@ -375,7 +375,18 @@ A failed run certifies a **stream-scoped failure** only when both of these condi
 1. `DONE.error.code` is `stream_collection_failed`.
 2. The run previously emitted at least one in-scope `SKIP_RESULT` with `reason: "stream_collection_failed"` and a non-empty `stream` naming each failed data stream.
 
-For a certified stream-scoped failure, the runtime MAY persist staged STATE for checkpoint streams that do not cover any named failed data stream. If it does, the runtime MUST NOT persist a named failed stream's checkpoint or any parent checkpoint that covers it. The run remains `failed`; its failed streams remain unproven and eligible for retry. A missing or mismatched terminal code, a missing or untargeted skip, an out-of-scope stream, a protocol violation, an invalid terminal count or exit code, a process exit without valid DONE, or cancellation MUST preserve the default fail-closed rule and persist no staged STATE.
+For a certified stream-scoped failure, the runtime MAY persist staged STATE for checkpoint streams that do not cover any named failed data stream. If it does, the runtime MUST NOT persist a named failed stream's checkpoint or any parent checkpoint that covers it. The run remains `failed`; its failed streams remain unproven and eligible for retry. A missing or mismatched terminal code, a missing or untargeted skip, an out-of-scope stream, a protocol violation, an invalid terminal count or exit code, a process exit without valid DONE, or cancellation MUST preserve the default fail-closed rule and persist no staged STATE. The one exception for a process exit without valid DONE is the runtime budget stop below.
+
+<a id="runtime-budget-stop"></a>**Runtime budget stop.** A runtime MAY bound the work of one run (for example, the number of record batches it queues) and terminate the connector when the connector emits a RECORD after the bound is full. A connector that reaches DONE without exceeding the bound completes normally, even if it filled the bound exactly. Without this rule, a walk larger than the bound restarts from the same checkpoint every run and never completes. A budget-stopped run is not `succeeded`, MUST NOT record coverage or terminal evidence, and stays retryable. It MAY persist staged STATE only under all of these conditions:
+
+1. The runtime ended the run because of the bound before DONE. If the run emitted a `SKIP_RESULT` with `reason: "stream_collection_failed"`, a `DETAIL_GAP`, or any `DETAIL_COVERAGE`, the runtime MUST NOT persist any STATE from the stop, because it cannot tell which checkpoint covers unproven detail (a parent checkpoint can cover a child stream). A runtime that does not evaluate detail coverage against the connector's manifest therefore cannot carry such a walk across budget stops: after one stop, the walk stays blocked at that bound until the bound is raised or the starting state changes, as it was before this rule existed.
+2. A STATE is eligible only if the connector emitted at least one RECORD earlier in the run. The checkpoint stream may differ from the record streams it covers. A STATE emitted before any record of the run covers nothing new, for example a re-stamped `fetched_at`, and MUST NOT be persisted.
+3. Coverage-diagnostic STATE is never persisted from a budget stop.
+4. The runtime persists eligible STATE only after every RECORD emitted before it is durably written, in the same order as for a successful run. Records emitted after the persisted STATE stay uncovered and are emitted again by a later run.
+
+This rule relies on STATE covering only records already emitted. A connector MUST NOT emit a STATE whose cursor covers records it has not yet emitted, such as a high-water mark taken before an unordered walk finishes. It also relies on record data coming from the source alone: re-emitting an unchanged record MUST yield identical data. A connector that puts run-varying values (such as a fetch time) in record data makes every replay look like new data, so the runtime cannot detect its replays.
+
+Before it retries with the same or a smaller bound, the runtime MUST decide whether the stop made progress. Cursors are opaque and record keys can repeat, so neither proves progress. Progress is judged by record versions: a record's identity is its stream, primary key and data, so a new version of a record (a change feed) counts as new. Identities belong to a chain of runs in which each run starts from the state the previous acknowledged stop left (the prior state with that stop's persisted STATE applied), with the same connector build and scope. A run that starts anywhere else, for example after an owner state reset, a connector update or a scope change, begins a new chain with no seen identities; a complete pass ends the chain. An identity counts as seen once the STATE persisted by the run that queued it is acknowledged, whether in that run or in a later run's drain; a run whose STATE never lands leaves its records unseen. A stop made progress only if it durably queued at least one identity not yet seen in its chain. A run that changes only cursor fields, such as a fresh `fetched_at`, or that queues only seen records, made no progress. A stop that made no progress, or that has no eligible STATE, is not resumable: the runtime MUST NOT start another run with the same or a smaller bound, the same connector build and scope, from the state that stop left behind. The connector build is identified by the content of its entrypoint, not only its path, so a connector updated in place permits a new attempt. A larger bound, a different scope, or any other change to the starting state also permits a new attempt. The runtime MUST send each budget-stop STATE even when an earlier run persisted an identical one, so a state reset never swallows the commit.
 
 `error` MAY carry `code` and/or `recovery_hint`, in addition to the required `message` and `retryable`:
 
@@ -418,7 +429,7 @@ A conformant connector:
 3. Handles INTERACTION messages by prompting the user or agent and sending INTERACTION_RESPONSE.
 4. Sends INTERACTION_RESPONSE with `status: "timeout"` if no response arrives within `timeout_seconds`.
 5. Persists STATE only after preceding records are durably written.
-6. Does NOT persist STATE on `cancelled` runs or uncertified `failed` runs; for a certified stream-scoped failure, persists only staged checkpoint streams that do not cover a named failed data stream.
+6. Does NOT persist STATE on `cancelled` runs or uncertified `failed` runs; for a certified stream-scoped failure, persists only staged checkpoint streams that do not cover a named failed data stream; for a [runtime budget stop](#runtime-budget-stop), persists only the eligible staged STATE and does not repeat a stop that made no progress.
 7. Uses the connector's global state namespace for proactive runs, the `grant_id`-scoped namespace for `continuous` grant runs, and `state: null` for `single_use` runs.
 8. Terminates the connector process on protocol violations.
 9. Does not log or persist credential data from INTERACTION_RESPONSE.
