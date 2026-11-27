@@ -649,3 +649,18 @@ test("only a required action makes a source need the person; an optional Sync no
   const device = sourceStatusWords(fixture(20), { now: NOW });
   assert.equal(device.needsYou, false);
 });
+
+// Round 8 (F49, F51): "Not copied." with the cause; when the cause is "asked to slow down" the retry is quiet.
+test("a kind that did not come says Not copied with its cause, and a slow-down is not a filled Try again", () => {
+  const slow = source({
+    connector_display_name: "Steam",
+    schedule: automaticSchedule,
+    collection_report: [{ stream: "friends", coverage_condition: "retryable_gap", collected: 0 }] as never,
+    last_run: partialRun([{ kind: "skip_result", stream: "friends", reason: "rate_limited" }]),
+  });
+  const result = sourceStatusWords(slow, { now: NOW });
+  assert.match(result.words, /^Not copied: Friends\. Steam asked DataConnect to slow down\./);
+  assert.equal(result.action?.label, "Try again");
+  assert.equal(result.action?.filled, false);
+  assert.match(sourceStateSentence(slow, { now: NOW, name: "Steam" }).text, /will try again by itself at the next check/);
+});

@@ -252,9 +252,9 @@ test("every practice state obeys the words and folds contract", async (t) => {
 
 test("practice states cover partial copies, missing kinds, settings, accounts and each confirmation", async () => {
   const cases = [
-    ["partly-more-coming", /24 records so far\. Some didn't come at the last sync\./],
-    ["partly-some-lost", /24 records so far\. Some didn't come at the last sync\./],
-    ["didnt-come", /Didn't come at the last sync\./],
+    ["partly-more-coming", /24 records so far\. Some are not copied\./],
+    ["partly-some-lost", /24 records so far\. Some are not copied\./],
+    ["didnt-come", /Not copied: Messages\./],
     ["settings-choices", /Settings[\s\S]*Increase this to copy older messages\./],
     ["settings-question", /Awaiting your confirmation/],
     ["other-accounts", /Also connected: Northwind \(work\)/],
@@ -391,7 +391,7 @@ test("the unmeasured-completeness practice state uses the shared plain sentence 
 test("real-data shapes never expose raw errors or actionless waiting states", async () => {
   const raw = await renderDemo("raw-error");
   assert.doesNotMatch(visibleOutsideDetails(raw), /offset=|refusing_to_advance|machine_failure/);
-  assert.match(visibleOutsideDetails(raw), /Didn't come at the last sync/);
+  assert.match(visibleOutsideDetails(raw), /Not copied: Messages/);
   const waiting = await renderDemo("waiting-unknown");
   assert.match(visibleOutsideDetails(waiting), /Something stopped Northwind from syncing/);
   assert.ok([...waiting.window.document.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
@@ -424,7 +424,7 @@ test("empty kinds collapse and missing measurement never claims permanent loss",
   assert.match(document.body.textContent ?? "", /SessionsNone yet/);
   assert.match(document.querySelector('a[href$="/sessions"]')?.textContent ?? "", NONE_YET);
   assert.doesNotMatch(visibleOutsideDetails(await renderDemo("measurement-shortfall")), /Some could not be copied|Some of it didn't come/);
-  assert.match(visibleOutsideDetails(await renderDemo("partly-some-lost")), /Some didn't come at the last sync/);
+  assert.match(visibleOutsideDetails(await renderDemo("partly-some-lost")), /Some are not copied/);
 });
 
 test("short service names stay in sentences and other accounts exclude this source", async () => {
@@ -466,7 +466,7 @@ test("positive kinds never carry the whole-kind failure sentence", async () => {
     const dom = await renderDemo(state);
     const row = dom.window.document.querySelector('a[href$="/messages"]');
     assert.doesNotMatch(row?.textContent ?? "", /Didn't come at the last sync/);
-    if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some didn't come at the last sync/);
+    if (state === "partly-some-lost") assert.match(row?.textContent ?? "", /Some are not copied/);
   }
 });
 

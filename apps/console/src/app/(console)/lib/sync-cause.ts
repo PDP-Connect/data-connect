@@ -5,7 +5,7 @@
 export const RETRY_AFTER_FAILURE_LABEL = "Try again";
 
 export interface SyncCauseEvidence { reason?: string | null; error?: string | null; connector_error?: unknown }
-export interface SyncCause { sentence: string; action: "Sign in again" | "Try again" | null; known: boolean; needsPerson: boolean; /** The service itself did not answer (retryable). Not a fault in DataConnect's program. */ unavailable?: boolean; /** The service refused the saved credential. */ credentialRejected?: boolean }
+export interface SyncCause { sentence: string; action: "Sign in again" | "Try again" | null; known: boolean; needsPerson: boolean; /** The service itself did not answer (retryable). Not a fault in DataConnect's program. */ unavailable?: boolean; /** The service refused the saved credential. */ credentialRejected?: boolean; /** The service asked DataConnect to slow down: waiting is the remedy, not another try now. */ slowDown?: boolean }
 /** Stored evidence only. Raw text selects an authored sentence; it is never displayed. */
 export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): SyncCause {
   const values: string[] = [evidence.reason ?? "", evidence.error ?? ""];
@@ -22,7 +22,7 @@ export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): Syn
   if (/\b(auth_blocked|login_blocked|access_denied)\b/.test(text)) return { sentence: `${name} didn't let DataConnect sign in.`, action: "Sign in again", known: true, needsPerson: true };
   if (/\b(interaction_timeout|assistance_timeout|assistance_timed_out|login_timeout)\b/.test(text)) return { sentence: "The sign-in wasn't finished.", action: "Try again", known: true, needsPerson: true };
   if (/\bupstream_unavailable\b/.test(text)) return { sentence: `${name} was not available.`, action: "Try again", known: true, needsPerson: false, unavailable: true };
-  if (/\b(?:rate_limited|upstream_pressure)\b/.test(text)) return { sentence: `${name} asked DataConnect to slow down.`, action: null, known: true, needsPerson: false };
+  if (/\b(?:rate_limited|upstream_pressure)\b/.test(text)) return { sentence: `${name} asked DataConnect to slow down.`, action: null, known: true, needsPerson: false, slowDown: true };
   if (/\bstatic_secret_credential_unavailable\b/.test(text)) return { sentence: `DataConnect could not find the saved sign-in details for ${name}.`, action: "Sign in again", known: true, needsPerson: true };
   if (/\b(?:surface_start_failed|headed_browser_unavailable)\b|browsertype\.launch/.test(text)) return { sentence: "DataConnect could not start its browser.", action: null, known: true, needsPerson: false };
   if (/\bingest_endpoint_saturated\b/.test(text)) return { sentence: "DataConnect could not save the copies because its storage was busy.", action: null, known: true, needsPerson: false };

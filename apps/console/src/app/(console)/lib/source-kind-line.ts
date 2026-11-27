@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import type {RefConnectorSummary} from "./ref-client.ts";
 import {sourceStreamRecordCount} from "./source-record-count.ts";
+import {resolveSyncCause} from "./sync-cause.ts";
 import {recordCountLabel} from "./record-count-label.ts";
 /** A held count is distinct from records copied by one attempt (which may repeat records). */
-export function sourceKindLine(source:Pick<RefConnectorSummary,"stream_records"|"collection_report"|"last_run">,kind:string) {
+export function sourceKindLine(source:Pick<RefConnectorSummary,"stream_records"|"collection_report"|"last_run"> & {connector_display_name?:string|null},kind:string) {
   const record=source.stream_records?.find(row=>row.stream===kind);
   const report=source.collection_report?.find(row=>row.stream===kind);
   const count=record ? sourceStreamRecordCount(record) : null;
@@ -13,8 +14,11 @@ export function sourceKindLine(source:Pick<RefConnectorSummary,"stream_records"|
   let knownCount=count ?? 0;
   if (knownCount === 0 && copied > 0) { knownCount=copied; }
   const missing=Boolean(report && ["retryable_gap","terminal_gap","gaps","partial"].includes(report.coverage_condition)) || Boolean(source.last_run?.known_gaps?.some(gap=>typeof gap === "object" && gap !== null && "stream" in gap && gap.stream===kind));
+  const gaps=(Array.isArray(source.last_run?.known_gaps) ? source.last_run?.known_gaps ?? [] : []).filter(gap=>typeof gap === "object" && gap !== null && "stream" in gap && gap.stream===kind);
+  const cause=gaps.length>0 ? resolveSyncCause({connector_error:gaps},source.connector_display_name || "The service") : null;
+  const because=cause?.known ? ` ${cause.sentence}` : "";
   let line="None yet";
-  if (knownCount>0) { line=`${recordCountLabel(knownCount)}${missing ? " so far. Some didn't come at the last sync." : ""}`; }
-  else if(missing) { line="Didn't come at the last sync."; }
+  if (knownCount>0) { line=`${recordCountLabel(knownCount)}${missing ? ` so far. Some are not copied.${because}` : ""}`; }
+  else if(missing) { line=`Not copied.${because}`; }
   return {count:knownCount,line,missing};
 }

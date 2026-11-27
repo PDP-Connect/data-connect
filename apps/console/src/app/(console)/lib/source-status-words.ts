@@ -356,14 +356,17 @@ function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions
     .filter(gap => typeof gap === "object" && gap !== null && "stream" in gap && kinds.includes(String((gap as { stream: unknown }).stream)));
   const cause = gaps.length > 0 ? resolveSyncCause({ connector_error: gaps }, name) : null;
   const known = cause?.known === true ? cause : null;
-  const head = `${joinNames(labels)} didn't come at the last sync.`;
+  const head = `Not copied: ${joinNames(labels)}.`;
   const words = known ? `${head} ${known.sentence}` : head;
   if (known?.needsPerson && known.action === "Sign in again") {
     const savedKey = savedKeyRejected(source, options, known);
     return { row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
   }
-  const next = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";
-  return { row: 16, words, tone: "plain", action: retryAfterFailure(source), sentence: { text: `${words}${next}`, slot: null }, problem: true };
+  const scheduled = isScheduled(source.schedule ?? null);
+  const slowDown = known?.slowDown === true && scheduled;
+  const next = scheduled ? ` DataConnect will try again ${slowDown ? "by itself " : ""}at the next check.` : "";
+  const retry = canStartSync(source) ? action("sync_now", RETRY_AFTER_FAILURE_LABEL, !slowDown) : null;
+  return { row: 16, words, tone: "plain", action: retry, sentence: { text: `${words}${next}`, slot: null }, problem: true };
 }
 
 function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus {
