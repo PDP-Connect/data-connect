@@ -51,7 +51,7 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   setup_configuration_inconsistent: TRY_AGAIN,
   clear_input_unavailable: TRY_AGAIN,
   configuration_migration_required:
-    "Finish or discard your earlier remote access setup before starting a new one.",
+    "Earlier setup needs attention. Review this service’s earlier setup below.",
   operation_recovery_unauthorized: TRY_AGAIN,
   draft_read_required: TRY_AGAIN,
   draft_read_unavailable: TRY_AGAIN,
@@ -98,14 +98,17 @@ export type PublicError = {
   message: string;
   // The server's own sentence. Details only; it can use the old product words.
   serverMessage?: string;
+  reason?: string;
 };
 
-export function publicError(code: string | undefined, serverMessage?: string, action: ActionKind = "turn-on"): PublicError {
+export function publicError(code: string | undefined, serverMessage?: string, action: ActionKind = "turn-on", reason?: unknown): PublicError {
   const known = code === undefined ? undefined : Object.hasOwn(ERROR_MESSAGES, code) ? ERROR_MESSAGES[code] : undefined;
   return {
     code: code ?? "reachability_unavailable",
     message: known ?? genericErrorFor(action),
     ...(serverMessage ? { serverMessage } : {}),
+    ...(code === "configuration_migration_required" && typeof reason === "string" &&
+      ["ambiguous", "incompatible", "taken", "conflict", "absent", "inflight", "in_use", "retired"].includes(reason) ? { reason } : {}),
   };
 }
 

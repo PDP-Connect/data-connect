@@ -64,11 +64,15 @@ const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""
  * SQL that, for one id column, deletes rows under `old` that a row under `new`
  * already covers: same values in every other primary-key column.
  *
- * Precedence is the same for every table and does not compare the rest of
- * the row: the current-id row wins. Releases wrote the old ids before they
- * wrote the current ids, never after, so when both rows exist the current-id
- * row is the later write and the old-id row is stale. Each deletion is
- * counted in {@link ConnectorIdRenameResult.supersededRows} and logged.
+ * The current-id row wins; the rest of the row is not compared. This is a
+ * precedence rule, not a measured order: releases wrote the old ids before
+ * the current ids, so the current-id row is normally the later write, but a
+ * restored or imported store can break that. The tables this applies to
+ * hold connector metadata and bookkeeping, not owner records
+ * (records are keyed by instance, stream and record key). A test in
+ * retired-connector-id-migration.test.ts lists them, so a new table keyed by
+ * connector id fails it until its precedence is decided here. Each deletion
+ * is counted in {@link ConnectorIdRenameResult.supersededRows} and logged.
  */
 function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: string }): string | null {
   if (c.otherKeyColumns === null) {

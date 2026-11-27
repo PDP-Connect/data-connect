@@ -109,3 +109,16 @@ test('a request the browser already dropped never reaches the reference server',
     assert.equal(credentialsRead, before, 'the owner credential is not even read');
   } finally { fetchMock.mock.restore(); }
 });
+
+test('migration reasons survive forwarding and arbitrary reasons are dropped', async () => {
+  const { forwardReachability } = await load();
+  let reason = 'taken';
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    new Response(JSON.stringify({ error: { code: 'configuration_migration_required', reason } }), { status: 409 }));
+  try {
+    const result = (await forwardReachability('/catalog')).result;
+    assert.equal((result as { reason?: string }).reason, 'taken');
+    reason = 'private-value';
+    assert.equal('reason' in (await forwardReachability('/catalog')).result, false);
+  } finally { fetchMock.mock.restore(); }
+});

@@ -8,7 +8,6 @@ import type { OwnerReachabilityContext } from "../routes/owner-reachability.ts";
 import { createCredentialCipher, resolveCredentialEncryptionKey, type CredentialCipher } from "../stores/credential-encryption.ts";
 import { ReachabilityError } from "./approvals.ts";
 import { startDesktopReachability, requireUsableSocketHome } from "./desktop-host.ts";
-import { readEarlierSetup } from "./configuration-compatibility.ts";
 import { createReachabilityService } from "./factory.ts";
 import { loadHostIdentity } from "./identity.ts";
 import { createHostSecretBackend } from "./secret-backend.ts";
@@ -130,7 +129,6 @@ export async function startServerReachability(input: ReachabilityHostInput): Pro
     {
       // A route change never rebinds this server's own listener, so there is no
       // connection of the owner's for it to cut off.
-      readEarlierSetup: (scopes) => readEarlierSetup(home, scopes),
       recoverAtBoot: true,
       acknowledgeDisconnect: async () => undefined,
       prepare: async () => requireUsableSocketHome(home),

@@ -9,9 +9,9 @@
  * a time in one process. This file runs three real OS processes against one
  * SQLite file (WAL, the production busy handling from initDb). Each round
  * every writer parks just before its ingest call; the parent sends each a
- * resume. Child timestamps must show at least one round with all calls started
- * before any returns after commit. This observes call overlap, not SQL lock
- * timing. Rounds repeat; odd writes also update one shared record.
+ * resume while a separate SQLite connection holds a writer lock. It releases
+ * only after all writers reach ingest. This observes call overlap, not SQL
+ * lock timing. Rounds repeat; odd writes update one shared record.
  *
  * What protects the counter on SQLite is the `BEGIN IMMEDIATE` in
  * `writeTransaction` (lib/db.ts): the write lock is taken before the counter
@@ -27,6 +27,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { SqliteDriver } from "../server/sqlite-driver.ts";
 import {
   assertContentionInvariants,
   type ChangeRow,
@@ -37,8 +38,7 @@ import {
 const CONNECTOR_ID = "https://test.pdpp.dev/connectors/version-contention";
 const STREAM = "items";
 const WRITERS = 3;
-// SQLite overlap is scheduling-dependent (observed 1-4 of 6 rounds per run), so run
-// enough rounds that "no round overlapped" means the release is broken, not unlucky.
+// Use enough deterministic rounds to cover both distinct and shared keys.
 const WRITES_PER_WRITER = 20;
 
 function readRows(): {
@@ -87,20 +87,28 @@ test("[sqlite] independent processes racing changed writes on one stream get uni
     initDb(sqlitePath);
     closeDb();
 
-    const result = await runContention({
-      backend: "sqlite",
-      sqlitePath,
-      writers: WRITERS,
-      writesPerWriter: WRITES_PER_WRITER,
-    });
+    const gate = new SqliteDriver(sqlitePath, { timeout: 60000 });
+    const result = await (async () => {
+      try {
+        return await runContention({
+          backend: "sqlite",
+          sqlitePath,
+          writers: WRITERS,
+          writesPerWriter: WRITES_PER_WRITER,
+          holdWriteLock: {
+            acquire: () => { gate.exec("BEGIN IMMEDIATE"); },
+            release: () => { gate.exec("ROLLBACK"); },
+          },
+        });
+      } finally {
+        gate.close();
+      }
+    })();
     for (const [n, child] of result.children.entries()) {
       assert.deepEqual(child.errors, [], `writer w${n} had rejected writes under contention`);
       assert.equal(child.code, 0, `writer w${n} must exit cleanly: ${child.stderr}`);
     }
-    assert.ok(
-      result.overlappedRounds > 0,
-      `no overlapping ingest round: all ${WRITERS} children must resume before any commits in at least one of ${WRITES_PER_WRITER} rounds`
-    );
+    assert.equal(result.overlappedRounds, WRITES_PER_WRITER, "every SQLite round must start all writers before any can commit");
 
     initDb(sqlitePath);
     try {

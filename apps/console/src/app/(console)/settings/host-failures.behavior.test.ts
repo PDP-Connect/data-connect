@@ -414,21 +414,57 @@ test("a headless host without desktop controls does not claim its service is dow
   });
 });
 
-test("earlier setup is a non-blocking notice that clears after reentry", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_800_000_000_000 });
-  let reentered = false;
+const earlierConfiguration = (unaddressable = false) => ({
+  known: false, reason: "configuration_migration_required",
+  migration: { reason: "inflight", candidates: [{ fromRegistryId: "earlier-registry", draftIds: ["earlier-draft"], unaddressableSetupOperations: unaddressable ? 1 : 0 }],
+    ...(unaddressable ? { recovery: { available: false, reason: "unaddressable_setup_operations" } } : {}) },
+});
+
+test("earlier draft card requires confirmation for the exact draft and refreshes after discard", async () => {
+  let discarded = false;
   await withScreen(host({
-    "/catalog": () => ok({ ...catalog, earlierSetup: reentered ? null : "needs_reentry" }),
-  }), async ({ mainText, alerts, buttons, settle }) => {
-    assert.match(mainText(), /earlier setup.*older version.*Enter it again/i);
-    assert.equal(alerts(), 0);
-    assert.ok(buttons().some(label => /Turn on remote access/.test(label)));
-    const turnOn = [...document.querySelectorAll<HTMLButtonElement>("button")].find(button => /Turn on remote access/.test(button.textContent ?? ""));
-    assert.ok(turnOn && !turnOn.disabled, "fresh setup remains available");
-    reentered = true;
-    await act(async () => { t.mock.timers.tick(3_000); });
-    await settle();
-    assert.doesNotMatch(mainText(), /earlier setup.*older version/i);
+    "/catalog": () => ok({ ...catalog, providers: [{ ...provider, configuration: discarded ? provider.configuration : earlierConfiguration() }] }),
+    "/providers/p-tunnel/earlier-drafts/earlier-draft/discard": ({ body }) => {
+      assert.deepEqual(body, { fromRegistryId: "earlier-registry" });
+      discarded = true;
+      return ok({ discarded: true });
+    },
+  }), async ({ mainText, calls, press }) => {
+    assert.match(mainText(), /Earlier setup needs attention/);
+    assert.match(mainText(), /Tunnel service/);
+    assert.match(mainText(), /earlier-draft/);
+    await press(/^Discard draft earlier-draft$/);
+    assert.equal(calls.some(call => call.url.endsWith("/discard")), false);
+    await press(/^Cancel$/);
+    assert.equal(discarded, false);
+    await press(/^Discard draft earlier-draft$/);
+    await press(/^Confirm discard$/);
+    assert.equal(discarded, true);
+    assert.doesNotMatch(mainText(), /Earlier setup needs attention/);
+  });
+});
+
+test("unaddressable earlier journals offer no misleading recovery action", async () => {
+  await withScreen(host({
+    "/catalog": ok({ ...catalog, providers: [{ ...provider, configuration: earlierConfiguration(true) }] }),
+  }), async ({ mainText, buttons }) => {
+    assert.match(mainText(), /Earlier setup needs attention/);
+    assert.match(mainText(), /No supported recovery action/i);
+    assert.equal(buttons().some(label => /discard|cancel|finish|wait/i.test(label)), false);
+  });
+});
+
+test("a blocked provider does not prevent preparing a clean provider", async () => {
+  await withScreen(host({
+    "/catalog": ok({ ...catalog, providers: [
+      { ...provider, configuration: earlierConfiguration() },
+      { ...provider, providerId: "clean-provider", label: "Clean service" },
+    ] }),
+  }), async ({ calls }) => {
+    assert.equal(document.querySelectorAll('section[aria-label$="Earlier setup needs attention"]').length, 1);
+    const drafts = calls.filter(call => call.url === "/drafts");
+    assert.ok(drafts.length > 0);
+    assert.ok(drafts.every(call => call.body?.providerId === "clean-provider"));
   });
 });
 

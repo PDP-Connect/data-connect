@@ -1399,6 +1399,463 @@ test("logout removes a migrated legacy profile and stays idempotent; no undersco
   );
 });
 
+test("a lookup by the legacy profile name after migration finds the canonical profile", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  for (const profileName of ["claude_code", "claude_code.env"]) {
+    const lookup = findLocalCollectorProfiles({ profileDir, profileName });
+    assert.equal(lookup.matches.length, 1, `lookup by ${profileName}`);
+    assert.equal(lookup.matches[0]?.path, canonicalPath);
+    assert.equal(lookup.matches[0]?.source_instance_id, "dsrc_old");
+  }
+  assert.equal(existsSync(legacyPath), false, "the legacy file was migrated");
+});
+
+test("removing a profile by its legacy name removes the migrated file", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  assert.deepEqual(removeLocalCollectorProfile({ name: "claude_code.env", profileDir }), {
+    path: canonicalPath,
+    removed: true,
+  });
+  assert.equal(existsSync(canonicalPath), false);
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+});
+
+test("runLogout --profile with the legacy name revokes the credential and removes the migrated file", async () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = join(profileDir, "claude-code.env");
+  await withProfileDir(profileDir, async () => {
+    const revoked: string[] = [];
+    const result = await runLogout(
+      { baseUrl: "https://pdpp.example.com", command: "logout", profile: "claude_code", queuePath: "unused.sqlite" },
+      {
+        selfRevoke: (input) => {
+          revoked.push(input.deviceToken);
+          return Promise.resolve({ device_id: input.deviceId, object: "device_exporter_revocation", revoked_at: "now" });
+        },
+      }
+    );
+    assert.equal(result.removed, true);
+    assert.equal(result.revoked, true);
+    assert.equal(result.path, canonicalPath);
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.equal(existsSync(canonicalPath), false);
+  });
+});
+
+function writeCustomClaudeCodeProfile(profileDir: string, deviceToken: string, sourceInstanceId: string): string {
+  return writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: `device-${deviceToken}`,
+    deviceToken,
+    name: "claude_code",
+    profileDir,
+    sourceInstanceId,
+  });
+}
+
+function recordingSelfRevoke(revoked: string[]) {
+  return (input: { baseUrl: string; deviceId: string; deviceToken: string }) => {
+    revoked.push(input.deviceToken);
+    return Promise.resolve({ device_id: input.deviceId, object: "device_exporter_revocation" as const, revoked_at: "now" });
+  };
+}
+
+function ambiguousProfileError(error: unknown): boolean {
+  assert.ok(error instanceof CollectorUsageError, "a typed usage error");
+  assert.equal(error.constructor.name, "AmbiguousProfileNameError");
+  assert.match(error.message, /claude_code\.env/);
+  assert.match(error.message, /claude-code\.env/);
+  return true;
+}
+
+test("logout --profile claude_code revokes the custom underscore profile, not the hyphen profile beside it", async () => {
+  const profileDir = tempDirSync();
+  const customPath = writeCustomClaudeCodeProfile(profileDir, "token-custom", "dsrc_custom");
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-bundled", "dsrc_bundled");
+  const canonicalBody = readFileSync(canonicalPath, "utf8");
+  await withProfileDir(profileDir, async () => {
+    const revoked: string[] = [];
+    const result = await runLogout(
+      { baseUrl: "https://pdpp.example.com", command: "logout", profile: "claude_code", queuePath: "unused.sqlite" },
+      { selfRevoke: recordingSelfRevoke(revoked) }
+    );
+    assert.deepEqual(revoked, ["token-custom"]);
+    assert.equal(result.path, customPath);
+    assert.equal(result.removed, true);
+    assert.equal(existsSync(customPath), false);
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody, "the hyphen profile is untouched");
+  });
+});
+
+test("a custom underscore profile with no hyphen profile is found and removed by its own name", () => {
+  const profileDir = tempDirSync();
+  const customPath = writeCustomClaudeCodeProfile(profileDir, "token-custom", "dsrc_custom");
+  for (const profileName of ["claude_code", "claude_code.env"]) {
+    const lookup = findLocalCollectorProfiles({ profileDir, profileName });
+    assert.equal(lookup.matches.length, 1, `lookup by ${profileName}`);
+    assert.equal(lookup.matches[0]?.path, customPath);
+  }
+  assert.deepEqual(removeLocalCollectorProfile({ name: "claude_code", profileDir }), {
+    path: customPath,
+    removed: true,
+  });
+  assert.equal(existsSync(customPath), false);
+});
+
+test("two different files for the same connector make the legacy name ambiguous: logout and removal refuse and touch neither", async () => {
+  const profileDir = tempDirSync();
+  const literalPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const literalBody = readFileSync(literalPath, "utf8");
+  const canonicalBody = readFileSync(canonicalPath, "utf8");
+  const untouched = () => {
+    assert.equal(readFileSync(literalPath, "utf8"), literalBody);
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody);
+  };
+  await withProfileDir(profileDir, async () => {
+    for (const profile of ["claude_code", "claude_code.env"]) {
+      const revoked: string[] = [];
+      await assert.rejects(
+        runLogout(
+          { baseUrl: "https://pdpp.example.com", command: "logout", profile, queuePath: "unused.sqlite" },
+          { selfRevoke: recordingSelfRevoke(revoked) }
+        ),
+        ambiguousProfileError
+      );
+      assert.deepEqual(revoked, [], `logout by ${profile} revokes nothing`);
+      assert.throws(() => removeLocalCollectorProfile({ name: profile, profileDir }), ambiguousProfileError);
+      assert.throws(() => findLocalCollectorProfiles({ profileDir, profileName: profile }), ambiguousProfileError);
+      untouched();
+    }
+    // The exact hyphen name still selects the hyphen file and nothing else.
+    const lookup = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" });
+    assert.equal(lookup.matches[0]?.path, canonicalPath);
+    untouched();
+  });
+});
+
+test("an underscore file that names no connector, beside a hyphen file, is ambiguous too", () => {
+  const profileDir = tempDirSync();
+  const literalPath = join(profileDir, "claude_code.env");
+  writeFileSync(literalPath, 'PDPP_LOCAL_DEVICE_TOKEN="token-x"\n');
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  assert.throws(() => removeLocalCollectorProfile({ name: "claude_code", profileDir }), ambiguousProfileError);
+  assert.equal(existsSync(literalPath), true);
+  assert.equal(existsSync(canonicalPath), true);
+});
+
+test("runConnect --profile claude_code --force writes the file a later lookup by that name returns", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-old", "dsrc_old");
+  await withProfileDir(profileDir, async () => {
+    const revoked: string[] = [];
+    const output = await runConnect(
+      {
+        baseUrl: "https://pdpp.example.com",
+        code: "one-time-code",
+        command: "connect",
+        connector: "claude-code",
+        force: true,
+        json: true,
+        profile: "claude_code",
+        queuePath: "unused.sqlite",
+      } as CliOptions,
+      {
+        enroll: () =>
+          Promise.resolve({
+            connector_id: "claude-code",
+            device_id: "fresh-device",
+            device_token: "token-fresh",
+            local_binding_name: "test-binding",
+            source_instance_id: "dsrc_fresh",
+          }),
+        revokeExistingProfile: (input) => {
+          revoked.push(input.deviceToken);
+          return Promise.resolve({ device_id: input.deviceId, object: "device_exporter_revocation", revoked_at: "now" });
+        },
+      }
+    );
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.equal(output.profile_path, canonicalPath);
+    assert.equal(existsSync(join(profileDir, "claude_code.env")), false, "no underscore file is left behind");
+    const lookup = findLocalCollectorProfiles({ profileDir, profileName: "claude_code" });
+    assert.equal(lookup.matches.length, 1);
+    assert.equal(lookup.matches[0]?.env.PDPP_LOCAL_DEVICE_TOKEN, "token-fresh");
+  });
+});
+
+function connectDeps(
+  enrolled: string[],
+  revoked: string[],
+  token: string,
+  hooks: { onRevoke?: () => void; holdEnroll?: Promise<void> } = {}
+): NonNullable<Parameters<typeof runConnect>[1]> {
+  return {
+    enroll: async () => {
+      enrolled.push(token);
+      await hooks.holdEnroll;
+      return {
+        connector_id: "any",
+        device_id: `device-${token}`,
+        device_token: token,
+        local_binding_name: "test-binding",
+        source_instance_id: `dsrc_${token}`,
+      };
+    },
+    revokeExistingProfile: (input) => {
+      revoked.push(input.deviceToken);
+      hooks.onRevoke?.();
+      return Promise.resolve({ device_id: input.deviceId, object: "device_exporter_revocation", revoked_at: "now" });
+    },
+  };
+}
+
+function connectOptions(connector: string, extra: Partial<CliOptions> = {}): CliOptions {
+  return {
+    baseUrl: "https://pdpp.example.com",
+    code: "one-time-code",
+    command: "connect",
+    connector,
+    json: true,
+    queuePath: "unused.sqlite",
+    ...extra,
+  } as CliOptions;
+}
+
+function connectorMismatchError(error: unknown): boolean {
+  assert.ok(error instanceof CollectorUsageError, "a typed usage error");
+  assert.equal(error.constructor.name, "ProfileConnectorMismatchError");
+  return true;
+}
+
+function profileChangedError(error: unknown): boolean {
+  assert.ok(error instanceof CollectorUsageError, "a typed usage error");
+  assert.equal(error.constructor.name, "ProfileChangedError");
+  return true;
+}
+
+test("another connector connected under --profile claude_code keeps that name literal and shares nothing with the Claude Code profile", async () => {
+  const profileDir = tempDirSync();
+  await withProfileDir(profileDir, async () => {
+    const enrolled: string[] = [];
+    const revoked: string[] = [];
+    const other = await runConnect(
+      connectOptions("codex", { profile: "claude_code" }),
+      connectDeps(enrolled, revoked, "token-codex")
+    );
+    const literalPath = join(profileDir, "claude_code.env");
+    assert.equal(other.profile_path, literalPath);
+    assert.equal(existsSync(join(profileDir, "claude-code.env")), false, "the Claude Code profile file is not taken");
+
+    // A default Claude Code connect is not refused by the other connector's profile.
+    const claude = await runConnect(connectOptions("claude-code"), connectDeps(enrolled, revoked, "token-claude"));
+    const canonicalPath = join(profileDir, "claude-code.env");
+    assert.equal(claude.profile_path, canonicalPath);
+    assert.deepEqual(revoked, [], "nothing was revoked");
+    assert.match(readFileSync(literalPath, "utf8"), /PDPP_LOCAL_DEVICE_TOKEN="token-codex"/);
+    assert.match(readFileSync(literalPath, "utf8"), /PDPP_COLLECTOR_CONNECTOR="codex"/);
+    assert.match(readFileSync(canonicalPath, "utf8"), /PDPP_LOCAL_DEVICE_TOKEN="token-claude"/);
+    assert.match(readFileSync(canonicalPath, "utf8"), /PDPP_COLLECTOR_CONNECTOR="claude-code"/);
+  });
+});
+
+test("another connector never reaches the Claude Code profile: --force by its exact name is refused, and by the underscore spelling it writes its own file", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-claude", "dsrc_claude");
+  const canonicalBody = readFileSync(canonicalPath, "utf8");
+  await withProfileDir(profileDir, async () => {
+    const enrolled: string[] = [];
+    const revoked: string[] = [];
+    await assert.rejects(
+      runConnect(
+        connectOptions("codex", { force: true, profile: "claude-code" }),
+        connectDeps(enrolled, revoked, "token-codex")
+      ),
+      connectorMismatchError
+    );
+    assert.deepEqual(revoked, [], "no revoke");
+    assert.deepEqual(enrolled, [], "no enroll");
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody);
+
+    const output = await runConnect(
+      connectOptions("codex", { force: true, profile: "claude_code" }),
+      connectDeps(enrolled, revoked, "token-codex")
+    );
+    assert.equal(output.profile_path, join(profileDir, "claude_code.env"));
+    assert.deepEqual(revoked, [], "the Claude Code credential is never revoked on the other connector's behalf");
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody);
+  });
+});
+
+test("a lookup that names a connector refuses a profile declaring another one and inherits none of its credentials", () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-claude", "dsrc_claude");
+  const canonicalBody = readFileSync(canonicalPath, "utf8");
+  assert.throws(
+    () => findLocalCollectorProfiles({ connector: "codex", profileDir, profileName: "claude-code" }),
+    connectorMismatchError
+  );
+  // The underscore spelling is not the Claude Code profile for another connector: nothing is selected.
+  assert.equal(
+    findLocalCollectorProfiles({ connector: "codex", profileDir, profileName: "claude_code" }).matches.length,
+    0
+  );
+  assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody);
+});
+
+test("status --connector codex against a profile declaring claude-code refuses instead of borrowing its device credential", async () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude-code", "token-claude", "dsrc_claude");
+  await withProfileDir(profileDir, () => {
+    for (const args of [
+      ["status", "--profile", "claude-code", "--connector", "codex"],
+      ["status", "--source-instance-id", "dsrc_claude", "--connector", "codex"],
+    ]) {
+      assert.throws(() => resolveInspectionOptions(parseArgs(args)), connectorMismatchError, args.join(" "));
+    }
+    // The same profile resolves for the connector it declares.
+    const matched = resolveInspectionOptions(
+      parseArgs(["status", "--profile", "claude-code", "--connector", "claude-code"])
+    );
+    assert.equal(matched.deviceToken, "token-claude");
+  });
+});
+
+test("logout leaves a profile intact when it changed during the revoke call, and reports profile_changed", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-old", "dsrc_old");
+  await withProfileDir(profileDir, async () => {
+    const revoked: string[] = [];
+    let swappedBody = "";
+    const result = await runLogout(
+      { baseUrl: "https://pdpp.example.com", command: "logout", profile: "claude-code", queuePath: "unused.sqlite" },
+      {
+        selfRevoke: (input) => {
+          // A concurrent writer replaces the profile while the revoke is pending.
+          writeProfile(profileDir, "claude-code", "token-swapped", "dsrc_swapped");
+          swappedBody = readFileSync(canonicalPath, "utf8");
+          return recordingSelfRevoke(revoked)(input);
+        },
+      }
+    );
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.equal(result.profile_changed, true);
+    assert.equal(result.removed, false);
+    assert.equal(result.path, canonicalPath);
+    assert.equal(readFileSync(canonicalPath, "utf8"), swappedBody, "the swapped profile is left intact");
+  });
+});
+
+test("connect --force stops before it writes when the profile changed during its revoke", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-old", "dsrc_old");
+  await withProfileDir(profileDir, async () => {
+    const enrolled: string[] = [];
+    const revoked: string[] = [];
+    let swappedBody = "";
+    await assert.rejects(
+      runConnect(
+        connectOptions("claude-code", { force: true }),
+        connectDeps(enrolled, revoked, "token-fresh", {
+          onRevoke: () => {
+            writeProfile(profileDir, "claude-code", "token-swapped", "dsrc_swapped");
+            swappedBody = readFileSync(canonicalPath, "utf8");
+          },
+        })
+      ),
+      profileChangedError
+    );
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.deepEqual(enrolled, [], "the one-time code is not consumed");
+    assert.equal(readFileSync(canonicalPath, "utf8"), swappedBody);
+  });
+});
+
+test("connect --force stops before it writes when the profile changed during enrollment", async () => {
+  const profileDir = tempDirSync();
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-old", "dsrc_old");
+  await withProfileDir(profileDir, async () => {
+    const enrolled: string[] = [];
+    const revoked: string[] = [];
+    let release!: () => void;
+    const holdEnroll = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const connecting = runConnect(
+      connectOptions("claude-code", { force: true }),
+      connectDeps(enrolled, revoked, "token-fresh", { holdEnroll })
+    );
+    while (enrolled.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    writeProfile(profileDir, "claude-code", "token-swapped", "dsrc_swapped");
+    const swappedBody = readFileSync(canonicalPath, "utf8");
+    release();
+    await assert.rejects(connecting, profileChangedError);
+    assert.deepEqual(revoked, ["token-old"]);
+    assert.deepEqual(enrolled, ["token-fresh"], "enrollment ran while the profile was replaced");
+    assert.equal(readFileSync(canonicalPath, "utf8"), swappedBody, "the replacement survives byte-identical");
+    assert.equal(existsSync(join(profileDir, "claude_code.env")), false, "no other profile file is written");
+  });
+});
+
+test("setup --profile claude_code beside two different Claude Code files refuses before it enrolls, and a lone canonical file is written in place", async () => {
+  const profileDir = tempDirSync();
+  const literalPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const canonicalPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const literalBody = readFileSync(literalPath, "utf8");
+  const canonicalBody = readFileSync(canonicalPath, "utf8");
+  const enrolled: string[] = [];
+  const setupOptions = {
+    baseUrl: "https://pdpp.example.com",
+    code: "one-time-code",
+    command: "setup",
+    connector: "claude-code",
+    json: true,
+    profile: "claude_code",
+    queuePath: "unused.sqlite",
+  } as CliOptions;
+  const deps = {
+    enroll: () => {
+      enrolled.push("enroll");
+      return Promise.resolve({
+        connector_id: "claude-code",
+        device_id: "fresh-device",
+        device_token: "token-fresh",
+        local_binding_name: "test-binding",
+        source_instance_id: "dsrc_fresh",
+      });
+    },
+  };
+  await withProfileDir(profileDir, async () => {
+    await assert.rejects(runSetup(setupOptions, deps), ambiguousProfileError);
+    assert.deepEqual(enrolled, [], "the one-time code is not consumed");
+    assert.equal(readFileSync(literalPath, "utf8"), literalBody);
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBody);
+  });
+
+  const loneDir = tempDirSync();
+  writeProfile(loneDir, "claude-code", "token-new", "dsrc_new");
+  await withProfileDir(loneDir, async () => {
+    const output = await runSetup(setupOptions, deps);
+    assert.equal(output.profile_path, join(loneDir, "claude-code.env"));
+    assert.equal(existsSync(join(loneDir, "claude_code.env")), false, "no second file for the same connector");
+  });
+});
+
+test("a profile name with an underscore that is not a legacy spelling stays literal", () => {
+  const profileDir = tempDirSync();
+  const workPath = writeProfile(profileDir, "my_work", "token-1", "dsrc_work");
+  const lookup = findLocalCollectorProfiles({ profileDir, profileName: "my_work" });
+  assert.equal(lookup.matches[0]?.path, workPath);
+  assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "my-work" }).matches.length, 0);
+  assert.deepEqual(removeLocalCollectorProfile({ name: "my_work", profileDir }), { path: workPath, removed: true });
+});
+
 test("the profile migration touches connector names only, not operator-chosen profile names", () => {
   const profileDir = tempDirSync();
   writeProfile(profileDir, "my_work", "token-1", "dsrc_work");

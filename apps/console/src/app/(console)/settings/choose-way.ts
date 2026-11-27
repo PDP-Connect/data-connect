@@ -136,6 +136,7 @@ export function funnelPolicyBlock(href: string | undefined): Missing {
 }
 
 function missingFor(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): Missing | null {
+  if (provider.configuration.known === false) return { text: "Earlier setup needs attention." };
   const blocked = blocks[provider.providerId];
   if (blocked) return blocked;
   const step = blockedStep(provider);

@@ -27,6 +27,7 @@ test("an absent ngrok bundle reports a reason and never offers installation", { 
   const providers = inventory.providers.filter(p => p.providerId.startsWith("ngrok"));
   assert.ok(providers.length > 0);
   for (const provider of providers) {
+    assert.ok(provider.configuration.known !== false);
     assert.ok(Object.values(provider.availability).every(a => a.state !== "available" && a.reason));
     assert.equal(provider.configuration.actions.some(a => a.kind === "install-artifact"), false);
     assert.equal(provider.prerequisites.some(p => p.remedy?.kind === "install-artifact"), false);

@@ -110,13 +110,16 @@ const unsupportedReasonText: Record<UnsupportedReason, string> = {
   reach_unknown:
     "Where this route can be reached from is not known yet. Set its address, commit the setup, then review it again.",
 };
-export function publicReachabilityError(error: unknown): { code: string; message: string } {
+const migrationReasons = new Set(["ambiguous", "incompatible", "taken", "conflict", "absent", "inflight", "in_use", "retired"]);
+export function publicReachabilityError(error: unknown): { code: string; message: string; reason?: string } {
   const candidate = unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
   const code = typeof candidate === "string" && safeCodes.has(candidate) ? candidate : "reachability_unavailable";
   const reason = error instanceof ReachabilityError && code === "unsupported" ? error.reason : null;
   // Never echo raw messages, causes or arbitrary error properties.
   return {
     code,
+    ...(code === "configuration_migration_required" && error && typeof error === "object" && "reason" in error &&
+      typeof error.reason === "string" && migrationReasons.has(error.reason) ? { reason: error.reason } : {}),
     message:
       code === "proof_refresh_unsupported"
         ? "This route cannot safely refresh its proof. It remains unpublished. Stop it before starting a new route."
@@ -455,7 +458,6 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/events", async () => {
     const state = service().state();
     return {
-      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
       recovery: state.recovery,
@@ -496,7 +498,6 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         stage: record.stage,
       }));
     return {
-      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       journalScan: listed === null ? ("unavailable" as const) : state.journalScan,
       journalUnreadable: state.journalUnreadable,
@@ -586,6 +587,13 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         approval: input.approval,
         expectedRevision: text(input.expectedRevision),
       })
+    );
+  });
+  post("/providers/:providerId/earlier-drafts/:draftId/discard", async (request) => {
+    return service().discardEarlierDraft(
+      boundedIdentifier(request.params.providerId),
+      boundedIdentifier(body(request).fromRegistryId),
+      boundedIdentifier(request.params.draftId)
     );
   });
   post("/drafts/:id/discard", async (request) => {

@@ -73,6 +73,7 @@ async function setUp(service: ReachabilityService, origin: string | null) {
   const inventory = await service.inventory()
   const provider = inventory.providers.find((item) => item.providerId === PROVIDER)
   assert.ok(provider)
+  assert.ok(provider.configuration.known !== false)
   const draft = await service.begin(PROVIDER, provider.configuration.revision)
   if (origin === null) {
     return { draft, revision: draft.configuration.revision }
