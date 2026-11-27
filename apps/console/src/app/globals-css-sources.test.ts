@@ -66,3 +66,13 @@ test("compiled CSS contains utilities used only by the vendored operator-ui and 
 		"compiled CSS is missing w-[calc(100%-2rem)]",
 	);
 });
+
+test("on a touch screen every link, button and summary gets a 44 px hit area, written once", async () => {
+	const result = await postcss([tailwindPostcss()]).process(source, { from: cssPath });
+	const css = result.css;
+	const block = css.match(/@media \(pointer: coarse\)\s*\{[\s\S]*?::after[\s\S]*?\}/);
+	assert.ok(block, "a coarse-pointer block with an ::after hit area");
+	assert.match(block[0], /width:\s*max\(100%,\s*44px\)/);
+	assert.match(block[0], /height:\s*max\(100%,\s*44px\)/);
+	assert.match(block[0], /a\[href\]/);
+});

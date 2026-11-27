@@ -64,6 +64,27 @@
   }
 }
 
+/* Touch size. On a touch screen every control has a hit area of at least 44 px on its
+   short side. The drawn control does not change: an invisible box, centred on it, takes
+   the press. Written once here, so no page patches its own links or buttons. Utilities
+   (absolute, sticky, an own ::after) win over this base layer on purpose. */
+@media (pointer: coarse) {
+  @layer base {
+    :where(a[href], button, summary, [role="button"], [role="link"]) {
+      position: relative;
+    }
+    :where(a[href], button, summary, [role="button"], [role="link"])::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      transform: translate(-50%, -50%);
+    }
+  }
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    NAV-vs-ACTION: the overview's "Manage →" links.
 
