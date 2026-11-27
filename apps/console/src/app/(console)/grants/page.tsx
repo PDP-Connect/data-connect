@@ -31,7 +31,7 @@ export default async function AppsPage({
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        actions={empty ? undefined : (
+        actions={(
           <Link className={buttonVariants()} href="/connect">
             Connect an app
           </Link>
@@ -44,10 +44,7 @@ export default async function AppsPage({
       ) : null}
       {empty ? (
         <Section title="No app can read your data yet.">
-          <p>Connect an assistant such as ChatGPT or Claude, and it can answer questions from your own data.</p>
-          <Link className={buttonVariants()} href="/connect">
-            Connect an app
-          </Link>
+          <p>Connect an assistant such as ChatGPT or Claude, and it can answer questions from your own data. Use the button above.</p>
         </Section>
       ) : (
         <AppsGroups

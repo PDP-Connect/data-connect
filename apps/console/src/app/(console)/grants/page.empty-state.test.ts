@@ -9,11 +9,16 @@ import { fileURLToPath } from "node:url";
 const APPS_PAGE = fileURLToPath(new URL("./page.tsx", import.meta.url));
 const HOME_OVERVIEW = fileURLToPath(new URL("../components/views/standing-overview.tsx", import.meta.url));
 
-test("Apps with no apps shows one Connect an app button, in the empty state", async () => {
+// Round 7 (F48): the button keeps one place, the header, in every state.
+test("Apps shows one Connect an app button, always in the header", async () => {
   const src = await readFile(APPS_PAGE, "utf8");
-  // The header action is only drawn when there is something else on the page.
-  assert.match(src, /actions=\{empty \? undefined : /);
-  assert.equal(src.match(/Connect an app/g)?.length, 2, "one in the header (when not empty), one in the empty state");
+  assert.doesNotMatch(src, /actions=\{empty \? undefined/);
+  assert.equal(src.match(/Connect an app/g)?.length, 1, "only the header draws the button");
+});
+
+test("the empty section says 'now' when an app was removed, 'yet' when none was ever connected", async () => {
+  const groups = await readFile(fileURLToPath(new URL("./apps-groups.tsx", import.meta.url)), "utf8");
+  assert.match(groups, /No app can read your data \$\{stopped\.length \? "now" : "yet"\}\./);
 });
 
 test("the Connect an app button looks the same on Home and on Apps", async () => {

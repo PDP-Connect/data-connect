@@ -127,7 +127,7 @@ export function AppsGroups({
           ) : null}
         </Section>
       ) : (
-        <Section title="No app can read your data yet.">
+        <Section title={`No app can read your data ${stopped.length ? "now" : "yet"}.`}>
           <p>Use the button above to let one read it.</p>
         </Section>
       )}
