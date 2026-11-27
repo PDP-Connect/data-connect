@@ -25,10 +25,12 @@ export default function StreamRecordsLoading() {
         body={
           <div aria-hidden="true" className="divide-y divide-border/70 overflow-hidden rounded-md border border-border/70">
             {["a", "b", "c", "d", "e", "f"].map((key) => (
-              <div className="flex items-center gap-4 px-3 py-3" key={key}>
-                <span className="block h-3.5 w-24 animate-pulse rounded bg-muted" />
-                <span className="block h-3.5 w-28 animate-pulse rounded bg-muted" />
-                <span className="block h-3.5 w-20 flex-1 animate-pulse rounded bg-muted" />
+              <div className="flex items-center justify-between gap-4 px-3 py-3" key={key}>
+                <span className="flex min-w-0 flex-col gap-1.5">
+                  <span className="block h-4 w-40 max-w-full animate-pulse rounded bg-muted" />
+                  <span className="block h-3 w-56 max-w-full animate-pulse rounded bg-muted" />
+                </span>
+                <span className="block h-3 w-16 shrink-0 animate-pulse rounded bg-muted" />
               </div>
             ))}
           </div>

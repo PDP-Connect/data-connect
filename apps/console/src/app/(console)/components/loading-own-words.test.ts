@@ -54,13 +54,15 @@ test("Explore's loading message sits under the title, so the title does not move
 });
 
 // Round 7 (F16, F17): a loading screen has the shape and trail of the page it stands in for.
-test("the sign-in helper route has its own loading screen, not the run page's Sync history one", () => {
+test("the sign-in helper route has its own loading screen: a full-screen helper shell, not page chrome", () => {
   const file = join(ROOT, "syncs/[runId]/stream/loading.tsx");
   assert.ok(existsSync(file), "syncs/[runId]/stream/loading.tsx exists");
   const src = readFileSync(file, "utf8");
   assert.doesNotMatch(src, /Sync history/);
-  assert.match(src, /TitledDetailLoadingSkeleton/);
-  assert.match(src, /label="the sign-in page"/);
+  // Round 9 (F9): the loaded helper has no page header or card; neither does its loading screen.
+  assert.doesNotMatch(src, /RecordroomShellWithPalette|TitledDetailLoadingSkeleton/);
+  assert.match(src, /fixed inset-0/);
+  assert.match(src, /label="the sign-in page"|Loading the sign-in page/);
 });
 
 test("the Apps loading screen draws rows without right-hand buttons, as the loaded rows have none", async () => {
@@ -74,4 +76,11 @@ test("the Apps loading screen draws rows without right-hand buttons, as the load
   assert.doesNotMatch(html, /h-7 w-20/);
   const withAction = renderToStaticMarkup(React.createElement(NamedPageLoadingSkeleton, { label: "apps", rows: 3, shape: "list", title: "Apps" }));
   assert.match(withAction, /h-7 w-20/);
+});
+
+// Round 9 (F19): the record list loads as the card list it becomes, not a three-column table.
+test("the record list loading screen draws list rows with a time on the right, not table columns", () => {
+  const src = readFileSync(join(ROOT, "sources/[connector]/[stream]/loading.tsx"), "utf8");
+  assert.doesNotMatch(src, /w-28/);
+  assert.match(src, /justify-between/);
 });
