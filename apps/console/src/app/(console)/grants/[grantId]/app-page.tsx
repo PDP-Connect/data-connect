@@ -1,5 +1,5 @@
 "use client";
-import { appPlaceLine } from "../app-access-words.ts";
+import { appAccessKinds, appPlaceLine } from "../app-access-words.ts";
 import { buttonVariants, IcButton } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 // Copyright The PDP-Connect Contributors
@@ -7,7 +7,6 @@ import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { Button } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
-import { isOwnerRecordKind, sourceRecordLabel } from "../../lib/source-record-label.ts";
 import { type AppAccess, appSourceName, formatAppLastRead } from "../app-access.ts";
 import { personDate, personDay } from "../../history/day-cut.ts";
 import { RecentReading } from "./recent-reading.tsx";
@@ -130,8 +129,7 @@ export function AppPage({
               .map((source) => {
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";
-                const kinds =
-                  source.kindNames ?? source.kinds.filter(kind=>isOwnerRecordKind(kind,source.source.connector_id??"")).map((name) => sourceRecordLabel(name));
+                const kinds = appAccessKinds(source);
                 const canRead = reading && !removal.removed.includes(key);
                 return (
                   <li className="py-4" key={key}>

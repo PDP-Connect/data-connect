@@ -26,3 +26,11 @@ test("on an app's page the warning that explains Remove access comes before the 
   assert.ok(page.indexOf("could not confirm who runs this app") < page.indexOf("Remove access\n"), "warning first");
   assert.equal((page.match(/Has not read anything yet\./g) ?? []).length, 0);
 });
+
+// Round 7 (F4): the list and the app's page took the kinds from two copies of one expression.
+test("the app's page reads a row's kinds from the same function as the list", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("./[grantId]/app-page.tsx", import.meta.url), "utf8");
+  assert.match(page, /appAccessKinds\(source\)/);
+  assert.doesNotMatch(page, /isOwnerRecordKind/);
+});
