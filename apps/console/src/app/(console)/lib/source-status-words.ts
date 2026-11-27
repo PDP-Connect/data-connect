@@ -296,8 +296,13 @@ export function manifestCredentialKind(manifest: { setup?: unknown } | null | un
   const setup = manifest?.setup;
   if (typeof setup !== "object" || setup === null || !("credential_capture" in setup)) return null;
   const capture = setup.credential_capture;
-  if (typeof capture !== "object" || capture === null || !("credential_kind" in capture)) return null;
-  return typeof capture.credential_kind === "string" ? capture.credential_kind : null;
+  if (typeof capture !== "object" || capture === null) return null;
+  // The server reads `kind` first, then `credential_kind` (polyfill-connectors-runtime.ts).
+  for (const field of ["kind", "credential_kind"] as const) {
+    const value = field in capture ? (capture as Record<string, unknown>)[field] : undefined;
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return null;
 }
 
 /** A rejected saved secret: "a key" unless the connector saves a username and password (the same rule first sync uses). */

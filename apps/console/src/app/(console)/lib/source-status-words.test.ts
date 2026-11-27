@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RefConnectionHealthSnapshot, RefConnectorSummary, RefRenderedVerdict, RefRequiredAction } from "./ref-client.ts";
-import { isUpToDateRow, sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "./source-status-words.ts";
+import { isUpToDateRow, manifestCredentialKind, sourceStateSentence, sourceStatusWords, type SourceStatusRow } from "./source-status-words.ts";
 
 const NOW = new Date("2026-11-24T12:00:00.000Z");
 const SUCCESS = "2026-11-24T10:00:00.000Z";
@@ -620,4 +620,12 @@ test("a list row never carries the completeness caveat; the page sentence does, 
     const text = sourceStateSentence(base, { now: NOW, name: "Steam" }).text;
     assert.equal(text.split("can't yet tell").length - 1, 1);
   }
+});
+
+test("the credential kind is read from a manifest the way the server reads it: kind, then credential_kind", () => {
+  assert.equal(manifestCredentialKind({ setup: { credential_capture: { kind: "username_password" } } }), "username_password");
+  assert.equal(manifestCredentialKind({ setup: { credential_capture: { credential_kind: "api_key" } } }), "api_key");
+  assert.equal(manifestCredentialKind({ setup: { credential_capture: { credential_kind: "api_key", kind: "username_password" } } }), "username_password");
+  assert.equal(manifestCredentialKind({ setup: {} }), null);
+  assert.equal(manifestCredentialKind(null), null);
 });
