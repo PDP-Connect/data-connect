@@ -151,6 +151,20 @@ describe("playwright-runner build options", () => {
     expect(supportsBrowserProvisioning("win32")).toBe(true)
   })
 
+  it("permits the verified Debian release but not adjacent releases", () => {
+    for (const version of ["11", "13"]) {
+      expect(supportsBrowserProvisioning("linux", `ID=debian\nVERSION_ID="${version}"\n`)).toBe(false)
+    }
+    expect(supportsBrowserProvisioning("linux", 'ID=debian\nVERSION_ID="12"\n')).toBe(true)
+  })
+
+  it("keeps only the cache basename for a POSIX runner with a space in its parent path", () => {
+    expect(getBrowserDirectoryName("/fixtures/cache with spaces/chromium-1234/", "linux"))
+      .toBe("chromium-1234")
+    expect(getBrowserDirectoryName("/fixtures/cache with spaces/chromium-1234", "darwin"))
+      .toBe("chromium-1234")
+  })
+
   it("uses only the Chromium cache directory name on Windows", () => {
     expect(
       getBrowserDirectoryName(
