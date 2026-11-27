@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { appSourceCount } from "./unused-apps.ts";
 import type { AppAccess as Registration } from "../lib/ref-client.ts";
-import { deriveAppReadingView, groupGrantAccessByApp, UNKNOWN_APP_NAME } from "./app-access.ts";
+import { type AppAccess, deriveAppReadingView, groupGrantAccessByApp, UNKNOWN_APP_NAME } from "./app-access.ts";
 
 function registration(id = "one", patch: Partial<Registration> = {}): Registration {
   return {
@@ -33,8 +33,8 @@ function registration(id = "one", patch: Partial<Registration> = {}): Registrati
   };
 }
 test("removing the last active source switches to the stopped app view immediately", () => {
-  const [app] = groupGrantAccessByApp([registration()]);
-  const removal = JSON.stringify(app.sourceAccess[0].source);
+  const [app] = groupGrantAccessByApp([registration()]) as [AppAccess];
+  const removal = JSON.stringify(app.sourceAccess[0]!.source);
   const current = deriveAppReadingView(app, [removal]);
   assert.deepEqual(current.currentRows, []);
   assert.equal(current.reading, false);
@@ -45,10 +45,10 @@ test("removing the last active source switches to the stopped app view immediate
 
 test("removing one of two active sources leaves only the other readable", () => {
   const first = registration();
-  const [mail] = first.sources;
+  const [mail] = first.sources as [(typeof first.sources)[number]];
   const [app] = groupGrantAccessByApp([{ ...first, sources: [mail, {
     ...mail, source: { ...mail.source, id: "photos", connector_id: "photos", connection_id: "photos-first" },
-  }] }]);
+  }] }]) as [AppAccess];
   const current = deriveAppReadingView(app, [JSON.stringify(mail.source)]);
   assert.equal(current.reading, true);
   assert.equal(current.showRemoveAll, true);

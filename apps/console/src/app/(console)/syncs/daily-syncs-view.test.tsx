@@ -45,7 +45,7 @@ test("history repair label matches its destination", () => {
   const html = renderToStaticMarkup(createElement(SyncHistoryDays, { expand: true, offset: 0, rows: [row], sources }));
   // The link opens the data source's page, so it says so; it does not promise the step itself.
   assert.doesNotMatch(html, />Sign in again</);
-  assert.match(html, /to sign in again</);
+  assert.match(html, /Open source to sign in again</);
 });
 
 test("large counts in the fold use separators", () => {

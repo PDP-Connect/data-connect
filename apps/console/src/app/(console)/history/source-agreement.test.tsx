@@ -56,7 +56,7 @@ for(const state of AGREEMENT_STATES) { test(`five places agree: ${state}`,async(
  const expected=status.action?[status.action.label]:[];
  const historyLabels=[...new JSDOM(renderToStaticMarkup(history)).window.document.querySelectorAll("a")].map(link=>link.textContent ?? "").filter(label=>/^Open .+ to /.test(label));
  // The history button opens the data source's page, so it names the step and says it opens the page.
- assert.deepEqual(historyLabels,currentRow.last_outcome==="failed"?expected.map(label=>historyActionLabel(label,historySource.name)):[],"history action must be the current source action, drawn only under a sync that failed");
+ assert.deepEqual(historyLabels,currentRow.last_outcome==="failed"?expected.map(label=>historyActionLabel(label)):[],"history action must be the current source action, drawn only under a sync that failed");
  assert.deepEqual(labels(sync),expected,"sync page action must be the current source action");
  assert.equal(home.needs.filter(need=>need.kind!=="approval").length,status.needsYou?1:0,"Needs you equals sources whose action is required, including lifecycle recovery");
  assert.equal(syncDayProblem(currentRow),Boolean((historySource as HistorySource & {currentProblem:boolean}).currentProblem),"Only problems uses the current answer");
