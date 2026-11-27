@@ -15,5 +15,6 @@ test("each reason a sign-in service cannot be added says why in plain words and 
   }
   assert.equal(cannotAddWhy("Venmo", "host_requirement_unmet").reason, "This computer can't open the browser that Venmo needs for signing in.");
   // With no known reason the heading already says it; the page does not say it a second time.
-  assert.equal(cannotAddWhy("Venmo", null).reason, null);
+  assert.match(cannotAddWhy("Venmo", null).reason ?? "", /couldn.t tell whether Venmo/);
+  assert.match(cannotAddWhy("Venmo", "something_new").instead, /Try again/);
 });

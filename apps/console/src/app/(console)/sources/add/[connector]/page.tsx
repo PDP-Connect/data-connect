@@ -72,6 +72,8 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
     );
   }
   if (signInBlocked(entry, sourceSetupCardModel(entry, lifecycle, read.catalogTransientlyUnavailable).packageNeedsInstall)) {
+    const owned = await existingSourcesForConnector(entry.connectorKey).catch(() => []);
+    if (owned[0]) redirect(existingSourceHref(entry.connectorKey, owned[0].connectionId));
     const why = cannotAddWhy(entry.displayName, entry.readiness?.reason ?? null);
     return (
       <RecordroomShellWithPalette>

@@ -224,3 +224,21 @@ test("an installed service whose server verdict still says install is marked; on
   assert.equal(row.chase, "Can't be added on this computer yet");
   assert.equal(row.amazon, null);
 });
+
+const signInBlockedReadiness = { action: "configure", browserBound: true, detail: null, reason: "host_requirement_unmet" } as const;
+
+test("among aliases of one service the one that can really be added wins over a sign-in-blocked one", () => {
+  const blockedAlias = { ...ynab, connectorKey: "my_service", readiness: { ...signInBlockedReadiness, connectorKey: "my_service" } } as ConnectorCatalogEntry;
+  const okAlias = { ...ynab, connectorKey: "my-service" };
+  for (const catalog of [[blockedAlias, okAlias], [okAlias, blockedAlias]]) {
+    const row = build({}, catalog).rows[0]!;
+    assert.equal(row.connectorKey, "my-service");
+    assert.equal(row.blockedNote, null);
+  }
+});
+
+test("an account already added in a sign-in-blocked state links to its own page", () => {
+  const blockedChase = { ...chase, readiness: { ...signInBlockedReadiness, connectorKey: "chase" } } as ConnectorCatalogEntry;
+  const row = build({ chase: ["conn_1"] }, [blockedChase]).rows[0]!;
+  assert.equal(row.href, "/sources/chase?connection_id=conn_1");
+});

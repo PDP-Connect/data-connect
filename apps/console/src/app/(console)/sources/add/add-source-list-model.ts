@@ -76,6 +76,21 @@ export function isConnectableEntry(
   return !card.unavailable;
 }
 
+/**
+ * The one "can be added" rule: connectable AND not blocked at sign-in. The list, the alias choice
+ * and the add page all ask this, so none of them offers a service that would then say it cannot.
+ */
+export function canBeAdded(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null,
+  catalogTransientlyUnavailable: boolean
+): boolean {
+  return (
+    isConnectableEntry(entry, lifecycle, catalogTransientlyUnavailable) &&
+    !signInBlocked(entry, sourceSetupCardModel(entry, lifecycle, catalogTransientlyUnavailable).packageNeedsInstall)
+  );
+}
+
 /** The page of a data source the person already has (also where "You already have ..." links). */
 export function existingSourceHref(connectorKey: string, connectionId: string): string {
   return `/sources/${encodeURIComponent(connectorKey)}?connection_id=${encodeURIComponent(connectionId)}`;
@@ -90,7 +105,8 @@ export function selectCatalogAlias(
   aliases: readonly ConnectorCatalogEntry[],
   input: Omit<AddSourceListInput, "catalog">
 ): ConnectorCatalogEntry | null {
-  return aliases.find((entry) => isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable))
+  return aliases.find((entry) => canBeAdded(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable))
+    ?? aliases.find((entry) => isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable))
     ?? aliases.find((entry) => input.existingConnectionIds[entry.connectorKey]?.length)
     ?? aliases[0]
     ?? null;
@@ -114,13 +130,14 @@ export function buildAddSourceList(input: AddSourceListInput): AddSourceListMode
     const entry = selectCatalogAlias(aliases, input)!;
     const connectable = isConnectableEntry(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable);
     const firstAccount = accounts.get(identity) ?? null;
+    const addable = canBeAdded(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable);
     if (connectable || firstAccount !== null) {
       rows.push({
         added: firstAccount !== null,
         blockedNote: connectable && signInBlocked(entry, sourceSetupCardModel(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable).packageNeedsInstall) ? BLOCKED_NOTE : null,
         connectorKey: entry.connectorKey,
         displayName: entry.displayName,
-        href: !connectable && firstAccount !== null ? existingSourceHref(entry.connectorKey, firstAccount) : addSourceHref(entry.connectorKey),
+        href: !addable && firstAccount !== null ? existingSourceHref(entry.connectorKey, firstAccount) : addSourceHref(entry.connectorKey),
         icon: entry.icon,
       });
     } else {
