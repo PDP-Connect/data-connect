@@ -376,3 +376,20 @@ test("revoked: says the records stay, and offers the data and a new connection",
   assert.match(text, /See your Steam data/);
   assert.match(text, /Connect Steam again/);
 });
+
+// A service whose saved secret is a username and password signs in again; it has no "key".
+test("a saved username and password says Sign in again, not Enter the key again", () => {
+  const venmoStatus = status({
+    credential: { captured_at: null, credential_kind: "username_password", present: true, rotated_at: null },
+    setup_kind: "static_secret",
+  });
+  const expired = { ...withOrders, gaps: [{ kind: "skip_result", reason: "session_expired", message: "x" }] };
+  const partial = firstSyncOutcome(venmoStatus, "Venmo", expired);
+  assert.equal(partial.kind === "partial" ? partial.retry?.label : null, "Sign in again");
+  const failed = firstSyncOutcome(
+    { ...venmoStatus, last_error: { reason: "static_secret_credential_unavailable", remediation: "x" }, setup_state: "first_sync_failed" },
+    "Venmo",
+    withOrders
+  );
+  assert.equal(failed.kind === "failed" ? failed.retry.label : null, "Sign in again");
+});

@@ -154,9 +154,16 @@ export function scheduleSentence(
 	return null;
 }
 
+/** A saved username and password is signed in with again; any other saved secret is a key. */
+function savedSecretLabel(status: ConnectionSetupStatus): string {
+	return status.credential.credential_kind === "username_password"
+		? "Sign in again"
+		: "Enter the key again";
+}
+
 function retryLabel(status: ConnectionSetupStatus): string {
 	if (status.setup_kind === "manual_upload") return "Choose another file";
-	if (status.setup_kind === "static_secret") return "Enter the key again";
+	if (status.setup_kind === "static_secret") return savedSecretLabel(status);
 	return outcomeCopy.retry;
 }
 
@@ -206,7 +213,7 @@ function kindActionLabel(
 ): string | null {
 	if (action === null) return null;
 	if (status.setup_kind === "manual_upload") return "Choose another file";
-	if (status.setup_kind === "static_secret") return "Enter the key again";
+	if (status.setup_kind === "static_secret") return savedSecretLabel(status);
 	return action;
 }
 
