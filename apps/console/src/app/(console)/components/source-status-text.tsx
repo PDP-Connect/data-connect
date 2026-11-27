@@ -11,7 +11,7 @@ import type { SourceStatusTone, SourceStatusWords } from "../lib/source-status-w
 const TONE_CLASS: Record<SourceStatusTone, string> = {
   accent: "text-primary",
   attention: "font-medium text-attention",
-  faint: "text-muted-foreground/80",
+  faint: "text-muted-foreground",
   plain: "text-muted-foreground",
 };
 
