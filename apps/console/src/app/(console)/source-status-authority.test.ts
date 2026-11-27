@@ -66,10 +66,12 @@ test("Home, data sources, and data source pages use the shared status wording", 
   assert.match(homeModel, /status: sourceStatusWords\(source,/);
   assert.match(sources, /import \{ SourceRowStatus \} from "\.\/source-row-status\.tsx"/);
   assert.deepEqual(importedNames(sourcesModel, "\\.\\.\\/lib\\/source-status-words\\.ts"), [
+    "ENTER_THE_CODE",
     "SourceStatusWords",
     "sourceStatusWords",
   ]);
-  assert.match(sourcesModel, /statusWords: sourceStatusWords\(summary,/);
+  assert.match(sourcesModel, /statusWordsNow = sourceStatusWords\(summary,/);
+  assert.match(sourcesModel, /statusWords: statusWordsNow/);
   assert.deepEqual(importedNames(detail, "\\.\\.\\/\\.\\.\\/lib\\/source-status-words\\.ts"), [
     "SourceStatusAction",
     "sourceNeverConnected",
