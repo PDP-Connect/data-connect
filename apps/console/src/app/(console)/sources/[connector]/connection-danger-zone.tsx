@@ -24,6 +24,8 @@ interface Props {
 	setupFailed?: boolean;
   inactive?: boolean;
   neverConnected?: boolean;
+  /** False when nothing has been copied: copying everything again would change nothing. */
+  hasRecords?: boolean;
 	initialDialog?: "reset" | "disconnect" | "delete";
 }
 
@@ -46,6 +48,7 @@ export function ConnectionDangerZone({
 	setupFailed = false,
   inactive = false,
   neverConnected = false,
+  hasRecords = true,
 	initialDialog,
 }: Props) {
 	return (
@@ -58,7 +61,7 @@ export function ConnectionDangerZone({
 			{message ? <ActionFeedback message={message} tone="success" /> : null}
 			{connectionId === null ? null : (
 				<>
-					{setupFailed || inactive ? null : (
+					{setupFailed || inactive || !hasRecords ? null : (
 						<ResetSourceForm
 							connectionId={connectionId}
 							displayName={displayName}
@@ -112,7 +115,6 @@ function ActionRow({
 		<div>
       {!open ? <div className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
         <div className="min-w-0">
-          <p className={destructive ? "pdpp-body text-destructive" : "pdpp-body"}>{label}</p>
           <p className="pdpp-body text-muted-foreground">{sentence}</p>
         </div>
         <IcButton className="shrink-0 !whitespace-normal text-left" onClick={onClick} size="sm" type="button" variant={destructive ? "destructive" : "ghost"}>{label}</IcButton>

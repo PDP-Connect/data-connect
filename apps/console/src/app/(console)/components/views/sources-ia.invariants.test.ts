@@ -68,7 +68,7 @@ test("each existing list control L1–L21 still has a visible destination", asyn
   ]);
   const evidence: Array<[string, RegExp]> = [
     ["L1/L2 add source", /Add a data source/],
-    ["L3 duplicate review", /Review duplicate data source labels/],
+    ["L3 duplicate review", /Name them/],
     ["L4 duplicate rows", /buildDuplicateSourceReview|instance\.needsOwnerLabel/],
     ["L5 disconnected group", /label="Disconnected"/],
     ["L6 archived group", /label="Archived"/],

@@ -144,9 +144,10 @@ test("finished pages keep the shared heading wrapper, button gaps and missing-ro
     assert.ok(header.querySelector("h1"));
     assert.doesNotMatch(header.textContent ?? "", /Step /);
     if (state === "connected-missing-some") {
-      const missingRow = dom.window.document.querySelector('[aria-label="Didn\'t come"] li');
+      const missingRow = Array.from(dom.window.document.querySelectorAll('[aria-label="What arrived and what did not"] li')).find(item => /Not copied/.test(item.textContent ?? ""));
       assert.ok(missingRow);
       assert.ok(missingRow.classList.contains("px-3"));
+      assert.doesNotMatch(dom.window.document.body.textContent ?? "", /Didn't come(?! at)/);
       assert.match(missingRow.textContent ?? "", /Nothing is scheduled for Northwind, so it will not try again by itself/);
     } else {
       const start = Array.from(dom.window.document.querySelectorAll("a")).find(node => node.textContent === "Start again");

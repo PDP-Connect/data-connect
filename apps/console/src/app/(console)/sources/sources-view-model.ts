@@ -721,15 +721,15 @@ export function toSourceInstanceView(
     accountLine = formatSourceListFacts(summary, summary.streams.length);
   }
   const { primaryVerdictAction } = actionability;
-  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset });
+  const manifest = options.manifests
+    ? options.manifests.find((candidate) => manifestMatchesConnectorId(candidate, connectorId))
+    : undefined;
+  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset,streams: manifest?.streams as StreamManifestEntry[] | undefined });
   const nextAction = primaryVerdictAction?.ownerRunnable ? null : actionability.nextAction;
   const { ownerActionCue } = actionability;
   const status = actionability.renderedStatus;
   const { fusedStatus } = actionability;
 
-  const manifest = options.manifests
-    ? options.manifests.find((candidate) => manifestMatchesConnectorId(candidate, connectorId))
-    : undefined;
   const streamsByName = new Map<string, StreamManifestEntry | undefined>();
   if (manifest?.streams) {
     for (const stream of manifest.streams) {

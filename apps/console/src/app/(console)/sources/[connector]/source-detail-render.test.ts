@@ -252,8 +252,8 @@ test("every practice state obeys the words and folds contract", async (t) => {
 
 test("practice states cover partial copies, missing kinds, settings, accounts and each confirmation", async () => {
   const cases = [
-    ["partly-more-coming", /24 so far\. Some didn't come at the last sync\./],
-    ["partly-some-lost", /24 so far\. Some didn't come at the last sync\./],
+    ["partly-more-coming", /24 records so far\. Some didn't come at the last sync\./],
+    ["partly-some-lost", /24 records so far\. Some didn't come at the last sync\./],
     ["didnt-come", /Didn't come at the last sync\./],
     ["settings-choices", /Settings[\s\S]*Increase this to copy older messages\./],
     ["settings-question", /Awaiting your confirmation/],

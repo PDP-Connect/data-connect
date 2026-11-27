@@ -833,8 +833,8 @@ function ConnectorPageView({
   const signInRepairAvailable = credentialUpdateHref !== null;
   // The Schedule section reads this page's own schedule; the sentence above it must read the same one.
   const answerSource = model.scheduleError ? source : { ...source, schedule: model.schedule };
-  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable });
-  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable });
+  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[] });
+  const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[] });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";
   const deviceStepsAvailable = hasDeviceLocalRemediation;
@@ -889,7 +889,7 @@ function ConnectorPageView({
       </Suspense>
       {!neverConnected ? <Section action={<Link className="text-primary hover:underline" href="/explore">Browse records</Link>} title="What is here">
         <SourceRecords model={model} />
-        {recordTotal.conflicting ? <p className="pdpp-body mt-3 text-muted-foreground">DataConnect can't yet tell whether it got everything.</p> : null}
+        {recordTotal.conflicting && !/can.t yet tell whether/.test(stateSentence.text) ? <p className="pdpp-body mt-3 text-muted-foreground">DataConnect can't yet tell whether it got everything.</p> : null}
         {manualUploadHref ? <div className="mt-3 flex flex-wrap gap-3">
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={manualUploadHref}>{source.acquisition_coverage?.latest_batch || source.last_successful_run ? "Add another export" : "Add an export"}</Link>
           <SyncNowButton connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} displayName={displayName} installPromptShown={installPromptShown} idleLabel="Read the files again" initialRunning={running} runningLabel="Reading the files" title="Reads the files already uploaded for this data source again." variant="outline" />
@@ -920,9 +920,11 @@ function ConnectorPageView({
               setupFailed={setupFailed || archived}
               storedCredentialUpdateHref={credentialUpdateHref}
               hasStaticSecretCredentialUpdate={credentialUpdateHref !== null && primaryActionSurface !== "stored_credential" && primaryActionSurface !== "browser_session"}
+              label={sourceStatus.action?.kind === "repair_sign_in" ? sourceStatus.action.label : "Update sign-in details"}
             />
             {!neverConnected && !revoked ? addAnotherAccountAction : null}
             <ConnectionDangerZone
+              hasRecords={recordTotal.count !== 0}
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}
               displayName={displayName}
@@ -1896,7 +1898,10 @@ function CredentialRepairLinks({
   setupFailed,
   storedCredentialUpdateHref,
   hasStaticSecretCredentialUpdate,
+  label,
 }: {
+  /** The same words the row and the status line use for this step. */
+  label: string;
   revoked: boolean;
   setupFailed: boolean;
   storedCredentialUpdateHref: string | null;
@@ -1905,8 +1910,8 @@ function CredentialRepairLinks({
   if (setupFailed) return null;
   return storedCredentialUpdateHref && !revoked && hasStaticSecretCredentialUpdate ? (
     <div className="mt-5 flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-      <p className="pdpp-body">Update sign-in details</p>
-      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={storedCredentialUpdateHref}>Update sign-in details</Link>
+      <p className="pdpp-body text-muted-foreground">Replace the saved sign-in details. Your records are kept.</p>
+      <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={storedCredentialUpdateHref}>{label}</Link>
     </div>
   ) : null;
 }

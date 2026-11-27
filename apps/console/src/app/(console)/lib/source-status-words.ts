@@ -7,6 +7,8 @@ import { isScheduled } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
+import type { StreamManifestEntry } from "@pdpp/display";
+import { sourceRecordLabel } from "./source-record-label.ts";
 import { summarizeOutboxStallRemediation } from "./connection-evidence.ts";
 import { projectSourceActionability } from "./source-actionability.ts";
 
@@ -66,6 +68,8 @@ export interface SourceStatusOptions {
   offset?: number;
   pendingDetails?: boolean;
   signInRepairAvailable?: boolean;
+  /** The manifest's streams, so a record kind has the same name here as on the source page. */
+  streams?: readonly StreamManifestEntry[];
 }
 
 /** The label of the step that leads to the sync where a security code is entered. */
@@ -307,6 +311,32 @@ function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptio
   return { row: 16, words: sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: label && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", label, true) : null, sentence: { text: sentence, slot: null }, problem: true };
 }
 
+const GAP_CONDITIONS = ["retryable_gap", "terminal_gap", "gaps", "partial"];
+
+/** "Friends", "Friends and Games", "Friends, Games and Level". */
+function joinNames(names: readonly string[]): string {
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** Some record kinds did not come at the last sync: which ones, why when known, and what happens next. */
+function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions, name: string): MatchedStatus | null {
+  const kinds = [...new Set((source.collection_report ?? []).filter(entry => GAP_CONDITIONS.includes(entry.coverage_condition)).map(entry => entry.stream))];
+  if (kinds.length === 0) return null;
+  const labels = kinds.map(kind => sourceRecordLabel(kind, options.streams));
+  const gaps = (Array.isArray(source.last_run?.known_gaps) ? source.last_run?.known_gaps ?? [] : [])
+    .filter(gap => typeof gap === "object" && gap !== null && "stream" in gap && kinds.includes(String((gap as { stream: unknown }).stream)));
+  const cause = gaps.length > 0 ? resolveSyncCause({ connector_error: gaps }, name) : null;
+  const known = cause?.known === true ? cause : null;
+  const head = `${joinNames(labels)} didn't come at the last sync.`;
+  const words = known ? `${head} ${known.sentence}` : head;
+  if (known?.needsPerson && known.action === "Sign in again") {
+    const savedKey = known.credentialRejected && source.source_binding_kind === "static_secret";
+    return { row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
+  }
+  const next = isScheduled(source.schedule ?? null) ? " DataConnect will try again at the next check." : "";
+  return { row: 16, words, tone: "plain", action: canStartSync(source) ? action("sync_now", "Sync now", false) : null, sentence: { text: `${words}${next}`, slot: null }, problem: true };
+}
+
 function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus {
   const name = (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "");
   const projection = projectSourceActionability(source);
@@ -367,10 +397,8 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return { row: label === "Missing optional data" ? 14 : label === "Some records stuck" ? 15 : 16, words: base.startsWith("Something stopped") ? base : withWhen(base), tone: "plain", action: label !== "Missing optional data" && label !== "Some records stuck" && canStartSync(source) ? action("sync_now", "Try again", true) : null , sentence: { text: base.startsWith("Something stopped") ? base : `${base}.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: true };
   }
   if (resolver === "refresh_due") return refreshRow(source, name, when);
-  if (source.collection_report?.some(entry => ["retryable_gap","terminal_gap","gaps","partial"].includes(entry.coverage_condition))) {
-    const text = "Some records didn't come at the last sync.";
-    return {row:16,words:text,tone:"plain",action:null,sentence:{text,slot:null},problem:true};
-  }
+  const didNotCome = didNotComeRow(source, options, name);
+  if (didNotCome) return didNotCome;
   if (resolver === "healthy") {
     if (options.pendingDetails || source.connection_health.detail_gap_backlog?.pending || source.collection_report?.some(entry=>entry.pending_detail_gaps>0)) {
       const text=`Synced${when ? ` ${when}` : ""}. Still checking a few things.`;

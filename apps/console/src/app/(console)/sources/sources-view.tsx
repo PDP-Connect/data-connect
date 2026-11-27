@@ -437,16 +437,17 @@ function RuntimeNotice({ advisory }: { advisory: SourcesRuntimeAdvisory }) {
   return <aside className="rr-s-notice" data-testid="sources-runtime-advisory" role="status"><Text as="p">{advisory.headline}</Text><Text as="p" color="muted">{advisory.note}</Text></aside>;
 }
 
+const COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
 function buildDuplicateNotice(reviews: readonly DuplicateSourceReview[]) {
   const primary = reviews[0];
   if (!primary) return null;
-  const others = reviews.length - 1;
-  const more = others > 0 ? ` ${others.toLocaleString()} other data source ${others === 1 ? "type needs" : "types need"} the same review.` : "";
+  const total = COUNT_WORDS[primary.total] ?? primary.total.toLocaleString();
   return (
     <aside className="rr-s-notice" data-testid="sources-duplicate-review" role="note">
-      <Text as="p">Several data sources need labels</Text>
-      <Text as="p" color="muted">{primary.total.toLocaleString()} {primary.kind} data sources are configured; {primary.unnamed.toLocaleString()} {primary.unnamed === 1 ? "is" : "are"} unnamed. Keep multiple accounts when they are intentional. Rename the ones you want to keep, or open one and disconnect it if it was only a setup attempt. Nothing is merged or removed automatically.{more}</Text>
-      <Link className="rr-s-notice__link" href={primary.firstUnnamedHref}>Review duplicate data source labels →</Link>
+      <Text as="p">You have {total} {primary.kind} accounts.</Text>
+      <Text as="p" color="muted">Name them so you can tell them apart.</Text>
+      <Link className="rr-s-notice__link" href={primary.firstUnnamedHref}>Name them →</Link>
     </aside>
   );
 }

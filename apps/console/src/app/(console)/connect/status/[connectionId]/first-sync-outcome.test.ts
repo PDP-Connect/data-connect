@@ -113,7 +113,8 @@ test("failed: the retry button matches the kind of service", () => {
   };
   assert.equal(label("manual_upload")?.label, "Choose another file");
   assert.match(label("manual_upload")?.href ?? "", /^\/connect\/manual-upload\/amazon\?connection_id=conn_1/);
-  assert.equal(label("static_secret")?.label, "Enter the key again");
+  // F6: a cause that is not the credential never offers the key step.
+  assert.equal(label("static_secret")?.label, "Try again");
   assert.match(label("static_secret")?.href ?? "", /^\/connect\/static-secret\/amazon\?connection_id=conn_1/);
   assert.equal(label("browser_session")?.label, "Try again");
   assert.match(label("browser_session")?.href ?? "", /^\/connect\/browser-session\/amazon\/launch/);
@@ -123,7 +124,7 @@ test("running links to the live view and needs-you continues sign-in", () => {
   const running = firstSyncOutcome(status({ running: true, setup_state: "first_sync_running" }), "Amazon", withOrders);
   assert.equal(running.kind === "running" && running.watch.href, "/syncs/run_1/stream");
   const needs = firstSyncOutcome(status({ setup_state: "awaiting_browser_login" }), "Amazon", withOrders);
-  assert.equal(needs.kind === "needs-you" && needs.next.label, "Continue");
+  assert.equal(needs.kind === "needs-you" && needs.next.label, "Continue setup");
 });
 
 // Design Page 3 + banned list: every outcome, rendered, is free of banned words, badges, folds, ids.
@@ -372,13 +373,13 @@ test("revoked: says the records stay, and offers the data and a new connection",
   assert.equal(outcome.note, "Your records stay.");
   assert.equal(outcome.open.label, "See your Steam data");
   assert.match(outcome.open.href, /^\/explore\?connection=conn_1/);
-  assert.equal(outcome.connectAgain.label, "Connect Steam again");
+  assert.equal(outcome.connectAgain.label, "Set up again");
   assert.equal(outcome.connectAgain.href, "/sources/add?source_q=amazon");
   const { FirstSyncBody } = await bodyModule;
   const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Steam" })));
   assert.match(text, /Your records stay\./);
   assert.match(text, /See your Steam data/);
-  assert.match(text, /Connect Steam again/);
+  assert.match(text, /Set up again/);
 });
 
 // A service whose saved secret is a username and password signs in again; it has no "key".
@@ -396,4 +397,30 @@ test("a saved username and password says Sign in again, not Enter the key again"
     withOrders
   );
   assert.equal(failed.kind === "failed" ? failed.retry.label : null, "Sign in again");
+});
+
+// Round 3, items 5, 6 and 7.
+test("a first sync that failed for a reason that is not the key offers Try again, not the key step", () => {
+  const failed = firstSyncOutcome(status({ setup_kind: "static_secret", setup_state: "first_sync_failed", last_error: { reason: "upstream_unavailable", remediation: "x" } }), "Steam", withOrders);
+  assert.equal(failed.kind === "failed" ? failed.retry.label : null, "Try again");
+  const rejected = firstSyncOutcome(status({ setup_kind: "static_secret", setup_state: "first_sync_failed", last_error: { reason: "invalid_credentials", remediation: "x" } }), "Steam", withOrders);
+  assert.equal(rejected.kind === "failed" ? rejected.retry.label : null, "Enter the key again");
+});
+
+test("a partial sync names the step in the headline and says which kind did not come, with the cause", async () => {
+  const expired = { ...withOrders, kinds: [{ count: 1, kind: "profile" }], gaps: [{ kind: "skip_result", stream: "transactions", reason: "session_expired", message: "Venmo ended the session" }] };
+  const outcome = firstSyncOutcome(status({ setup_kind: "browser_session" }), "Venmo", expired);
+  assert.equal(outcome.kind, "partial");
+  assert.equal(headlineFor(outcome, "Venmo"), "Venmo needs a new sign-in to copy the rest.");
+  const { FirstSyncBody } = await bodyModule;
+  const text = visibleText(renderToStaticMarkup(createElement(FirstSyncBody, { ...bodyProps(outcome), name: "Venmo" })));
+  assert.doesNotMatch(text, /Didn't come|Didn&#x27;t come/);
+  assert.match(text, /Transactions\s*Not copied\. Venmo asked for a new sign-in\./);
+  assert.match(text, /1 record/);
+});
+
+test("record kinds take the manifest's label on the first-sync page", () => {
+  const streams = [{ name: "profile", display: { label: "Your Venmo profile" } }] as never;
+  const outcome = firstSyncOutcome(status(), "Venmo", { kinds: [{ count: 2, kind: "profile" }], schedule: undefined, streams });
+  assert.equal(outcome.kind === "worked" ? outcome.collected[0]?.label : null, "Your Venmo profile");
 });

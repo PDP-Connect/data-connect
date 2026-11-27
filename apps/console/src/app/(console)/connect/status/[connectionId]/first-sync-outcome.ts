@@ -9,7 +9,8 @@
 import { NO_NAME_FALLBACK } from "../../../lib/connection-display-name.ts";
 import { classifyKnownGaps, type KnownGap } from "../../../lib/run-gaps.ts";
 import { resolveSyncCause } from "../../../lib/sync-cause.ts";
-import { humanizeFieldLabel } from "@pdpp/display";
+import type { StreamManifestEntry } from "@pdpp/display";
+import { sourceRecordLabel } from "../../../lib/source-record-label.ts";
 import type {
 	ConnectionSetupStatus,
 	RefSchedule,
@@ -29,6 +30,8 @@ export interface CollectedKind {
 export type { ScheduleFacts };
 
 export interface FirstSyncFacts {
+	/** The manifest's streams: the same labels the source page uses. */
+	readonly streams?: readonly StreamManifestEntry[];
 	readonly gaps?: readonly KnownGap[];
 	readonly failureReason?: string | null;
 	readonly runStatus?: RunHandleStatus | null;
@@ -79,6 +82,8 @@ export type FirstSyncOutcome =
 			}[];
 			readonly primary: OutcomeLink;
 			readonly retry: OutcomeLink | null;
+			/** The step the person must take to get the rest, in a phrase ("a new sign-in"); null when none. */
+			readonly step: string | null;
 			readonly technical: OutcomeLink | null;
 	  }
 	| { readonly kind: "needs-you"; readonly next: OutcomeLink }
@@ -118,13 +123,15 @@ export const outcomeCopy = {
 	connected: (name: string) => `${atStart(name)} is connected.`,
 	emptyHeadline: (name: string) =>
 		`${atStart(name)} is connected, but nothing came back.`,
-	partialHeadline: (name: string) =>
-		`${atStart(name)} is connected, but some of it didn't come.`,
+	partialHeadline: (name: string, step: string | null = null) =>
+		step
+			? `${atStart(name)} needs ${step} to copy the rest.`
+			: `${atStart(name)} is connected, but some of it didn't come.`,
 	runningHeadline: (name: string) => `Copying ${yourData(name)}`,
 	watch: "Watch it",
 	needsYouHeadline: (name: string) =>
 		`${atStart(name)} needs you to finish signing in.`,
-	continue: "Continue",
+	continue: "Continue setup",
 	failedHeadline: (name: string) => `${atStart(name)} didn't connect.`,
 	failedFallback: "Something went wrong while copying your data.",
 	pausedHeadline: (name: string) => `${atStart(name)} is paused.`,
@@ -163,9 +170,9 @@ function plainRemediation(value: string | null | undefined): string | null {
 	return text && /\s/.test(text) && !/\b[a-z0-9]+_[a-z0-9_]+\b/i.test(text) ? text : null;
 }
 
+/** Try again, never a sign-in or key step: only a cause in the credential gets those. */
 function retryLabel(status: ConnectionSetupStatus): string {
 	if (status.setup_kind === "manual_upload") return "Choose another file";
-	if (status.setup_kind === "static_secret") return savedSecretLabel(status);
 	return outcomeCopy.retry;
 }
 
@@ -174,7 +181,7 @@ function collectedKinds(facts: FirstSyncFacts): CollectedKind[] {
 		.filter(({ count }) => count > 0)
 		.map(({ count, kind }) => ({
 			count,
-			label: humanizeFieldLabel(kind),
+			label: sourceRecordLabel(kind, facts.streams),
 			stream: kind,
 		}));
 }
@@ -215,7 +222,8 @@ function kindActionLabel(
 ): string | null {
 	if (action === null) return null;
 	if (status.setup_kind === "manual_upload") return "Choose another file";
-	if (status.setup_kind === "static_secret") return savedSecretLabel(status);
+	if (status.setup_kind === "static_secret" && action === "Sign in again")
+		return savedSecretLabel(status);
 	return action;
 }
 
@@ -267,7 +275,7 @@ export function firstSyncOutcome(
 		return {
 			connectAgain: {
 				href: `/sources/add?source_q=${encodeURIComponent(status.connector_id)}`,
-				label: `Connect ${name} again`,
+				label: "Set up again",
 			},
 			kind: "revoked",
 			note: "Your records stay.",
@@ -384,7 +392,7 @@ export function firstSyncOutcome(
 			const plain = plainGap(gap, name, status);
 			return {
 				action: plain.action,
-				label: gap.stream ? humanizeFieldLabel(gap.stream) : "Some data",
+				label: gap.stream ? sourceRecordLabel(gap.stream, facts.streams) : "Some data",
 				// The service's own text and codes stay on the technical page. A cause we
 				// know gets its plain sentence; any other gets one generic sentence.
 				message: plain.sentence,
@@ -419,9 +427,16 @@ export function firstSyncOutcome(
 				: gap,
 		);
 	}
+	const step =
+		gapAction === "Sign in again"
+			? kindActionLabel(status, gapAction) === "Sign in again"
+				? "a new sign-in"
+				: "the key again"
+			: null;
 	if (missing.length > 0)
 		return {
 			kind: "partial",
+			step,
 			collected,
 			missing: [...missingByKind.values()].map(
 				({ action: _action, ...gap }) => gap,
@@ -464,7 +479,7 @@ export function headlineFor(outcome: FirstSyncOutcome, name: string): string {
 		case "worked":
 			return outcomeCopy.connected(name);
 		case "partial":
-			return outcomeCopy.partialHeadline(name);
+			return outcomeCopy.partialHeadline(name, outcome.step);
 		case "empty":
 			return outcomeCopy.emptyHeadline(name);
 		case "running":

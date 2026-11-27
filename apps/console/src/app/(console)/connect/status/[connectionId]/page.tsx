@@ -31,7 +31,8 @@ function firstValue(value: string | string[] | undefined): string | undefined {
 }
 
 async function readFacts(
-  status: Awaited<ReturnType<typeof getConnectionSetupStatus>>
+  status: Awaited<ReturnType<typeof getConnectionSetupStatus>>,
+  streams: FirstSyncFacts["streams"]
 ): Promise<FirstSyncFacts> {
   const runId = status.run?.run_id;
   // Same read the data source's own page makes. A failed read stays unknown
@@ -42,7 +43,7 @@ async function readFacts(
     runId ? getRunStatus(runId).catch(() => null) : Promise.resolve(null),
   ]);
   const kinds = timeline ? getCollectedKinds(getCollectionTerminalEvent(timeline.events)) : null;
-  return { kinds, schedule, gaps: runStatus ? extractKnownGapsFromEventData(runStatus).gaps : timeline ? extractTerminalKnownGaps(timeline.events).gaps : [], failureReason: runStatus?.terminal_reason ?? runStatus?.failure?.reason, runStatus: runStatus?.status, signedIn: timeline ? hasResolvedBrowserSurfaceAssistance(timeline.events) : false };
+  return { streams, kinds, schedule, gaps: runStatus ? extractKnownGapsFromEventData(runStatus).gaps : timeline ? extractTerminalKnownGaps(timeline.events).gaps : [], failureReason: runStatus?.terminal_reason ?? runStatus?.failure?.reason, runStatus: runStatus?.status, signedIn: timeline ? hasResolvedBrowserSurfaceAssistance(timeline.events) : false };
 }
 
 export default async function ConnectionSetupStatusPage({
@@ -68,7 +69,7 @@ export default async function ConnectionSetupStatusPage({
 
   const manifest = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id);
   const name = await setupStatusName(status, manifest?.display_name, existingSourcesForConnector);
-  const outcome = firstSyncOutcome(status, name, await readFacts(status));
+  const outcome = firstSyncOutcome(status, name, await readFacts(status, manifest?.streams as FirstSyncFacts["streams"]));
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={status.pending || status.running || outcome.kind === "running" || outcome.kind === "needs-you"} />

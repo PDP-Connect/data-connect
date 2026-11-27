@@ -20,7 +20,7 @@ test("seeded detail scenarios render the shared sentence and row for each status
     const html = renderToStaticMarkup(
       createElement(SourceStateSentenceText, { connectionId: model.connectionId, sentence, status })
     );
-    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 
     // DIRECTION.md §One data source: render the pure helper's sentence and status row on the page.
     assert.equal(status.row, row, `demo row ${row}`);
@@ -63,7 +63,7 @@ test("pending details replace up-to-date wording on rows 19 and 20", () => {
     const html = renderToStaticMarkup(
       createElement(SourceStateSentenceText, { connectionId: model.connectionId, sentence, status })
     );
-    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const visibleText = html.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ").trim();
 
     // Brief decision 5: pending details use the plain sentence and never conflict with “Up to date”.
     assert.match(visibleText, /^Synced .*\. Still checking a few things\.$/);

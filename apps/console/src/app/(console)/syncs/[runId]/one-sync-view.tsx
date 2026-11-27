@@ -24,10 +24,10 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
     <PageHeader breadcrumbs={[{ href: "/syncs", label: "Sync history" }, { href: m.connection ? `/sources/${encodeURIComponent(m.connection)}` : "/sources", label: m.name }]} title={<span className="inline-flex items-center gap-3"><ConnectorMark connectorId={m.connector} name={m.name} /><span>{m.name}{m.at ? `, ${sentenceDayLabel(personDay(m.at,offset),offset)} at ${clockLabel(m.at,offset)}` : ""}</span></span>} />
     <div className="mb-8 space-y-3"><p className={m.outcome === "failed" || m.outcome === "needs_you" ? "text-destructive" : "text-foreground"}>{sentence}</p>
     {m.outcome === "failed" ? <p>{cause.sentence}</p> : null}
-    {m.currentSource?.currentState ? <p>{m.currentSource.currentState}</p> : null}
-    {m.currentSource?.currentAnswer?.action && m.retryHref ? <Link className={buttonVariants()} href={m.retryHref}>{m.currentSource.currentAnswer.action.label}</Link> : null}
+    {m.currentSource?.currentState && m.outcome !== "needs_you" ? <p>{m.currentSource.currentState}</p> : null}
+    {m.currentSource?.currentAnswer?.action && m.retryHref && m.outcome !== "needs_you" ? <Link className={buttonVariants()} href={m.retryHref}>{m.currentSource.currentAnswer.action.label}</Link> : null}
     {m.outcome === "syncing" ? <StopCopying name={m.name} runId={m.id} preview={practice} /> : null}
-    {m.outcome === "needs_you" ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(m.id)}/stream`}>Continue</Link> : null}
+    {m.outcome === "needs_you" ? <Link className={buttonVariants()} href={`/syncs/${encodeURIComponent(m.id)}/stream`}>{m.currentSource?.currentAnswer?.action?.label ?? "Continue"}</Link> : null}
     {m.assistance?.kind === "credentials" && m.assistance.responseContract === "response_required" && m.assistance.ownerAction === "provide_value" ? <RunInteractionForm fields={m.assistance.fields} interactionId={m.assistance.id} kind={m.assistance.kind} message={m.assistance.message} runId={m.id} serviceName={m.name} heading={false} preview={practice} /> : null}
     {m.trigger ? <p className="mb-6 text-[13px] text-muted-foreground">{m.trigger === "manual" ? "You started it." : m.trigger === "scheduled" ? "Automatic" : m.trigger === "retry" ? "A second try after a failure." : ""}</p> : null}
     </div>

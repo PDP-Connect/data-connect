@@ -14,6 +14,7 @@ import {
 	ConnectWorkingMark,
 	WentWrong,
 } from "../../../sources/add/connect-parts.tsx";
+import { recordCountLabel } from "../../../lib/record-count-label.ts";
 import { sourceDetailHref } from "./connect-status-links.ts";
 import {
 	type FirstSyncOutcome,
@@ -42,22 +43,23 @@ function LinkButton({
 	);
 }
 
-function recordsLine(count: number): string {
-	return `${new Intl.NumberFormat("en-US").format(count)} ${count === 1 ? "record" : "records"}`;
-}
+const recordsLine = recordCountLabel;
 
 /** What arrived, in the list style of "What is here" on a data source's page. */
 function ArrivedList({
 	collected,
 	connectionId,
+	missing = [],
 }: {
 	collected: Extract<FirstSyncOutcome, { kind: "worked" }>["collected"];
 	connectionId: string;
+	/** Kinds that did not come, each on its own row with its cause. */
+	missing?: Extract<FirstSyncOutcome, { kind: "partial" }>["missing"];
 }) {
-	if (collected.length === 0) return null;
+	if (collected.length === 0 && missing.length === 0) return null;
 	return (
 		<div data-testid="collected-kinds">
-			<DataList ariaLabel="What arrived">
+			<DataList ariaLabel={missing.length > 0 ? "What arrived and what did not" : "What arrived"}>
 				{collected.map((kind) => (
 					<li key={kind.stream}>
 						<Link
@@ -69,6 +71,15 @@ function ArrivedList({
 								{recordsLine(kind.count)}
 							</span>
 						</Link>
+					</li>
+				))}
+				{missing.map((gap) => (
+					<li className="flex flex-col gap-1 px-3 py-3" key={`missing:${gap.label}`}>
+						<span className="text-foreground">{gap.label}</span>
+						<span className="pdpp-caption text-muted-foreground">
+							Not copied. {gap.message}
+							{gap.retryNote ? ` ${gap.retryNote}` : ""}
+						</span>
 					</li>
 				))}
 			</DataList>
@@ -133,19 +144,8 @@ function Body({
 					<ArrivedList
 						collected={outcome.collected}
 						connectionId={connectionId}
+						missing={outcome.missing}
 					/>
-					<h2 className="pdpp-eyebrow">Didn't come</h2>
-					<DataList ariaLabel="Didn't come">
-						{outcome.missing.map((gap) => (
-							<li className="flex flex-col gap-1 px-3 py-3" key={gap.label}>
-								<p className="text-foreground">{gap.label}</p>
-								<p className="pdpp-caption text-muted-foreground">
-									{gap.message}
-									{gap.retryNote ? ` ${gap.retryNote}` : ""}
-								</p>
-							</li>
-						))}
-					</DataList>
 					<div className="flex flex-wrap gap-2">
 						{outcome.retry ? (
 							<>

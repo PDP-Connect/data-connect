@@ -26,9 +26,14 @@ export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames:
     const resolved = resolveSyncCause(row.evidence ?? {reason:row.cause},name);
     const cause = resolved.sentence;
     // "Now" must not repeat the cause, nor send a step that is the person's to the maintainers.
+    // When "Now" starts with the same words as the cause, the line says them once.
     const now = row.currentState?.replace(/^Now: /,"").replace(/\. See .* for the next step\.$/,".") ?? "";
-    const currentAfterFailure = row.currentState && (now === cause || (resolved.needsPerson && now.startsWith("Waiting on a fix from the DataConnect maintainers"))) ? "" : currentPart;
-    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${currentAfterFailure}`;
+    const causeWords = cause.replace(/\.$/, "");
+    const nowWords = now.replace(/\.$/, "");
+    const repeats = nowWords === causeWords || nowWords.startsWith(`${causeWords}.`);
+    const failure = repeats ? nowWords : causeWords;
+    const currentAfterFailure = row.currentState && (repeats || (resolved.needsPerson && now.startsWith("Waiting on a fix from the DataConnect maintainers"))) ? "" : currentPart;
+    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${failure}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${currentAfterFailure}`;
   }
   // The unnamed-cause answer is reached only when the last run did not fail, so beside a
   // sync that worked it would say something that is not true. Named states still show.
@@ -55,7 +60,7 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
     const fine=older ? all.filter(row=>!syncDayProblem(row)) : [];
     const shown=older ? all.filter(syncDayProblem) : all;
     return <Section key={day} title={fine.length && !onlyProblems ? undefined : dayLabel(day,offset)}>
-      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,connection_id:onlySource,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length===all.length ? "all " : ""}{fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
+      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,connection_id:onlySource,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{dayLabel(day,offset)} · {fine.length} data source{fine.length===1?"":"s"} checked</Link> : null}
       <ul className="divide-y divide-border">{shown.map(row=><li key={row.connection_id} className="py-4">
         <Link className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"history-day",fixture:demo}:{})})}>
           <div className="flex min-w-0 items-start gap-3 sm:items-center"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div className="min-w-0"><p>{name(row)}</p><span className="block text-[13px] text-muted-foreground sm:hidden">{historyTime(row.last_at,offset)}</span><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,sources.find(source=>source.id===row.connection_id)?.serviceName ?? name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
