@@ -9,8 +9,10 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   truncateSync,
+  existsSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -27,6 +29,7 @@ import {
   assertPackagedReferenceStacks,
   assertPackagedRuntime,
   attachDmg,
+  cleanupDmgMount,
   collectRelevantWindowsInstallerEntries,
   detachDmg,
   listDebEntries,
@@ -801,7 +804,7 @@ describe("hdiutil mount retries", () => {
     const fake = fakeHdiutil(2, () => `couldn't eject "disk9" - Resource busy`)
 
     expect(() =>
-      detachDmg(mountRoot, fake.runCommand, fake.pause)
+      detachDmg(mountRoot, fake.runCommand, fake.pause, () => true)
     ).not.toThrow()
     expect(fake.calls.map(([, args]) => args)).toEqual([
       detachArgs,
@@ -810,11 +813,104 @@ describe("hdiutil mount retries", () => {
     ])
   })
 
+  it("stops after a detach error when the mount has already disappeared", () => {
+    const fake = fakeHdiutil(Infinity, attempt =>
+      attempt === 1 ? "Resource busy" : "No such file or directory"
+    )
+    const probes = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        probes.push(path)
+        return false
+      })
+    ).not.toThrow()
+    expect(probes).toEqual([mountRoot])
+    expect(fake.calls).toEqual([["hdiutil", detachArgs]])
+    expect(fake.pauses).toEqual([])
+  })
+
+  it("finishes after the second failed detach when the volume then disappears", () => {
+    const fake = fakeHdiutil(Infinity, attempt =>
+      attempt === 1 ? "Resource busy" : "No such file or directory"
+    )
+    const probes = [true, false]
+    const paths = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        paths.push(path)
+        return probes.shift()
+      })
+    ).not.toThrow()
+    expect(paths).toEqual([mountRoot, mountRoot])
+    expect(probes).toEqual([])
+    expect(fake.calls).toEqual([["hdiutil", detachArgs], ["hdiutil", detachArgs]])
+  })
+
+  it("rejects missing-path diagnostics while the volume is still mounted", () => {
+    const fake = fakeHdiutil(Infinity, () => "No such file or directory")
+    const paths = []
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause, path => {
+        paths.push(path)
+        return true
+      })
+    ).toThrow("No such file or directory")
+    expect(paths).toEqual([mountRoot, mountRoot, mountRoot])
+    expect(fake.calls).toEqual([
+      ["hdiutil", detachArgs],
+      ["hdiutil", detachArgs],
+      ["hdiutil", forceDetachArgs],
+    ])
+  })
+
+  describe("with the default mount probe", () => {
+    it("stops after one detach error when the mount path is gone", () => {
+      const parent = mkdtempSync(join(tmpdir(), "dmg-probe-"))
+      const gone = join(parent, "volume")
+      const fake = fakeHdiutil(Infinity, () => "No such file or directory")
+      try {
+        expect(() =>
+          detachDmg(gone, fake.runCommand, fake.pause)
+        ).not.toThrow()
+        expect(fake.calls).toEqual([["hdiutil", ["detach", gone]]])
+      } finally {
+        rmSync(parent, { recursive: true, force: true })
+      }
+    })
+
+    it("stops after one detach error when only the empty directory remains", () => {
+      const leftover = mkdtempSync(join(tmpdir(), "dmg-probe-"))
+      const fake = fakeHdiutil(Infinity, () => "Resource busy")
+      try {
+        expect(() =>
+          detachDmg(leftover, fake.runCommand, fake.pause)
+        ).not.toThrow()
+        expect(fake.calls).toEqual([["hdiutil", ["detach", leftover]]])
+      } finally {
+        rmSync(leftover, { recursive: true, force: true })
+      }
+    })
+
+    // /dev is its own filesystem on Linux and macOS, so it stands in for a
+    // volume that is still mounted.
+    it.skipIf(statSync("/dev").dev === statSync("/").dev)(
+      "keeps retrying while the path is still a separate filesystem",
+      () => {
+        const fake = fakeHdiutil(Infinity, () => "Resource busy")
+
+        expect(() =>
+          detachDmg("/dev", fake.runCommand, fake.pause)
+        ).toThrow("hdiutil detach")
+        expect(fake.calls).toHaveLength(3)
+      }
+    )
+  })
+
   it("tries detach -force last and lists every attempt if the volume stays busy", () => {
     const fake = fakeHdiutil(Infinity, attempt => `detach stderr ${attempt}`)
 
     const error = errorFrom(() =>
-      detachDmg(mountRoot, fake.runCommand, fake.pause)
+      detachDmg(mountRoot, fake.runCommand, fake.pause, () => true)
     )
     expect(fake.calls.map(([, args]) => args)).toEqual([
       detachArgs,
@@ -824,5 +920,86 @@ describe("hdiutil mount retries", () => {
     for (const attempt of [1, 2, 3]) {
       expect(error.message).toContain(`detach stderr ${attempt}`)
     }
+  })
+})
+
+describe("DMG mount root cleanup", () => {
+  // These tests use the default `remove` (the real rmdirSync) wherever a
+  // directory is involved, so they exercise the actual removal semantics.
+  function errorFrom(action) {
+    try {
+      action()
+    } catch (error) {
+      return error
+    }
+    throw new Error("expected the action to throw")
+  }
+
+  it("treats a mount root that is already gone as cleaned up", () => {
+    const parent = mkdtempSync(join(tmpdir(), "dmg-cleanup-"))
+    try {
+      expect(() =>
+        cleanupDmgMount(join(parent, "gone"), null, false)
+      ).not.toThrow()
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it("fails on a populated mount root without deleting its contents", () => {
+    const populated = mkdtempSync(join(tmpdir(), "dmg-cleanup-"))
+    try {
+      const payload = join(populated, "payload")
+      writeFileSync(payload, "maybe still the mounted image")
+      const error = errorFrom(() => cleanupDmgMount(populated, null, false))
+      // The non-recursive removal refusing an occupied directory, not some
+      // other failure: rmdirSync's own ENOTEMPTY.
+      expect(error.code).toBe("ENOTEMPTY")
+      expect(existsSync(payload)).toBe(true)
+    } finally {
+      rmSync(populated, { recursive: true, force: true })
+    }
+  })
+
+  it("surfaces the verification's error when the removal also fails", () => {
+    const populated = mkdtempSync(join(tmpdir(), "dmg-cleanup-"))
+    try {
+      const payload = join(populated, "payload")
+      writeFileSync(payload, "maybe still the mounted image")
+      const primaryError = new Error(
+        "hdiutil attach failed: mountpoint refused"
+      )
+      const error = errorFrom(() =>
+        cleanupDmgMount(populated, primaryError, false)
+      )
+      expect(error.message).toBe(primaryError.message)
+      expect(error.errors[0]).toBe(primaryError)
+      expect(existsSync(payload)).toBe(true)
+    } finally {
+      rmSync(populated, { recursive: true, force: true })
+    }
+  })
+
+  it("surfaces the verification's error when detach also fails", () => {
+    const primaryError = new Error("verification failed before detach")
+    const detachError = new Error("hdiutil detach failed after 3 attempts")
+    const removals = []
+    const error = errorFrom(() =>
+      cleanupDmgMount(
+        "/mnt/dataconnect-dmg",
+        primaryError,
+        true,
+        () => {
+          throw detachError
+        },
+        path => removals.push(path)
+      )
+    )
+    expect(error.message).toBe(primaryError.message)
+    expect(error.errors[0]).toBe(primaryError)
+    expect(error.errors[1]).toBe(detachError)
+    // A detach that failed leaves the mount root alone: it might still be
+    // the mounted image, so cleanup must not attempt to remove it.
+    expect(removals).toEqual([])
   })
 })
