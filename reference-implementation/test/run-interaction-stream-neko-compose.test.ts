@@ -263,6 +263,53 @@ test("Patchright installer refuses a package without Chromium without a download
   }
 });
 
+test("Patchright installer reports download and incomplete archive failures without marking Chromium installed", async (t) => {
+  for (const failure of ["download", "incomplete-archive"] as const) {
+    await t.test(failure, async () => {
+      const root = await mkdtemp(join(tmpdir(), "neko-patchright-archive-"));
+      try {
+        const mod = join(root, "node_modules", "patchright-core");
+        const bin = join(root, "bin");
+        await mkdir(mod, { recursive: true });
+        await mkdir(bin);
+        await writeFile(join(mod, "package.json"), JSON.stringify({ name: "patchright-core" }));
+        await writeFile(join(mod, "browsers.json"), JSON.stringify({
+          browsers: [{ name: "chromium", revision: "4321", browserVersion: "1.2.3.4" }],
+        }));
+        const unzipCalled = join(root, "unzip-called");
+        await writeFile(join(bin, "curl"), failure === "download"
+          ? "#!/bin/sh\necho 'synthetic CDN refusal' >&2\nexit 22\n"
+          : "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        await writeFile(join(bin, "unzip"), "#!/bin/sh\n: > \"$PATCHRIGHT_UNZIP_WITNESS\"\nexit 0\n", { mode: 0o755 });
+        const destination = join(root, "browser-output");
+        const result = spawnSync("/bin/bash", [join(REPO_ROOT, "docker/neko/install-patchright-chromium.sh"), root], {
+          encoding: "utf8",
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            PLAYWRIGHT_BROWSERS_PATH: destination,
+            PATCHRIGHT_UNZIP_WITNESS: unzipCalled,
+          },
+          timeout: 5_000,
+        });
+        assert.equal(result.error, undefined);
+        assert.doesNotMatch(result.stdout, /installed chromium/);
+        await assert.rejects(readFile(join(destination, "chromium-4321", "INSTALLATION_COMPLETE")), { code: "ENOENT" });
+        if (failure === "download") {
+          assert.equal(result.status, 22);
+          assert.match(result.stderr, /synthetic CDN refusal/);
+          await assert.rejects(readFile(unzipCalled), { code: "ENOENT" });
+        } else {
+          assert.equal(result.status, 1);
+          assert.match(result.stderr, /expected chrome binary missing/);
+          assert.equal(await readFile(unzipCalled, "utf8"), "");
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
 
