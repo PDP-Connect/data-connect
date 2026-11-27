@@ -44,3 +44,22 @@ test("placeholder text reaches 4.5:1 on the field background in both themes", ()
     }
   }
 });
+
+// Round 9 (F10): a control's edge needs 3:1 against the page and the card; dividers keep their own softer token.
+test("the control border token reaches 3:1 on the page, the card and the secondary fill in both themes", () => {
+  for (const scope of [":root", '[data-theme="dark"]']) {
+    for (const surface of ["background", "card", "secondary"]) {
+      const ratio = contrast(oklchToLinear(token(scope, "control-border")), oklchToLinear(token(scope, surface)));
+      assert.ok(ratio >= 3, `${scope} control-border on ${surface}: ${ratio.toFixed(2)}`);
+    }
+  }
+});
+
+test("inputs, selects and outlined buttons draw their edge with the control border, not the divider token", () => {
+  const read = (rel: string) => readFileSync(resolve(here, rel), "utf8");
+  const components = read("../../../../reference-implementation/vendor/brand-react/src/components.css");
+  const shell = read("../../../../reference-implementation/vendor/brand-react/src/shell.css");
+  assert.doesNotMatch(components, /border(-color)?:[^;]*(?<!, )var\(--input\)/);
+  assert.doesNotMatch(shell, /border(-color)?:[^;]*(?<!, )var\(--input\)/);
+  assert.match(read("../../../../reference-implementation/vendor/operator-ui/src/ui/button.tsx"), /border-\[var\(--control-border\)\]/);
+});

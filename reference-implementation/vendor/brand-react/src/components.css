@@ -387,11 +387,11 @@
   font-weight: 600;
   color: var(--foreground);
   background: transparent;
-  border-color: var(--input);
+  border-color: var(--control-border, var(--input));
 }
 .pdpp-btn--ghost:hover:not(:disabled) {
   background: var(--muted);
-  border-color: var(--border-strong);
+  border-color: var(--foreground);
 }
 .pdpp-btn--destructive {
   color: var(--destructive);
@@ -423,7 +423,7 @@
   font-size: 0.8125rem;
   color: var(--foreground);
   background: var(--card);
-  border: 1px solid var(--input);
+  border: 1px solid var(--control-border, var(--input));
   border-radius: var(--radius-control);
   transition: border-color var(--duration-state) var(--ease-standard);
 }
@@ -491,7 +491,7 @@
   cursor: pointer;
   outline: none;
   background: var(--card);
-  border: 1px solid var(--input);
+  border: 1px solid var(--control-border, var(--input));
   border-radius: var(--radius-control);
   transition: border-color var(--duration-state) var(--ease-standard);
 }

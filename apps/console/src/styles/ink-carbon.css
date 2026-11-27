@@ -114,6 +114,8 @@
   --border: oklch(0.93 0.004 75);
   --border-strong: oklch(0.87 0.005 75);
   --input: oklch(0.87 0.005 75);
+  /* The edge of an input, select or outlined button: 3:1 against the page (WCAG 1.4.11). */
+  --control-border: oklch(0.62 0.005 75);
   --ring: oklch(0.50 0.13 245);
   --attention: oklch(0.54 0.15 48);
 
@@ -199,6 +201,7 @@
   --border: oklch(0.255 0.004 80);
   --border-strong: oklch(0.33 0.005 80);
   --input: oklch(0.33 0.005 80);
+  --control-border: oklch(0.54 0.005 80);
   --ring: oklch(0.76 0.11 238);
   --attention: oklch(0.79 0.13 62);
 

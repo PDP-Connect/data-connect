@@ -694,7 +694,7 @@ export function ManualUploadForm({
           {addToExisting && existingSources.length > 1 ? (
             <select
               aria-label={fileCopy.addTo(name)}
-              className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+              className="flex h-11 w-full rounded-md border border-[var(--control-border)] bg-transparent px-3 py-1 text-sm shadow-sm"
               name="existing_connection_id"
             >
               {existingSources.map((source) => (
@@ -723,7 +723,7 @@ export function ManualUploadForm({
         <label className="grid gap-1" htmlFor="manual-upload-display-name">
           <span className="pdpp-eyebrow">{accountCopy.nameLabel}</span>
           <input
-            className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex h-11 w-full rounded-md border border-[var(--control-border)] bg-transparent px-3 py-1 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             id="manual-upload-display-name"
             maxLength={200}
             name="display_name"
@@ -736,7 +736,7 @@ export function ManualUploadForm({
         <span className="sr-only">{fileCopy.chooseStep}</span>
         <input
           accept={acceptAttribute || undefined}
-          className="flex min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:font-medium file:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex min-h-11 w-full rounded-md border border-[var(--control-border)] bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:font-medium file:text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           id="manual-upload-file"
           multiple
           name="import_file"

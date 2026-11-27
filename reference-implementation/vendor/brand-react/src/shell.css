@@ -278,7 +278,7 @@ html:has(.rr-app) {
   white-space: nowrap;
   cursor: pointer;
   background: transparent;
-  border: 1px solid var(--input);
+  border: 1px solid var(--control-border, var(--input));
   border-radius: var(--radius-control);
   transition:
     color var(--duration-state) var(--ease-standard),
