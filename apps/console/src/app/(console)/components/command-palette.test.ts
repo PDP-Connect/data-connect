@@ -92,7 +92,7 @@ const SHELL_JUMP_BUTTON_RE = /<span>Search or jump to…<\/span>/;
 const SHELL_JUMP_KEY_LABEL_RE = /<span className="rr-kbd">\{label\}<\/span>/;
 const SECTION_CHILDREN_RE = /item\.children && item\.section === section/;
 const PRODUCT_IDENTITY_RE = /const identity = DATACONNECT_PRODUCT_IDENTITY/;
-const PRODUCT_MARK_VIEWBOX_RE = /viewBox="0 0 832 832"/;
+const PRODUCT_MARK_VIEWBOX_RE = /viewBox="120 190 606 452"/;
 const HOST_BUILD_CRUMB_RE = /\{host\}\s*·\s*\{build\}/;
 
 const TODAY_MENU_HREFS = [
