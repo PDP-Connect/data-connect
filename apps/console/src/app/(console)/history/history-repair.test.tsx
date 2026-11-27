@@ -7,7 +7,7 @@ import { sourceStatusWords, sourceStateSentence } from "../lib/source-status-wor
 import { buildSourcesDemoSummaries } from "../sources/sources-demo-data.ts";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { personDay } from "./day-cut.ts";
+import { dayLabel, personDay } from "./day-cut.ts";
 import { currentActionShown, syncDaySentence, SyncHistoryDays } from "../syncs/daily-syncs-view.tsx";
 import { toSourceInstanceView } from "../sources/sources-view-model.ts";
 import { buildHomeViewModel } from "../components/views/standing-view-model.ts";
@@ -210,4 +210,19 @@ test("older days with only fine sources say '1 data source checked', never 'all 
   const html = renderToStaticMarkup(createElement(SyncHistoryDays, { rows: [older], sources: fixture.sources, offset: 0 }));
   assert.match(html, /1 data source checked/);
   assert.doesNotMatch(html, /all 1/);
+});
+
+// Round 10 (F21): a collapsed day names the day once, in its heading link.
+test("a collapsed day says its day once", () => {
+  const now = Date.now();
+  const fixture = syncPractice("mixed", 0, now);
+  if (fixture.history.mode !== "days") { throw Error("mode"); }
+  const base = fixture.history.data[3]!;
+  const day = personDay(now - 3 * 86_400_000, 0);
+  const older = { ...base, day, failed: 0, stopped: 0, interrupted: 0, could_not_start: 0, last_outcome: "finished" as const, cause: null } as Parameters<typeof syncDaySentence>[0];
+  const html = renderToStaticMarkup(createElement(SyncHistoryDays, { rows: [older], sources: fixture.sources, offset: 0 }));
+  const text = html.replace(/<[^>]+>/g, " ");
+  const label = dayLabel(day, 0);
+  assert.equal(text.split(label).length - 1, 1, text);
+  assert.match(html, /<h2[^>]*><a [^>]*>/);
 });

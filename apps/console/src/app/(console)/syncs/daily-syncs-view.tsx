@@ -63,8 +63,11 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
     const older=!expand && day!==personDay(Date.now(),offset);
     const fine=older ? all.filter(row=>!syncDayProblem(row)) : [];
     const shown=older ? all.filter(syncDayProblem) : all;
-    return <Section key={day} title={dayLabel(day,offset)}>
-      {fine.length && !onlyProblems ? <Link className="block py-4 text-primary hover:underline" href={historyHref("/syncs/day",{}, {day,connection_id:onlySource,...(demo?{demo:"all-sources",fixture:demo}:{})})}>{fine.length.toLocaleString("en-US")} data source{fine.length===1?"":"s"} checked, no problems · see {dayLabel(day,offset)}</Link> : null}
+    const collapsed=fine.length>0 && !onlyProblems;
+    // A day with healthy sources folded away: its heading is the link that opens them, so the day is said once.
+    const dayHref=historyHref("/syncs/day",{}, {day,connection_id:onlySource,...(demo?{demo:"all-sources",fixture:demo}:{})});
+    return <Section key={day} title={collapsed ? <Link className="text-primary hover:underline" href={dayHref}>{dayLabel(day,offset)} <span aria-hidden="true">›</span></Link> : dayLabel(day,offset)}>
+      {collapsed ? <p className="py-2 text-muted-foreground">{fine.length.toLocaleString("en-US")} data source{fine.length===1?"":"s"} checked, no problems</p> : null}
       <ul className="divide-y divide-border">{shown.map(row=><li key={row.connection_id} className="py-4">
         <Link className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4" href={historyHref("/syncs/day",{}, {connection_id:row.connection_id,day,...(demo?{demo:"history-day",fixture:demo}:{})})}>
           <div className="flex min-w-0 items-start gap-3 sm:items-center"><ConnectorMark connectorId={row.connector_id} name={name(row)} /><div className="min-w-0"><p>{name(row)}</p><span className="block text-[13px] text-muted-foreground sm:hidden">{historyTime(row.last_at,offset)}</span><p className={row.last_outcome==="failed"?"text-[13px] text-destructive":"text-[13px] text-muted-foreground"}>{syncDaySentence(row,sources.find(source=>source.id===row.connection_id)?.serviceName ?? name(row),row.missing?.map(item=>historyKindName(sources,row.connection_id,item.stream)))}</p></div></div>
