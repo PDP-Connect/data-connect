@@ -13,7 +13,7 @@ import type { ConnectorPageModel } from "./source-page.tsx";
 export const SOURCE_PRACTICE_STATES = [
   ...AGREEMENT_STATES.map(state => `agreement-${state}`),
   "manual-only", "apps-some", "apps-none", "summary-zero-held", "device-zero-pending", "device-no-steps",
-  "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
+  "raw-error", "settings-machine-change", "settings-migration-choice", "settings-long-list", "waiting-unknown", "waiting-for-code", "archive-leftover", "trouble-unknown", "strong-state-pending", "records-zero-one", "measurement-shortfall", "bookkeeping-kinds", "long-account-name", "own-account",
   "unmeasured-completeness",
 	"unknown-count",
   "atlas",
@@ -210,6 +210,14 @@ function buildPracticeModel(
     const action = { ...buildRecoveryDemoModel(8).connectionPrimaryAction!, surface: { kind: "provider_interaction" as const }, cta: "Complete the requested action", target: undefined };
     model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "needs_owner" }, rendered_verdict: { ...fixtureValue(model.source.rendered_verdict), required_actions: [action] } };
     model.connectionPrimaryAction = action;
+  }
+  if (state === "waiting-for-code") {
+    // The run is live and waits for a security code: the page offers the step, not nothing.
+    const action = { ...buildRecoveryDemoModel(8).connectionPrimaryAction!, surface: { kind: "provider_interaction" as const }, cta: "Complete the requested action", kind: "add_info" as const, target: { kind: "sync" as const, run_id: "run-code" }, satisfied_when: { kind: "attention_resolved" as const } };
+    const condition = { expires_at: null, id: "AttentionClear:otp_required", message: "Owner action is required before collection can continue.", observed_at: null, origin: "runtime", reason: "otp_required", remediation: null, sensitivity: "owner", severity: "blocked", status: "false", type: "AttentionClear" } as never;
+    model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "needs_owner" }, connection_health: { ...model.source.connection_health, conditions: [condition] }, rendered_verdict: { ...fixtureValue(model.source.rendered_verdict), required_actions: [action] } };
+    model.connectionPrimaryAction = action;
+    model.activeRunId = "run-code";
   }
   if (state === "trouble-unknown") model.source = { ...model.source, owner_state: { ...fixtureValue(model.source.owner_state), resolver: "system_degraded" }, rendered_verdict: { ...fixtureValue(model.source.rendered_verdict), pill: { label: "Can't collect", tone: "red" } } };
   if (state === "strong-state-pending" || state === "archive-leftover") {

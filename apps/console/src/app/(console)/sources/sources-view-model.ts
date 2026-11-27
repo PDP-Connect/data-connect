@@ -65,7 +65,7 @@ import {
   type SourcePrimaryVerdictAction,
   type SourceStatusFlag,
 } from "../lib/source-actionability.ts";
-import { type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
+import { ENTER_THE_CODE, type SourceStatusWords, sourceStatusWords } from "../lib/source-status-words.ts";
 import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "../lib/total-records-label.ts";
 import { summarizeVersionChurn } from "../lib/version-churn-summary.ts";
 
@@ -198,6 +198,8 @@ export interface SourceInstanceView {
    * Sync/Reauthorize controls for a source the owner cannot repair.
    */
   primaryVerdictAction: SourcePrimaryVerdictAction | null;
+  /** The sync where a pending security code is entered; set only while the source waits for one. */
+  codeEntryHref?: string | null;
   revoked: boolean;
   /**
    * A revoked retired-setup-shell row that never had a successful run —
@@ -737,6 +739,7 @@ export function toSourceInstanceView(
     accountLine = formatSourceListFacts(summary, summary.streams.length);
   }
   const { primaryVerdictAction } = actionability;
+  const statusWordsNow = sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset });
   const nextAction = primaryVerdictAction?.ownerRunnable ? null : actionability.nextAction;
   const { ownerActionCue } = actionability;
   const status = actionability.renderedStatus;
@@ -824,12 +827,15 @@ export function toSourceInstanceView(
     archived,
     passportFields,
     primaryVerdictAction,
+    codeEntryHref: statusWordsNow.action?.label === ENTER_THE_CODE && actionability.primaryAction?.target?.kind === "sync"
+      ? `/syncs/${encodeURIComponent(actionability.primaryAction.target.run_id)}`
+      : null,
     revoked,
     fusedStatus,
     setupFailed,
     setupFailedForwardStatement: setupFailed ? (summary.rendered_verdict?.forward_statement ?? null) : null,
     status,
-    statusWords: sourceStatusWords(summary, { now: options.now ?? new Date(),offset:options.offset }),
+    statusWords: statusWordsNow,
     scheduleLabel: formatSourceRowSchedule(summary.schedule),
     recordsLabel: formatSourceRowRecords(sourceRecordCount(summary).count ?? 0, sourceRecordCount(summary).state),
     streams,

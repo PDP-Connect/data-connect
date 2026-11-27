@@ -67,6 +67,9 @@ export interface SourceStatusOptions {
   signInRepairAvailable?: boolean;
 }
 
+/** The label of the step that leads to the sync where a security code is entered. */
+export const ENTER_THE_CODE = "Enter the code";
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function lastSuccessfulSync(source: RefConnectorSummary): string | null {
@@ -228,7 +231,7 @@ function lifecycleRow(
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
-      action: waitingForCode ? action("server_cta", "Enter the code", true) : isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: waitingForCode ? action("server_cta", ENTER_THE_CODE, true) : isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {

@@ -845,7 +845,7 @@ function ConnectorPageView({
         actions={
           hasDeviceLocalRemediation ? deviceStepsAvailable ? <DeviceSteps panelTargetId="source-device-steps">
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
-          </DeviceSteps> : null : running ? null : <ConnectorHeaderActions
+          </DeviceSteps> : null : running && !(sourceStatus.row === 8 && pageStatusAction?.kind === "server_cta") ? null : <ConnectorHeaderActions
             browserSessionRepairHref={browserSessionRepairHref}
             canStartSync={!archived && canStartSyncFromSummary(source) && !(sourceStatus.row === 16 && sourceStatus.action === null)}
             connectionId={connectorInstanceId}

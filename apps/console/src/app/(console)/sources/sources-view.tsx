@@ -278,6 +278,9 @@ function RowAction({ instance, interactive, pending, onSync, resumeAction, resum
       </form>
     );
   }
+  if (action.kind === "server_cta" && instance.codeEntryHref) {
+    return <Link className={`${buttonVariants({ size: "sm", variant })} rr-s-row__action`} href={instance.codeEntryHref}>{action.label}</Link>;
+  }
   if (action.kind === "set_up_again") {
     return (
       <Link className={`${buttonVariants({ size: "sm", variant })} rr-s-row__action`} href={`/sources/add?source_q=${encodeURIComponent(instance.connectorId)}`}>

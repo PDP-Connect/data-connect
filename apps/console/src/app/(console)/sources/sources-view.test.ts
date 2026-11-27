@@ -375,3 +375,19 @@ test("only disconnected data sources: say so and show them, never an empty page 
   // A connected source keeps the group closed.
   assert.doesNotMatch(renderSourcesView([base, { ...base, id: "gone", revoked: true }]), /<details[^>]*\bopen\b/);
 });
+
+test("a source waiting for a security code leads to the sync where the code is entered", () => {
+  const [base] = buildSourcesDemoSummaries("healthy");
+  assert.ok(base);
+  const waiting = {
+    ...base,
+    owner_state: { evidence_as_of: NOW.toISOString(), owner_of_state: "owner" as const, posture: "observed" as const, resolver: "needs_owner" as const },
+    connection_health: { ...base.connection_health, conditions: [{ expires_at: null, id: "AttentionClear:otp_required", message: "x", observed_at: null, origin: "runtime", reason: "otp_required", remediation: null, sensitivity: "owner", severity: "blocked", status: "false", type: "AttentionClear" }] as never },
+    rendered_verdict: {
+      ...base.rendered_verdict!,
+      required_actions: [{ affects: [], audience: "owner" as const, cta: "Complete the requested action", kind: "add_info" as const, satisfied_when: { kind: "attention_resolved" as const }, surface: { kind: "provider_interaction" as const }, target: { kind: "sync" as const, run_id: "run-code" }, terminal: false, urgency: "now" as const }],
+    },
+  };
+  const html = renderSourcesView(toSourcesView([waiting], { now: NOW }));
+  assert.match(html, /<a[^>]*href="\/syncs\/run-code"[^>]*>Enter the code<\/a>/);
+});

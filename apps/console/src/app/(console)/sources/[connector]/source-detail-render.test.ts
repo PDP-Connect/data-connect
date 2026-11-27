@@ -395,6 +395,9 @@ test("real-data shapes never expose raw errors or actionless waiting states", as
   const waiting = await renderDemo("waiting-unknown");
   assert.match(visibleOutsideDetails(waiting), /Something stopped Northwind from syncing/);
   assert.ok([...waiting.window.document.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
+  const code = await renderDemo("waiting-for-code");
+  assert.match(visibleOutsideDetails(code), /Northwind is waiting for a security code\./);
+  assert.ok([...code.window.document.querySelectorAll("a")].some((node) => node.textContent === "Enter the code" && node.getAttribute("href") === "/syncs/run-code"));
   const archive = await renderDemo("archive-leftover");
   assert.doesNotMatch(visibleOutsideDetails(archive), /Sync now|Update sign-in details|Still checking/);
   const strong = await renderDemo("strong-state-pending");
