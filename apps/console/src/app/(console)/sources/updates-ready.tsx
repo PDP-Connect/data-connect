@@ -69,6 +69,17 @@ function UpdatesReady({
   return (
     <aside className="rr-s-updates-ready" data-testid="updates-ready" role="status">
       <Text as="p"><strong>Updates are ready</strong> for {model.namesText}. <Link href={model.seeChangesHref}>See what changes</Link></Text>
+      {model.counted ? (
+        <details className="group text-[13px]">
+          <summary className="min-h-11 cursor-pointer text-muted-foreground underline decoration-dotted underline-offset-4">
+            <span className="group-open:hidden">Show them</span>
+            <span className="hidden group-open:inline">Hide them</span>
+          </summary>
+          <ul className="mt-1 grid gap-1">
+            {model.names.map((name) => <li key={name}>{name}</li>)}
+          </ul>
+        </details>
+      ) : null}
       <div className="rr-s-updates-ready__action">
         {/* Lead decision (list-pictures 6): the page's only filled button is "Add a data source". */}
         <IcButton disabled={!interactive || pending} onClick={updateAll} size="sm" type="button" variant="ghost">

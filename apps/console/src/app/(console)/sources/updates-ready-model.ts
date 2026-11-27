@@ -17,6 +17,8 @@ export interface UpdatesReadyKind {
 export interface UpdatesReadyModel {
   buttonLabel: "Update" | "Update both" | "Update all";
   kinds: UpdatesReadyKind[];
+  /** True when the notice shows a count instead of the names. */
+  counted: boolean;
   /** Every affected source by name, two of the same name told apart; one entry per source. */
   names: string[];
   namesText: string;
@@ -50,6 +52,7 @@ function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
   if (names.length === 0) return null;
   return {
     buttonLabel: kinds.length === 1 ? "Update" : kinds.length === 2 ? "Update both" : "Update all",
+    counted: names.length > MAX_NAMES_LISTED,
     kinds,
     names,
     namesText: names.length > MAX_NAMES_LISTED ? `${names.length} data sources` : listNames(names),

@@ -92,3 +92,19 @@ test("the list page passes the update read through the safe wrapper", async () =
   assert.match(page, /const updatesReady = readUpdatesReadySafely\(readConnectorUpdates\);/);
   assert.doesNotMatch(page, /await readConnectorUpdates/);
 });
+
+// Review: a count alone hides the names, so the notice lists every affected source under "Show them".
+test("a counted notice lists every affected source under Show them / Hide them", async () => {
+  const { model } = buildUpdatesReadyDemo("update-four");
+  const long = { ...model, counted: true, names: ["Amazon · account 1", "Amazon · account 2", "Chase", "Mail", "Photos"], namesText: "5 data sources" };
+  const markup = await prerenderList(Promise.resolve(long));
+  assert.match(markup, /Updates are ready<\/strong> for (?:<!-- -->)?5 data sources/);
+  assert.match(markup, /<details[^>]*>[\s\S]*Show them[\s\S]*Hide them[\s\S]*<li>Amazon · account 1<\/li>[\s\S]*<li>Amazon · account 2<\/li>[\s\S]*<li>Photos<\/li>/);
+  assert.match(markup, /See what changes/);
+  assert.match(markup, /Update all/);
+});
+
+test("a short named notice has no disclosure", async () => {
+  const markup = await prerenderList(Promise.resolve(buildUpdatesReadyDemo("update-two").model));
+  assert.doesNotMatch(markup, /Show them/);
+});
