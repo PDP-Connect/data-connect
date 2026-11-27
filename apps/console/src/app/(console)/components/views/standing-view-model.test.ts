@@ -1108,3 +1108,13 @@ test("the first-run logo row shows only services this install's catalog offers, 
   assert.deepEqual(data.offeredSources.map((entry) => entry.iconId), ["amazon", "chase", "github", "steam", "venmo"]);
   assert.deepEqual(buildHomeViewModel(base({ sourcePage: { hasMore: false, kind: "ok", sources: [] } })).offeredSources, []);
 });
+
+test("Home does not claim the totals could not be checked when they came from a complete source read", () => {
+  const complete = buildHomeViewModel(base({ summary: null, summaryFailed: true }));
+  assert.equal(complete.recordCount, "0");
+  assert.equal(complete.warning, false);
+  assert.equal(complete.summaryError, true);
+  const paged = buildHomeViewModel(base({ summary: null, summaryFailed: true, sourcePage: { hasMore: true, kind: "ok", sources: [] } }));
+  assert.equal(paged.recordCount, null);
+  assert.equal(paged.warning, true);
+});

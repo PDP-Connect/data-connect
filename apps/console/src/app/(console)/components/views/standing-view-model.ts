@@ -379,7 +379,7 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
   // stale total that carries an error, means the totals could not be checked.
   const projection = input.summary?.projection;
   const warning =
-    input.summaryFailed ||
+    (input.summaryFailed && recordTotal === null) ||
     projection?.state === "failed" || (projection?.state === "stale" && Boolean(projection.last_error));
 
   const showMoreSources = !sourceReadFailed && (input.sourcePage.hasMore || sortedDataSources.length > 12);
