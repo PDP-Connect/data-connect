@@ -180,6 +180,35 @@ const envelopeFixture = {
 };
 const fixtureSource = "fixture-source";
 
+test("canonical hashing rejects a non-JSON numeric value before returning a digest", () => {
+  assert.throws(() => hashCanonicalJson({ count: 1n }), {
+    name: "TypeError",
+    message: /BigInt/,
+  });
+  assert.match(hashCanonicalJson({ count: "1" }), /^[a-f0-9]{64}$/);
+});
+
+test("record normalization propagates a connector data read failure and accepts a corrected retry", () => {
+  const readFailure = new Error("could not read synthetic connector data");
+  const input = { ...envelopeFixture, sourceInstanceId: fixtureSource };
+  assert.throws(
+    () =>
+      buildLocalDeviceRecordEnvelope({
+        ...input,
+        record: {
+          ...input.record,
+          data: {
+            get id(): string {
+              throw readFailure;
+            },
+          },
+        },
+      }),
+    (error: unknown) => error === readFailure
+  );
+  assert.equal(buildLocalDeviceRecordEnvelope(input).record_key, "fixture-record");
+});
+
 test("local-device builders require a nonblank source instance identity", () => {
   const envelope = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
   const batchFixture = { ...envelopeFixture, records: [envelope] };
