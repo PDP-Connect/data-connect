@@ -72,3 +72,22 @@ test("the privacy page uses no banned words on screen", async () => {
     assert.doesNotMatch(text, BANNED_WORDS_RE, text)
   }
 })
+
+// Round 9 (F1): a three-line overview opens the page, and the long vendor list folds under a visible heading.
+test("the page opens with a three-line overview built from sentences the page already has", async () => {
+  const content = await readFile(`${HERE}privacy-content.tsx`, "utf8")
+  assert.match(content, /const overview = \[/)
+  const lines = /const overview = \[([\s\S]*?)\] as const/.exec(content)?.[1] ?? ""
+  assert.equal((lines.match(/^\s*"/gm) ?? []).length, 3)
+  for (const line of lines.match(/"([^"\n]{12,})"/g) ?? []) {
+    const text = line.slice(1, -1)
+    assert.ok(content.split(text).length - 1 >= 2, `the overview line also stands in a section: ${text}`)
+  }
+  assert.match(content, /<PrivacyOverview \/>/)
+})
+
+test("the list of what is sent out folds under its visible heading", async () => {
+  const content = await readFile(`${HERE}privacy-content.tsx`, "utf8")
+  assert.match(content, /fold: true/)
+  assert.match(content, /<details[^>]*>\s*<summary[^>]*>\{section\.title\}<\/summary>/)
+})

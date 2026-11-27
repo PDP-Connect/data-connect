@@ -4,6 +4,25 @@
 import { Text } from "@pdpp/brand-react"
 import { Section } from "@pdpp/operator-ui/components/primitives"
 
+// The three things most readers come for, in the page's own sentences (each also stands in its section below).
+const overview = [
+  "DataConnect keeps your records, the data sources connected to them, which apps you approved, and records of sign-ins and access tokens.",
+  "On desktop, the Personal Server (the part that stores your records) keeps an encrypted database in DataConnect’s app folder. The file needs an encryption key to be read.",
+  "Owner-only pages require owner sign-in. Apps can read records covered by the access you approve.",
+] as const
+
+function PrivacyOverview() {
+  return (
+    <div className="mb-8 grid gap-3" data-testid="privacy-overview">
+      {overview.map((line) => (
+        <Text as="p" className="max-w-3xl text-foreground" key={line}>
+          {line}
+        </Text>
+      ))}
+    </div>
+  )
+}
+
 const sections = [
   {
     id: "keeps",
@@ -33,6 +52,7 @@ const sections = [
   },
   {
     id: "sends",
+    fold: true,
     title: "What DataConnect sends out on its own",
     paragraphs: [
       "If you set up event notices for another app, the server sends event information to the address you chose.",
@@ -71,12 +91,9 @@ const sections = [
 export function PrivacyContent() {
   return (
     <div>
-      {sections.map((section) => (
-        <Section
-          id={section.id}
-          key={section.id}
-          title={section.title}
-        >
+      <PrivacyOverview />
+      {sections.map((section) => {
+        const body = (
           <div className="grid gap-3">
             {section.paragraphs.map((paragraph) => (
               <Text
@@ -88,8 +105,24 @@ export function PrivacyContent() {
               </Text>
             ))}
           </div>
-        </Section>
-      ))}
+        )
+        return "fold" in section ? (
+          <section className="mb-8 scroll-mt-16" id={section.id} key={section.id}>
+            <details>
+              <summary className="pdpp-heading min-h-11">{section.title}</summary>
+              <div className="mt-3">{body}</div>
+            </details>
+          </section>
+        ) : (
+          <Section
+            id={section.id}
+            key={section.id}
+            title={section.title}
+          >
+            {body}
+          </Section>
+        )
+      })}
     </div>
   )
 }
