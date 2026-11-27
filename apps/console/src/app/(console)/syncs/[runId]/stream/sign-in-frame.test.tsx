@@ -20,3 +20,17 @@ test("the sign-in page's trail names the source, not the add-a-source step", asy
   assert.match(trail, /Venmo/);
   assert.doesNotMatch(trail, /Add a data source/);
 });
+
+// Round 10: the page header and the panel took their step from two places; one label now.
+test("the sign-in header shows the step the helper is on", async () => {
+  const { SignInFrame } = await import("./sign-in-parts.tsx");
+  const html = renderToStaticMarkup(React.createElement(SignInFrame, { connector: { connectorId: "venmo", displayName: "Venmo" }, step: "Step 2 of 2: enter the security code", title: "Sign in to Venmo" }));
+  assert.match(html, /Step 2 of 2: enter the security code/);
+  assert.doesNotMatch(html, /Step 1 of 2/);
+});
+
+test("the stream page's header takes the same step label as its panel", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./stream-viewer.tsx", import.meta.url), "utf8");
+  assert.match(source, /<SignInFrame connector=\{connector\} step=\{status\.display !== "trouble" \? interactionStepLabel\(interactionKind, interactionMessage\) : false\}/);
+});

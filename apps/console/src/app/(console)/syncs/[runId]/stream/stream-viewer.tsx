@@ -1584,7 +1584,7 @@ function LiveStreamSurface({
   const connectorName = connector?.displayName ?? "the data source";
 
   return (
-    <SignInFrame connector={connector} step={status.display !== "trouble"} title={`Sign in to ${connectorName}`}>
+    <SignInFrame connector={connector} step={status.display !== "trouble" ? interactionStepLabel(interactionKind, interactionMessage) : false} title={`Sign in to ${connectorName}`}>
         <OrientationCard
           buttonLabel={`Open ${connectorName}`}
           isMinting={isMinting}
