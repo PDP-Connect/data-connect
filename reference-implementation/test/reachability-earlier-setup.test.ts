@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -12,7 +12,10 @@ import { createReachabilityService } from "../server/reachability/factory.ts"
 import { mountOwnerReachability } from "../server/routes/owner-reachability.ts"
 import { FixtureSecretBackend } from "./fixtures/reachability/secret-backend.ts"
 
-async function fixture(t: test.TestContext, journal = false) {
+async function fixture(
+  t: test.TestContext,
+  { journal = false, secondProvider = true } = {}
+) {
   const parent = join(homedir(), ".tmp")
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(parent, "reach-earlier-"))
@@ -34,15 +37,17 @@ async function fixture(t: test.TestContext, journal = false) {
     ],
     dir: join(root, "registry"),
   })
-  const b = await fakeRegistry({
-    id: "provider-b",
-    kinds: ["session"],
-    reach: "this-device",
-    dir: a.root,
-  })
-  assert.ok(typeof a.manifest !== "string" && typeof b.manifest !== "string")
+  const b = secondProvider
+    ? await fakeRegistry({
+        id: "provider-b",
+        kinds: ["session"],
+        reach: "this-device",
+        dir: a.root,
+      })
+    : null
+  assert.ok(typeof a.manifest !== "string" && typeof b?.manifest !== "string")
   const manifest = {
-    providers: [...a.manifest.providers, ...b.manifest.providers],
+    providers: [...a.manifest.providers, ...(b?.manifest.providers ?? [])],
   }
   const options = {
     manifest,
@@ -198,7 +203,7 @@ test("owner discards the exact earlier draft and a repeat after adoption is harm
 })
 
 test("an unaddressable setup journal reports no supported recovery and survives discard", async t => {
-  const f = await fixture(t, true)
+  const f = await fixture(t, { journal: true })
   const response = await f.request("GET", "/catalog")
   assert.equal(response.status, 200)
   const migration = response.data.providers[0].configuration.migration
@@ -242,7 +247,10 @@ test("another lineage's claim is refused with the bounded taken reason", async t
 })
 
 test("unreadable or corrupt setup state refuses setup with a bounded error and is left in place", async t => {
-  const f = await fixture(t)
+  // One provider only. The SDK lists providers in parallel, so with two a rejected
+  // read settles the request while the other provider's read is still running, and
+  // that read recreates the state file after the test has replaced or removed it.
+  const f = await fixture(t, { secondProvider: false })
   const path = join(f.home, "embedding-state.json")
   const states = [
     "{",
@@ -252,8 +260,10 @@ test("unreadable or corrupt setup state refuses setup with a bounded error and i
   ]
   for (const state of [...states, null]) {
     await rm(path, { recursive: true, force: true })
-    if (state === null) await mkdir(path)
-    else await writeFile(path, state, { mode: 0o600 })
+    if (state === null) {
+      await mkdir(path)
+      await writeFile(join(path, "sentinel"), "kept", { mode: 0o600 })
+    } else await writeFile(path, state, { mode: 0o600 })
     for (const response of [await f.request("GET", "/catalog"), await f.discard()]) {
       assert.equal(response.status, 409)
       assert.equal(response.error.code, "internal_error")
@@ -262,6 +272,9 @@ test("unreadable or corrupt setup state refuses setup with a bounded error and i
       assert.equal(text.includes("schemaVersion"), false)
     }
     // A refusal must not repair the state by writing a fresh one over it.
-    if (state !== null) assert.equal(await readFile(path, "utf8"), state)
+    if (state === null) {
+      assert.equal((await lstat(path)).isDirectory(), true)
+      assert.equal(await readFile(join(path, "sentinel"), "utf8"), "kept")
+    } else assert.equal(await readFile(path, "utf8"), state)
   }
 })
