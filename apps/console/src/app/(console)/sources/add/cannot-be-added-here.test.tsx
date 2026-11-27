@@ -20,6 +20,12 @@ test("a service that cannot be added has a title, the reason and what to do inst
   assert.match(html, /Back to all services/);
 });
 
+test("with no known reason the page says it cannot be added once, then the step", () => {
+  const html = renderToStaticMarkup(React.createElement(CannotBeAddedHere, { connectorKey: "venmo", name: "Venmo" }));
+  assert.equal((html.match(/can&#x27;t be added here yet|can&#x27;t set up/g) ?? []).length, 1);
+  assert.match(html, /Pick another service from the list\./);
+});
+
 test("the trail of a Connect page ends with the page itself", async () => {
   const { ConnectHeader } = await import("./connect-parts.tsx");
   const html = renderToStaticMarkup(React.createElement(ConnectHeader, { connectorKey: "steam", icon: null, name: "Steam" }));

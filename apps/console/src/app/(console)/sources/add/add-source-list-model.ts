@@ -44,9 +44,10 @@ export interface AddSourceListInput {
 export const BLOCKED_NOTE = "Can't be added on this computer yet";
 
 /** The server's verdict says a sign-in service cannot be set up here now (a package to install is not a block). */
-export function signInBlocked(entry: ConnectorCatalogEntry): boolean {
+export function signInBlocked(entry: ConnectorCatalogEntry, packageNeedsInstall = false): boolean {
   const readiness = entry.readiness;
-  return readiness !== null && readiness.browserBound && readiness.action !== "connect" && readiness.action !== "install";
+  // "install" is only a way forward while the console also sees the package as not installed: then the page gets it ready.
+  return readiness !== null && readiness.browserBound && readiness.action !== "connect" && !(readiness.action === "install" && packageNeedsInstall);
 }
 
 export function addSourceHref(connectorKey: string): string {
@@ -116,7 +117,7 @@ export function buildAddSourceList(input: AddSourceListInput): AddSourceListMode
     if (connectable || firstAccount !== null) {
       rows.push({
         added: firstAccount !== null,
-        blockedNote: connectable && signInBlocked(entry) ? BLOCKED_NOTE : null,
+        blockedNote: connectable && signInBlocked(entry, sourceSetupCardModel(entry, input.lifecycleFor(entry), input.catalogTransientlyUnavailable).packageNeedsInstall) ? BLOCKED_NOTE : null,
         connectorKey: entry.connectorKey,
         displayName: entry.displayName,
         href: !connectable && firstAccount !== null ? existingSourceHref(entry.connectorKey, firstAccount) : addSourceHref(entry.connectorKey),

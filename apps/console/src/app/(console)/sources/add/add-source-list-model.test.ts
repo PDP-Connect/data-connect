@@ -213,3 +213,14 @@ test("a sign-in service this computer cannot open is listed with a note, and the
   assert.equal(row.chase, "Can't be added on this computer yet");
   assert.equal(row.ynab, null);
 });
+
+// The list and the page must agree: a service the console holds as installed, but whose server verdict
+// says the package must still be installed, is blocked on its setup page, so the list says so first.
+test("an installed service whose server verdict still says install is marked; one still to install is not", () => {
+  const verdict = { action: "install", browserBound: true, detail: null, reason: "not_installed" };
+  const chaseNoArtifact = { ...chase, readiness: { ...verdict, connectorKey: "chase" } } as ConnectorCatalogEntry;
+  const amazonToInstall = { ...amazon, readiness: { ...verdict, connectorKey: "amazon" } } as ConnectorCatalogEntry;
+  const row = Object.fromEntries(build({}, [chaseNoArtifact, amazonToInstall]).rows.map((entryRow) => [entryRow.connectorKey, entryRow.blockedNote]));
+  assert.equal(row.chase, "Can't be added on this computer yet");
+  assert.equal(row.amazon, null);
+});

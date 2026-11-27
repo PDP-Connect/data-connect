@@ -148,7 +148,7 @@ export function CannotBeAddedHere({
       <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={name} title={name} />
       <div className="grid max-w-xl gap-3 py-4" data-testid="cannot-be-added-here">
         <p className="text-foreground">{cannotAddCopy.heading(name)}</p>
-        <p className="pdpp-caption text-muted-foreground">{why.reason}</p>
+        {why.reason ? <p className="pdpp-caption text-muted-foreground">{why.reason}</p> : null}
         <p className="pdpp-caption text-muted-foreground">{why.instead}</p>
         <div>
           <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">

@@ -71,7 +71,7 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
       </RecordroomShellWithPalette>
     );
   }
-  if (signInBlocked(entry)) {
+  if (signInBlocked(entry, sourceSetupCardModel(entry, lifecycle, read.catalogTransientlyUnavailable).packageNeedsInstall)) {
     const why = cannotAddWhy(entry.displayName, entry.readiness?.reason ?? null);
     return (
       <RecordroomShellWithPalette>

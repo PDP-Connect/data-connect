@@ -60,7 +60,7 @@ export const cannotAddCopy = {
 } as const;
 
 /** Why a sign-in service cannot be added on this computer, and what to do instead. `reason` is the server's readiness reason. */
-export function cannotAddWhy(name: string, reason: string | null): { reason: string; instead: string } {
+export function cannotAddWhy(name: string, reason: string | null): { reason: string | null; instead: string } {
   const pickAnother = "Pick another service from the list.";
   switch (reason) {
     case "host_requirement_unmet":
@@ -74,7 +74,8 @@ export function cannotAddWhy(name: string, reason: string | null): { reason: str
     case "not_implemented":
       return { reason: `DataConnect can't collect from ${name} yet.`, instead: `Check again after DataConnect updates. ${pickAnother}` };
     default:
-      return { reason: `DataConnect can't set up ${name} on this computer yet.`, instead: pickAnother };
+      // The heading already says it cannot be added; no second sentence without a reason.
+      return { reason: null, instead: pickAnother };
   }
 }
 
