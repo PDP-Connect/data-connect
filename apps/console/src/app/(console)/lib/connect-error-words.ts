@@ -15,5 +15,5 @@ export function connectErrorWords(rawMessage: string | null | undefined): string
   if (REJECTED.test(message)) return "The service did not accept what was entered. Check it and try again.";
   if (MISSING.test(message)) return "A required field was left empty.";
   if (UNREACHABLE.test(message)) return "DataConnect could not reach the service.";
-  return "Something went wrong. Nothing was saved.";
+  return "Something went wrong.";
 }

@@ -308,7 +308,7 @@ test("the filter appears only for more than ten rows, labelled by its placeholde
 });
 
 // DIRECTION.md, Values (changed 2026-11-25) and lead decision (list-pictures 6): every row button is outlined.
-test("every row action is outlined, including filled status actions", () => {
+test("a row action is filled only when something needs the person, quiet otherwise", () => {
   for (const scenario of ["mixed", "healthy", "attention"] as const) {
     const { instances } = seededViews(scenario);
     const html = renderSourcesView(instances);
@@ -318,9 +318,9 @@ test("every row action is outlined, including filled status actions", () => {
     if (instances.some((instance) => instance.statusWords.action)) {
       assert.ok(rowButtons.length > 0, scenario);
     }
-    for (const className of rowButtons) {
-      assert.match(className, /pdpp-btn--ghost/, `${scenario}: ${className}`);
-    }
+    const needed = instances.filter((instance) => instance.statusWords.action && instance.statusWords.needsYou).length;
+    const quiet = rowButtons.filter((className) => /pdpp-btn--ghost/.test(className)).length;
+    assert.equal(rowButtons.length - quiet, needed, `${scenario}: filled row actions are exactly the needed ones`);
   }
 });
 

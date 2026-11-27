@@ -24,7 +24,7 @@ const READS_SERVER_FACT = /const connectorNotInstalled = isConnectorNotInstalled
 const STREAM_FACTS_GET_FACT = /formatStreamCollectionFacts\(entry, \{\s*connectorNotInstalled[,\s}]/;
 const PROMPT_GATED = /const installPromptShown = connectorNotInstalled && !revoked && !setupFailed;/;
 const INSTALL_ACTION_RENDERED = /if \(statusAction\?\.kind === "install"\)[\s\S]*<ConnectorInstallPrompt[\s\S]*variant="inline"/;
-const INSTALL_STATE_COPY = /DataConnect needs to install/;
+const INSTALL_STATE_COPY = /connectorNotInstalledWords\(/;
 const DIAGNOSTICS_GET_FACT = /<ConnectionDiagnostics[\s\S]{0,300}connectorNotInstalled=\{connectorNotInstalled\}/;
 const SYNC_BUTTONS = /<SyncNowButton\b[\s\S]*?\/>/g;
 

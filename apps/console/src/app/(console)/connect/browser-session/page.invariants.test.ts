@@ -99,7 +99,7 @@ test("required manifest capture posts through the credential route and does not 
     readFile(START_ROUTE_FILE, "utf8"),
   ]);
   assert.match(page, /name="credential_capture_required" type="hidden" value="1"/);
-  assert.match(page, /<CredentialFields fields=\{capture\.fields\} idPrefix="sign-in" required \/>/);
+  assert.match(page, /<CredentialFields errorId=\{error \? CONNECT_ERROR_ID : undefined\} fields=\{capture\.fields\} idPrefix="sign-in" required \/>/);
   assert.match(fields, /required=\{required && field\.required\}/);
   assert.match(fields, /defaultValue=\{field\.secret \? undefined : field\.defaultValue\}/);
   assert.match(page, /defaultValue: firstValue\(resolvedSearchParams\[`field_\$\{field\.name\}`\]\)/);

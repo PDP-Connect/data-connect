@@ -10,7 +10,7 @@ test("a server message that echoes a typed key never reaches the words", () => {
     assert.doesNotMatch(connectErrorWords(raw), /sk-live-abc123/);
   }
   assert.equal(connectErrorWords("Invalid key sk-live-abc123"), "The service did not accept what was entered. Check it and try again.");
-  assert.equal(connectErrorWords("kaboom sk-live-abc123"), "Something went wrong. Nothing was saved.");
+  assert.equal(connectErrorWords("kaboom sk-live-abc123"), "Something went wrong.");
 });
 
 test("the connect form fold renders the authored words, not the server message", () => {

@@ -101,7 +101,9 @@ test("reset control requires confirmation and reports refusal or success", async
     // detail-page-2 decision 4: a plain sentence; the raw server text sits only in the folded Details under it.
     const alert = container.querySelector('[role="alert"]');
     assert.equal(alert?.querySelector("p")?.textContent, "This could not be done. Try again.");
-    assert.equal(alert?.querySelector("details p")?.textContent, "A collection run is already active.");
+    // The server's own text is never drawn (it can echo what was typed); authored words stand in.
+    assert.equal(alert?.querySelector("details p")?.textContent, "Something went wrong.");
+    assert.doesNotMatch(container.textContent ?? "", /collection run is already active/);
 
     resetFailure = null;
     await act(async () => confirm.click());

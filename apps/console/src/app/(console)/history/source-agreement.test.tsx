@@ -19,6 +19,7 @@ import {oneSyncPractice} from "../syncs/[runId]/one-sync-model.ts";
 import {syncPractice} from "./practice.ts";
 import type {HistorySource} from "./source-names.ts";
 mock.module(new URL("../syncs/[runId]/actions.ts",import.meta.url).href,{exports:{cancelRunAction:async()=>({ok:true}),submitRunInteractionAction:async()=>({error:null,status:"success"})}});
+mock.module("server-only",{namedExports:{}});
 mock.module("next/navigation",{exports:{useRouter:()=>({refresh(){/* inert router */},replace(){/* inert router */}})}});
 Object.assign(globalThis,{React});
 const now=new Date("2026-11-26T12:00:00Z");

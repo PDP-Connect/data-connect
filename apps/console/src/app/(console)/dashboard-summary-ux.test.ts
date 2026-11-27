@@ -30,7 +30,7 @@ const FIRST_RUN_COPY = new RegExp(
 );
 const FIRST_RUN_LOGOS = /data\.offeredSources\.map/;
 const SYNC_CONTROL = /SyncNowButton|runConnectorNowAction/;
-const NEED_ACTION_LINK = /className=\{`\$\{OUTLINED_BUTTON\}[^`]*`\}\s*href=\{need\.actionHref\}\s*>\s*\{need\.actionLabel\}/;
+const NEED_ACTION_LINK = /className=\{`\$\{FILLED_BUTTON\}[^`]*`\}\s*href=\{need\.actionHref\}\s*>\s*\{need\.actionLabel\}/;
 const NEEDS_BOX_STRONG_LINE = /home-needs-heading[\s\S]*rounded-md border border-border-strong/;
 
 test("Home uses the existing reads, limits, and soft-failure boundary", async () => {
@@ -66,7 +66,7 @@ test("Home renders Needs you, Data sources, then Apps that can read your data", 
   assert.match(overview, ERROR_WORDS);
   // Lead decision (deputy-fixes-1 E3): no sync starts from Home; every row action opens the data source's page.
   assert.doesNotMatch(overview, SYNC_CONTROL);
-  // Lead decision (home-pictures 3): every button in the needs-you box is outlined.
+  // Round 6 (F3): the needed action is the one filled button on the page.
   assert.match(overview, NEED_ACTION_LINK);
   // Lead decision (deputy-fixes-1 E2): the packages list is linked from /grants, not Home.
   assert.doesNotMatch(overview, /Packages/);

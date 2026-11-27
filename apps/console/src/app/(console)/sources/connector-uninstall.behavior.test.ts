@@ -132,7 +132,8 @@ test("package table confirms uninstall and displays refusal or success without o
     await act(async () => uninstall.click());
     assert.equal(uninstallCalls, 1);
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Couldn't complete this\. Try again\./);
-    assert.ok([...container.querySelectorAll("details")].some((details) => details.textContent?.includes("Connector still has sources.")));
+    assert.ok([...container.querySelectorAll("details")].some((details) => details.textContent?.includes("Something went wrong.")));
+    assert.doesNotMatch(container.textContent ?? "", /Connector still has sources/);
     assert.ok(container.querySelector('[data-testid="package-row-github"]'));
 
     uninstallResult = { ok: true };

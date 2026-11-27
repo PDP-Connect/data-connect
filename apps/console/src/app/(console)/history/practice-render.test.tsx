@@ -16,6 +16,7 @@ import { ReadDayView } from "../audit/day/read-day-view.tsx";
 import { groupAppHistory, practiceAppHistory, practiceHistoryApps } from "./history-apps.ts";
 import { personDay } from "./day-cut.ts";
 mock.module(new URL("../syncs/[runId]/actions.ts",import.meta.url).href, { exports: { cancelRunAction: async () => ({ok:true}), submitRunInteractionAction: async () => ({error:null,status:"success"}) } });
+mock.module("server-only", { namedExports: {} });
 mock.module("next/navigation", { exports: { useRouter: () => ({ refresh() {}, replace() {} }) } });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 const banned = /\b(run|trace|grant|stream|checkpoint|gap|rejected|surface|skipped|abandoned|succeeded|collected|Peek|events|Duration|Details|active|Waiting|PDPP|install|package|connector|manifest|digest|registered|operator|instance|dashboard|modality|credential|seal|coverage|fetched|retryable|outbox|heartbeat|backoff|configuration|revision|client|scope|OAuth|bearer|token|registration|consent|revoke|revoked|issued)\b|\d{2}:\d{2}:\d{2}|\b[a-z]+_[a-z]+_/i;
