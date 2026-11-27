@@ -11,8 +11,9 @@ test("a source row's name and kind lines wrap instead of ending in an ellipsis",
   const css = await readFile(fileURLToPath(new URL("./sources-view.css", import.meta.url)), "utf8");
   for (const selector of [".rr-s-row__name", ".rr-s-row__kind"]) {
     const rule = css.match(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{([^}]*)\\}`));
-    assert.ok(rule, selector);
-    assert.doesNotMatch(rule[1], /text-overflow:\s*ellipsis/);
-    assert.doesNotMatch(rule[1], /white-space:\s*nowrap/);
+    const body = rule?.[1];
+    assert.ok(body, selector);
+    assert.doesNotMatch(body, /text-overflow:\s*ellipsis/);
+    assert.doesNotMatch(body, /white-space:\s*nowrap/);
   }
 });

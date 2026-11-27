@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 test("no status tone thins its text colour with an alpha", async () => {
   const source = await readFile(fileURLToPath(new URL("./source-status-text.tsx", import.meta.url)), "utf8");
   const tones = source.match(/TONE_CLASS[^{]*\{([\s\S]*?)\};/);
-  assert.ok(tones, "the tone table");
-  assert.doesNotMatch(tones[1], /text-[a-z-]+\/\d+/);
+  const table = tones?.[1];
+  assert.ok(table, "the tone table");
+  assert.doesNotMatch(table, /text-[a-z-]+\/\d+/);
 });
