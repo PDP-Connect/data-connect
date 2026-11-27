@@ -138,7 +138,8 @@ test("filter, notices, loading shape, and pager remain in their specified positi
   assert.match(view, /sources-runtime-advisory/);
   assert.match(view, /sources-duplicate-review/);
   assert.match(page, /ConnectorSummaryPager/);
-  // DIRECTION.md, “Data sources /sources”: loading shows the page's title and button, then plain rows.
+  // DIRECTION.md, “Data sources /sources”: loading uses the title-and-rows list shape.
+  // The page's own title and button come first, then plain rows (SourcesLoadingSkeleton).
   assert.match(loading, /<SourcesLoadingSkeleton \/>/);
 });
 
