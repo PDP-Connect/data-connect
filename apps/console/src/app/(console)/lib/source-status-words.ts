@@ -9,7 +9,7 @@ import { personDay } from "../history/day-cut.ts";
 import { formatConnectorKeyForDisplay, formatRelative } from "@pdpp/display";
 import type { RefConnectorSummary, RefRequiredAction } from "./ref-client.ts";
 import type { StreamManifestEntry } from "@pdpp/display";
-import { sourceRecordLabel } from "./source-record-label.ts";
+import { sourceRecordLabel, sourceRecordLabelInSentence } from "./source-record-label.ts";
 import { summarizeOutboxStallRemediation } from "./connection-evidence.ts";
 import { projectSourceActionability } from "./source-actionability.ts";
 
@@ -350,7 +350,7 @@ function joinNames(names: readonly string[]): string {
 function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions, name: string): MatchedStatus | null {
   const kinds = [...new Set((source.collection_report ?? []).filter(entry => GAP_CONDITIONS.includes(entry.coverage_condition)).map(entry => entry.stream))];
   if (kinds.length === 0) return null;
-  const labels = kinds.map(kind => sourceRecordLabel(kind, options.streams));
+  const labels = kinds.map(kind => sourceRecordLabelInSentence(kind, options.streams));
   const gaps = (Array.isArray(source.last_run?.known_gaps) ? source.last_run?.known_gaps ?? [] : [])
     .filter(gap => typeof gap === "object" && gap !== null && "stream" in gap && kinds.includes(String((gap as { stream: unknown }).stream)));
   const cause = gaps.length > 0 ? resolveSyncCause({ connector_error: gaps }, name) : null;

@@ -254,7 +254,7 @@ test("practice states cover partial copies, missing kinds, settings, accounts an
   const cases = [
     ["partly-more-coming", /24 records so far\. Some are not copied\./],
     ["partly-some-lost", /24 records so far\. Some are not copied\./],
-    ["didnt-come", /Not copied: Messages\./],
+    ["didnt-come", /Not copied: messages\./],
     ["settings-choices", /Settings[\s\S]*Increase this to copy older messages\./],
     ["settings-question", /Awaiting your confirmation/],
     ["other-accounts", /Also connected: Northwind \(work\)/],
@@ -391,7 +391,7 @@ test("the unmeasured-completeness practice state uses the shared plain sentence 
 test("real-data shapes never expose raw errors or actionless waiting states", async () => {
   const raw = await renderDemo("raw-error");
   assert.doesNotMatch(visibleOutsideDetails(raw), /offset=|refusing_to_advance|machine_failure/);
-  assert.match(visibleOutsideDetails(raw), /Not copied: Messages/);
+  assert.match(visibleOutsideDetails(raw), /Not copied: messages/);
   const waiting = await renderDemo("waiting-unknown");
   assert.match(visibleOutsideDetails(waiting), /Something stopped Northwind from syncing/);
   assert.ok([...waiting.window.document.querySelectorAll("button")].some((node) => node.textContent === "Try again"));

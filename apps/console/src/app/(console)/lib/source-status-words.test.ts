@@ -691,7 +691,7 @@ test("a kind that did not come says Not copied with its cause, and a slow-down i
     last_run: partialRun([{ kind: "skip_result", stream: "friends", reason: "rate_limited" }]),
   });
   const result = sourceStatusWords(slow, { now: NOW });
-  assert.match(result.words, /^Not copied: Friends\. Steam asked DataConnect to slow down\./);
+  assert.match(result.words, /^Not copied: friends\. Steam asked DataConnect to slow down\./);
   assert.equal(result.action?.label, "Try again");
   assert.equal(result.action?.filled, false);
   assert.match(sourceStateSentence(slow, { now: NOW, name: "Steam" }).text, /will try again by itself at the next check/);
