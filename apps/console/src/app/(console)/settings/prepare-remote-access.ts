@@ -85,6 +85,7 @@ type Capabilities = Record<string, { known: boolean; value?: boolean | string }>
 
 /** The lifetime kind to use for a way: the first one it offers and this computer can run. */
 export function pickUsage(provider: Inventory["providers"][number], capabilities: Capabilities): string | null {
+  if (provider.configuration.known === false) return null;
   for (const kind of usageOrder) {
     const available = provider.availability[kind];
     if (!available || !(available.state === "available" || available.state === "action-required")) continue;
@@ -175,6 +176,9 @@ export async function prepareTurnOn(
   const inventory = await send<Inventory>("/catalog?refresh=true");
   const provider = inventory.providers.find((item) => item.providerId === choice.providerId);
   if (!provider) throw new ReachabilityFailure(publicError("configuration_stale"));
+  if (provider.configuration.known === false) {
+    throw new ReachabilityFailure(publicError(provider.configuration.reason, undefined, "prepare", provider.configuration.migration.reason));
+  }
   const state = await send<{ services?: ServiceEntry[]; passwordSet?: boolean }>("/state");
   // This read is newer than the caller's last poll. Without a password nothing positive runs.
   if (state.passwordSet === false) {

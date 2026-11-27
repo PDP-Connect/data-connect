@@ -166,6 +166,7 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>) {
 async function review(service: ReachabilityService, providerId = PROVIDER) {
   const provider = (await service.inventory()).providers.find((item) => item.providerId === providerId)
   assert.ok(provider)
+  assert.ok(provider.configuration.known !== false)
   const draft = await service.begin(providerId, provider.configuration.revision)
   let revision = draft.configuration.revision
   for (const action of draft.configuration.actions.filter((item) => item.kind === "provide-value")) {

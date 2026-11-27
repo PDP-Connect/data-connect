@@ -18,7 +18,6 @@ import type {
   RouteView as Route,
   Candidate as RouteCandidate,
 } from "@tnunamak/gozar";
-import type { EarlierSetup } from "./configuration-compatibility.ts";
 import type { HostSettingsBridge } from "./host-settings.ts";
 import type { LifecycleEvent } from "./lifecycle.ts";
 import { initialLifecycle, reduceLifecycle } from "./lifecycle.ts";
@@ -100,7 +99,6 @@ export type HostPolicy = {
   hostSettings?: HostSettingsBridge;
   recoverAtBoot?: boolean;
   recoveryRetry?: Partial<RecoveryRetry>;
-  readEarlierSetup?: (scopes: string[]) => Promise<EarlierSetup>;
   currentTarget?: () => Promise<string>;
   evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
@@ -144,7 +142,6 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 export class ReachabilityService {
   private readonly api: EmbeddingApi;
   private readonly host: HostPolicy;
-  private earlierSetup: EarlierSetup = null;
   private readonly providerQueues = new Map<string, Promise<void>>();
   private readonly providerLock = new AsyncLocalStorage<{ providerId: string; active: boolean }>();
 
@@ -265,7 +262,6 @@ export class ReachabilityService {
       }
     }
     return {
-      earlierSetup: this.earlierSetup,
       evidenceSource: this.host.evidenceSource ?? null,
       lifecycle: {
         handle: this.lifecycle.handle ? { id: this.lifecycle.handle.id, generation: this.lifecycle.handle.generation, kind: this.lifecycle.handle.kind } : null,
@@ -355,8 +351,24 @@ export class ReachabilityService {
   }
   async inventory(refresh = false) {
     const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner, ...(refresh ? { refresh: true } : {}) });
-    this.earlierSetup = await this.host.readEarlierSetup?.(inventory.providers.map(provider => provider.configuration.scopeId)) ?? null;
-    return { ...inventory, earlierSetup: this.earlierSetup };
+    return inventory;
+  }
+  async discardEarlierDraft(providerId: string, fromRegistryId: string, draftId: string) {
+    return this.withProvider(providerId, async () => {
+      const provider = (await this.inventory()).providers.find(item => item.providerId === providerId);
+      const configuration = provider?.configuration;
+      if (configuration?.known === false && configuration.migration.reason === "inflight") {
+        const earlier = configuration.migration.candidates.find(candidate => candidate.fromRegistryId === fromRegistryId);
+        if (earlier && !earlier.draftIds.includes(draftId)) throw new ReachabilityError("draft_not_found");
+      }
+      return this.api.discardEarlierConfigurationDraft({
+        home: this.host.query.home,
+        owner: this.host.query.owner,
+        providerId,
+        fromRegistryId,
+        draftId,
+      });
+    });
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
     return this.withProvider(providerId, async () => {
@@ -626,7 +638,7 @@ export class ReachabilityService {
       if (draft.draftId !== id) return { discarded: false, reason: "replaced" };
       if (draft.configuration.revision !== revision) return { discarded: false, reason: "revision_changed" };
       const current = (await this.inventory()).providers.find(item => item.providerId === providerId);
-      if (!current?.configuration || typeof current.configuration.revision !== "string" || !current.configuration.revision ||
+      if (!current?.configuration || current.configuration.known === false || typeof current.configuration.revision !== "string" || !current.configuration.revision ||
           current.configuration.scopeId !== draft.scopeId || current.configuration.revision === draft.baseRevision) return { discarded: false, reason: "current" };
       return this.discard(id);
     });

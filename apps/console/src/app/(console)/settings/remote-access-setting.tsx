@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
+import { EarlierSetupCard } from "./earlier-setup-card.tsx";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-client.ts";
@@ -1119,9 +1120,9 @@ export function RemoteAccessSetting({
       {inventory ? null : (
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
-      {inventory?.earlierSetup === "needs_reentry" ? (
-        <p className="text-sm text-muted-foreground">An earlier setup was saved by an older version. Enter it again to turn remote access on.</p>
-      ) : null}
+      {inventory?.providers.map(provider => provider.configuration.known === false ? (
+        <EarlierSetupCard key={provider.providerId} provider={provider} migration={provider.configuration.migration} request={request} disabled={mutationBlocked} onChange={refresh} />
+      ) : null)}
       {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
         <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>

@@ -49,6 +49,7 @@ test("polls stay cold or stale; actionable reads refresh once and concurrent rea
   await Promise.all([service.inventory(true), service.inventory(true)]);
   assert.equal(probes() - firstProbes, firstProbes, "two concurrent refresh reads run one set of provider probes");
   const provider = fresh.providers.find(p => p.providerId === "tailscale-funnel")!;
+  assert.ok(provider.configuration.known !== false);
   const draft = await service.begin(provider.providerId, provider.configuration.revision);
   assert.ok(projectDraft(draft).detection?.checkedAt);
   const beforePolls = probes();
