@@ -203,7 +203,11 @@ function lifecycleRow(
     if (isDevice && source.local_device_progress?.records_pending === 0) {
       return { row: 20, words: "No records are waiting to be sent", tone: "plain", action: null , sentence: { text: "No records are waiting to be sent.", slot: null }, problem: false };
     }
-    const unknownStep = surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
+    // The server names the pending step in the health conditions (AttentionClear
+    // with reason otp_required). A code is a step for the person, not a failure.
+    const waitingForCode = surface === "provider_interaction" && requiredAction?.target?.kind === "sync" &&
+      Boolean(source.connection_health.conditions?.some(c => c.type === "AttentionClear" && c.reason === "otp_required" && c.status !== "true"));
+    const unknownStep = !waitingForCode && surface === "provider_interaction" && (!requiredAction?.target || requiredAction.cta === "Complete the requested action");
     const devicePending = source.local_device_progress?.records_pending;
     const deviceName = source.local_device_progress?.device_name;
     const deviceHasSteps = Boolean(requiredAction?.remediation?.commands.some(command=>substituteCommandTemplate(command.command_template,{connectionId:source.connection_id,connectorId:source.connector_id,sourceInstanceId:source.local_device_progress?.source_instance_id ?? null,providerUrl:null}) !== null)) ||
@@ -211,8 +215,8 @@ function lifecycleRow(
     const deviceText = deviceHasSteps && typeof devicePending === "number" && devicePending > 0
       ? `The computer that holds this data${deviceName ? ` (${deviceName})` : ""} could not send ${devicePending.toLocaleString()} record${devicePending === 1 ? "" : "s"}.`
       : `Open DataConnect on ${deviceName ?? "the computer that holds this data"} and look for a message about ${name}.`;
-    const sentence = isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
-    const words = isDevice ? (typeof devicePending === "number" && devicePending > 0 ? deviceText.replace(FINAL_STOP, "") : "Needs attention on your device") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
+    const sentence = waitingForCode ? `${name} is waiting for a security code.` : isDevice ? deviceText : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session" ? `${name} needs you to sign in again.` : surface === "stored_credential" ? `${name} needs its saved sign-in details updated.` : `${name} is waiting for you to finish a step.`;
+    const words = waitingForCode ? sentence : isDevice ? (typeof devicePending === "number" && devicePending > 0 ? deviceText.replace(FINAL_STOP, "") : "Needs attention on your device") : unknownStep || !requiredAction ? `Something stopped ${name} from syncing.` : surface === "browser_session"
       ? "Needs you to sign in again"
       : surface === "stored_credential"
         ? "Needs its saved sign-in details updated"
@@ -224,7 +228,7 @@ function lifecycleRow(
       words,
       sentence: {text:sentence,slot:null}, problem:true,
       tone: "attention",
-      action: isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
+      action: waitingForCode ? action("server_cta", "Enter the code", true) : isDevice ? (deviceHasSteps ? action("server_cta", "See what to do on that computer", true) : null) : unknownStep || !requiredAction ? (canStartSync(source) ? action("sync_now", "Try again", true) : null) : requiredAction ? action("server_cta", surface === "stored_credential" ? "Update sign-in details" : requiredAction.cta, true) : null,
     };
   }
   if (resolver === "setup_in_progress") {

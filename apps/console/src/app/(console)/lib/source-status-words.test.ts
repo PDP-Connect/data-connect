@@ -498,3 +498,17 @@ test("a paused device sentence names where to resume", () => {
   const local = source({ status: "paused", source_kind: "local_device", owner_state: { ...healthyState, resolver: "owner_paused" } });
   assert.equal(sourceStateSentence(local, { now: NOW, name: "Northwind", deviceName: "Work computer" }).text, "Paused on Work computer. Resume it there.");
 });
+
+test("a run waiting for a security code is not a failure and leads to the place the code is entered", () => {
+  const waiting = source({
+    owner_state: { ...healthyState, owner_of_state: "owner", resolver: "needs_owner" },
+    connection_health: health({ conditions: [{ expires_at: null, id: "AttentionClear:otp_required", message: "Owner action is required before collection can continue.", observed_at: null, origin: "runtime", reason: "otp_required", remediation: null, sensitivity: "owner", severity: "blocked", status: "false", type: "AttentionClear" } as never] }),
+    rendered_verdict: verdict("Can't collect", [requiredAction({ cta: "Complete the requested action", kind: "add_info", surface: { kind: "provider_interaction" }, target: { kind: "sync", run_id: "run-test" }, satisfied_when: { kind: "attention_resolved" } })]),
+    connector_display_name: "Venmo",
+  });
+  const result = sourceStatusWords(waiting, { now: NOW });
+  assert.equal(result.row, 8);
+  assert.equal(result.words, "Venmo is waiting for a security code.");
+  assert.deepEqual(result.action, { kind: "server_cta", label: "Enter the code", filled: true });
+  assert.equal(sourceStateSentence(waiting, { now: NOW, name: "Venmo" }).text, "Venmo is waiting for a security code.");
+});
