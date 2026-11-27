@@ -277,7 +277,7 @@ test("SQLite: a succeeded terminal event stores no runtime failure fields (runni
 });
 
 test("PostgreSQL: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", {
-  skip: !POSTGRES_URL,
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
   await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
