@@ -46,13 +46,25 @@ const LOADING_FILES = [
   "sources/[connector]/[stream]/[recordKey]/loading.tsx",
   "sources/[connector]/[stream]/health/loading.tsx",
   "audit/[traceId]/loading.tsx",
+  "settings/loading.tsx",
+  "settings/sign-in/loading.tsx",
+  "settings/packages/loading.tsx",
+  "settings/remote-access/loading.tsx",
+  "settings/technical/loading.tsx",
+  "deployment/tokens/loading.tsx",
+  "deployment/provider-apps/loading.tsx",
+  "notifications/loading.tsx",
+  "privacy/loading.tsx",
+  "connect/loading.tsx",
+  "sources/add/loading.tsx",
+  "sources/add/[connector]/loading.tsx",
 ] as const;
 
 const DASHBOARD_SHELL_RE = /RecordroomShellWithPalette/;
 // Any relative depth up to the dashboard `components/` directory (one to four
 // `../` hops, since the deepest covered segment is sources/[connector]/[stream]/…).
 // Data sources and Sync history use their own skeletons (the page header and rows of the real page).
-const SHARED_SKELETON_IMPORT_RE = /from "(?:(?:\.\.\/)+components\/route-loading\.ts|\.\/(?:sources-loading|sync-history-loading)-skeleton\.tsx|(?:\.\.\/)+components\/titled-detail-loading\.tsx)/;
+const SHARED_SKELETON_IMPORT_RE = /from "(?:(?:\.\.\/)+components\/route-loading\.ts|\.\/(?:sources-loading|sync-history-loading)-skeleton\.tsx|(?:\.\.\/)+components\/titled-detail-loading\.tsx|(?:\.\.\/)+components\/named-page-loading\.tsx)/;
 const ROLE_STATUS_RE = /role="status"/;
 const ARIA_BUSY_RE = /aria-busy="true"/;
 const ARIA_HIDDEN_RE = /aria-hidden/;
@@ -88,10 +100,18 @@ test("the shared skeleton is lightweight and accessible", async () => {
 // accessibility and weight rules as the plain one. Its outline matching the real page
 // (trail, title bar) is pinned in titled-detail-loading.test.tsx and by the scenes
 // loading-outline check; this file only guards that every loading.tsx uses a shared skeleton.
-test("the titled detail skeleton is lightweight and accessible", async () => {
+test("the titled detail skeleton is built on the shared loading frame and stays light", async () => {
   const src = await readFile(`${DASHBOARD}components/titled-detail-loading.tsx`, "utf8");
-  assert.match(src, ROLE_STATUS_RE);
-  assert.match(src, ARIA_BUSY_RE);
+  assert.match(src, /<LoadingRegion label=\{label\}>/);
   assert.match(src, ARIA_HIDDEN_RE);
   assert.match(src, ANIMATE_PULSE_RE);
+});
+
+// A screen reader hears the page's own name, never a word the finished page does not use.
+const INTERNAL_LOADING_NAME_RE = /label="(?:grants|device exporters|event subscriptions|deployment status)"/;
+test("no loading screen announces an internal name", async () => {
+  const sources = await Promise.all(LOADING_FILES.map((rel) => readFile(`${DASHBOARD}${rel}`, "utf8")));
+  for (const [index, rel] of LOADING_FILES.entries()) {
+    assert.doesNotMatch(sources[index] as string, INTERNAL_LOADING_NAME_RE, rel);
+  }
 });

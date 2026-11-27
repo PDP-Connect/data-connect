@@ -2,19 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { DetailLoadingSkeleton } from "../components/route-loading.tsx";
+import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 
-/**
- * Route-level loading state for the deployment status page.
- *
- * `/deployment` resolves the reference public origin and runs a
- * deployment diagnostics probe, which can be slow when the reference is cold or
- * remote. Keep the shell stable and animate a detail skeleton while it resolves.
- */
+/** Route-level loading state for the Server page: its trail, its title and the rows it shows. */
 export default function DeploymentLoading() {
   return (
     <RecordroomShellWithPalette>
-      <DetailLoadingSkeleton label="deployment status" />
+      <NamedPageLoadingSkeleton breadcrumbs={[{ href: "/settings", label: "Settings" }, { label: "Server" }]} framed label="server status" shape="rows" title="Server" />
     </RecordroomShellWithPalette>
   );
 }

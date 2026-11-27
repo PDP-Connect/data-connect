@@ -28,7 +28,7 @@ const FIRST_RUN_COPY = new RegExp(
     .replaceAll(".", "\\.")
     .replaceAll(" ", "\\s+"),
 );
-const FIRST_RUN_LOGOS = /\["amazon", "facebook", "gmail", "notion", "spotify"\]/;
+const FIRST_RUN_LOGOS = /data\.offeredSources\.map/;
 const SYNC_CONTROL = /SyncNowButton|runConnectorNowAction/;
 const NEED_ACTION_LINK = /className=\{`\$\{OUTLINED_BUTTON\}[^`]*`\}\s*href=\{need\.actionHref\}\s*>\s*\{need\.actionLabel\}/;
 const NEEDS_BOX_STRONG_LINE = /home-needs-heading[\s\S]*rounded-md border border-border-strong/;
@@ -79,7 +79,7 @@ test("first run uses bundled marks and copy that does not guess the installation
 
   // DIRECTION.md, Home § First run: the setup sentence uses the safe computer-you-choose wording.
   assert.match(overview, FIRST_RUN_COPY);
-  // DIRECTION.md, Home § First run: the visible logo row uses five bundled source identities.
+  // DIRECTION.md, Home § First run: the visible logo row uses only services this install's catalog offers.
   assert.match(overview, FIRST_RUN_LOGOS);
   // DIRECTION.md, Home § First run: the only setup button opens source setup.
   assert.match(overview, /Add a data source[\s\S]*href=\{data\.addSourceHref\}/);
@@ -95,7 +95,8 @@ test("the page keeps the seeded demos and route-level loading skeleton", async (
   // DIRECTION.md, PAGE-RULES 8 (seeded demos): calm, alarm and decide fixtures share the live Home input shape.
   assert.match(model, /export interface HomeInputs/);
   // DIRECTION.md, Home: Home uses the shared shell and route skeleton.
-  // Lead decision (deputy-fixes-1 E1): the shared loading state is a neutral heading and plain rows, not Home's layout.
-  assert.match(loading, /RecordroomShellWithPalette[\s\S]*<PageLoadingSkeleton label="this page" rows=\{4\} \/>/);
+  // Every other route now has its own loading file, so the root one is Home's: a title bar and rows with a logo each.
+  assert.match(loading, /RecordroomShellWithPalette[\s\S]*<h1[\s\S]*<Bar/);
+  assert.match(loading, /<LoadingRegion[^>]*label="this page"/);
   assert.doesNotMatch(loading, /ListLoadingSkeleton/);
 });

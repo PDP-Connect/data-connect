@@ -2,19 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
+import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 
-/**
- * Route-level loading state for the grants list.
- *
- * `/grants` reads the grant list and pending approvals on every load,
- * so it can take a moment against a remote reference deployment. Keep the shell
- * stable and animate a list skeleton instead of showing a blank frame.
- */
+/** Route-level loading state for Apps: its trail, its title and the rows it shows. */
 export default function GrantsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="grants" rows={6} />
+      <NamedPageLoadingSkeleton label="apps" rows={5} shape="list" title="Apps" />
     </RecordroomShellWithPalette>
   );
 }

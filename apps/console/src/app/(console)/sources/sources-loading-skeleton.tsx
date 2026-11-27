@@ -3,6 +3,7 @@
 
 import { buttonVariants, Text } from "@pdpp/brand-react";
 import Link from "next/link";
+import { LoadingRegion } from "../components/route-loading.tsx";
 
 const ROW_KEYS = ["a", "b", "c", "d", "e", "f"];
 
@@ -18,15 +19,14 @@ function Bar({ className }: { className: string }) {
  */
 export function SourcesLoadingSkeleton() {
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">Loading data sources…</span>
+    <LoadingRegion label="data sources">
       <header className="rr-s-header">
         <div className="rr-s-header__title-row">
           <Text as="h1" className="rr-s-header__title" size="title" weight="semi">Data sources</Text>
           <Link className={buttonVariants({ size: "sm", variant: "default" })} href="/sources/add">Add a data source</Link>
         </div>
       </header>
-      <ul className="divide-y divide-border/70 border-border/70 border-y">
+      <ul aria-hidden="true" className="divide-y divide-border/70 border-border/70 border-y">
         {ROW_KEYS.map((key) => (
           <li className="flex items-center gap-3 py-3" key={key}>
             <Bar className="h-8 w-8 shrink-0 rounded-md" />
@@ -37,6 +37,6 @@ export function SourcesLoadingSkeleton() {
           </li>
         ))}
       </ul>
-    </div>
+    </LoadingRegion>
   );
 }

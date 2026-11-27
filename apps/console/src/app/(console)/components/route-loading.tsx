@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ReactNode } from "react";
+
 /**
  * Lightweight content skeletons for App Router `loading.tsx` files.
  *
@@ -21,6 +23,24 @@
  * These are deliberately tiny and dependency-free so a route-level loading
  * state never becomes a second source of slowness.
  */
+
+/**
+ * The one loading frame. The status sits OUTSIDE the busy region (assistive tech may hold
+ * back changes inside an aria-busy subtree, so a status inside it can go unannounced);
+ * the placeholder content sits inside it. Every loading screen is built on this.
+ */
+export function LoadingRegion({ children, className = "min-w-0", label }: { children: ReactNode; className?: string; label: string }) {
+  return (
+    <div className="min-w-0">
+      <span className="sr-only" role="status">
+        Loading {label}…
+      </span>
+      <div aria-busy="true" className={className}>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 /** One muted placeholder bar. Decorative; hidden from assistive tech. */
 function Bar({ className = "" }: { className?: string }) {
@@ -55,12 +75,9 @@ export function ListLoadingSkeleton({
   rows?: number;
 }) {
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">
-        Loading {label}…
-      </span>
+    <LoadingRegion label={label}>
       <HeaderSkeleton />
-      <div className="divide-y divide-border/70 overflow-hidden rounded-md border border-border/70">
+      <div aria-hidden="true" className="divide-y divide-border/70 overflow-hidden rounded-md border border-border/70">
         {skeletonRowKeys(rows).map((key) => (
           <div className="flex items-center justify-between gap-4 px-3 py-3" key={key}>
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -72,7 +89,7 @@ export function ListLoadingSkeleton({
           </div>
         ))}
       </div>
-    </div>
+    </LoadingRegion>
   );
 }
 
@@ -90,19 +107,16 @@ export function PageLoadingSkeleton({
   rows?: number;
 }) {
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">
-        Loading {label}…
-      </span>
+    <LoadingRegion label={label}>
       <HeaderSkeleton withSubtitle={false} />
-      <div className="divide-y divide-border/70">
+      <div aria-hidden="true" className="divide-y divide-border/70">
         {skeletonRowKeys(rows).map((key) => (
           <div className="py-3" key={key}>
             <Bar className="h-4 w-2/3 max-w-md" />
           </div>
         ))}
       </div>
-    </div>
+    </LoadingRegion>
   );
 }
 
@@ -139,12 +153,9 @@ export function TableLoadingSkeleton({
   const dataColumns = Math.max(0, columns - 2);
   const columnKeys = Array.from({ length: dataColumns }, (_, i) => `skeleton-col-${i}`);
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">
-        Loading {label}…
-      </span>
+    <LoadingRegion label={label}>
       <HeaderSkeleton />
-      <div className="overflow-hidden rounded-md border border-border/70">
+      <div aria-hidden="true" className="overflow-hidden rounded-md border border-border/70">
         <div className="flex items-center gap-4 border-border/70 border-b bg-muted/40 px-3 py-2">
           {/* emitted_at — narrow timestamp column */}
           <Bar className="h-3 w-24 shrink-0" />
@@ -154,7 +165,7 @@ export function TableLoadingSkeleton({
             <Bar className="h-3 w-20 max-w-[18%] flex-1" key={key} />
           ))}
         </div>
-        <div className="divide-y divide-border/70">
+        <div aria-hidden="true" className="divide-y divide-border/70">
           {skeletonRowKeys(rows).map((rowKey) => (
             <div className="flex items-center gap-4 px-3 py-3" key={rowKey}>
               <Bar className="h-3.5 w-24 shrink-0" />
@@ -166,7 +177,7 @@ export function TableLoadingSkeleton({
           ))}
         </div>
       </div>
-    </div>
+    </LoadingRegion>
   );
 }
 
@@ -177,12 +188,9 @@ export function TableLoadingSkeleton({
  */
 export function DetailLoadingSkeleton({ label }: { label: string }) {
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">
-        Loading {label}…
-      </span>
+    <LoadingRegion label={label}>
       <HeaderSkeleton />
-      <div className="flex flex-col gap-4">
+      <div aria-hidden="true" className="flex flex-col gap-4">
         <div className="flex flex-col gap-2 rounded-md border border-border/70 px-4 py-4">
           <Bar className="h-4 w-32" />
           <Bar className="h-3 w-full max-w-md" />
@@ -194,6 +202,6 @@ export function DetailLoadingSkeleton({ label }: { label: string }) {
           <Bar className="h-3 w-1/2 max-w-xs" />
         </div>
       </div>
-    </div>
+    </LoadingRegion>
   );
 }

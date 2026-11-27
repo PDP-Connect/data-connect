@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
+import { LoadingRegion } from "./route-loading.tsx";
 
 function Bar({ className }: { className: string }) {
   return <span aria-hidden className={`block animate-pulse rounded bg-muted ${className}`} />;
@@ -23,8 +24,7 @@ export function TitledDetailLoadingSkeleton({
   mark?: boolean;
 }) {
   return (
-    <div aria-busy="true" className="min-w-0">
-      <span className="sr-only" role="status">Loading {label}…</span>
+    <LoadingRegion label={label}>
       <PageHeader
         breadcrumbs={[...breadcrumbs]}
         title={
@@ -34,13 +34,13 @@ export function TitledDetailLoadingSkeleton({
           </span>
         }
       />
-      <div className="flex flex-col gap-4">
+      <div aria-hidden="true" className="flex flex-col gap-4">
         <div className="flex flex-col gap-2 rounded-md border border-border/70 px-4 py-4">
           <Bar className="h-4 w-32" />
           <Bar className="h-3 w-full max-w-md" />
           <Bar className="h-3 w-2/3 max-w-sm" />
         </div>
       </div>
-    </div>
+    </LoadingRegion>
   );
 }

@@ -73,8 +73,10 @@ test("each skeleton is exported and announces a polite, named loading status", a
   // A single polite live region per skeleton that names the loading subject.
   // `role="status"` is an implicit `aria-live="polite"`; the `{label}`
   // interpolation is what turns it from "Loading…" into "Loading records…".
+  // The status lives once, in the shared LoadingRegion, outside the busy region; every skeleton uses it.
   const statusRegions = src.match(STATUS_ROLE_RE) ?? [];
-  assert.equal(statusRegions.length, SKELETONS.length, "each skeleton must render exactly one role=status live region");
+  assert.equal(statusRegions.length, 1, "the shared frame renders exactly one role=status live region");
+  assert.equal((src.match(/<LoadingRegion label=\{label\}>/g) ?? []).length, SKELETONS.length, "each skeleton is built on the shared frame");
   assert.match(src, NAMES_LABEL_RE, "the live region must name what is loading via {label}");
   // The announcement must be visually hidden, not painted on screen.
   assert.match(src, SR_ONLY_RE);
@@ -83,7 +85,7 @@ test("each skeleton is exported and announces a polite, named loading status", a
 test("each skeleton marks its container busy for assistive tech", async () => {
   const src = await source();
   const busy = src.match(ARIA_BUSY_RE) ?? [];
-  assert.equal(busy.length, SKELETONS.length, "each skeleton container must set aria-busy=true");
+  assert.equal(busy.length, 1, "the shared frame sets aria-busy=true on the placeholder content, not on the status");
 });
 
 test("decorative placeholder bars are hidden from assistive tech", async () => {
