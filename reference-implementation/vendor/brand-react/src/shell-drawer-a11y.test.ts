@@ -89,3 +89,11 @@ test("the portaled drawer owns its cascade geometry and shell tokens", async () 
   // DIRECTION.md "The frame and the menu": the mark stays legible on the light phone bar.
   assert.match(css, MARK_USES_THEME_FOREGROUND);
 });
+
+// Phone walk: the logo and name are the way Home, and the mark is drawn large enough to read.
+test("the logo and name in the header and sidebar link to Home", async () => {
+  const source = await readFile(SHELL_FRAME, "utf8");
+  assert.match(source, /<Link className="rr-head__brand" href="\/">/);
+  assert.match(source, /<Link className="rr-side__brand-link" href="\/">/);
+  assert.match(source, /viewBox="120 190 606 452"/);
+});

@@ -207,7 +207,7 @@ export function navSectionForPathname(pathname: string): NavSection | null {
 // intact while still shipping the real logo, not a placeholder shape.
 function BrandMark() {
   return (
-    <svg aria-hidden="true" className="rr-side__mark" height="18" role="presentation" viewBox="0 0 832 832" width="18">
+    <svg aria-hidden="true" className="rr-side__mark" height="16" role="presentation" viewBox="120 190 606 452" width="22">
       <path
         d="M188.955 197.596C309.404 197.596 407.047 295.552 407.047 416C407.047 536.449 309.404 634.405 188.955 634.405C187.051 634.405 185.153 634.38 183.262 634.332C161.511 633.772 150.635 633.492 140.716 623.315C130.797 613.137 130.797 599.88 130.797 573.367V258.633C130.797 232.12 130.797 218.864 140.716 208.686C150.636 198.508 161.511 198.229 183.262 197.669C185.154 197.621 187.051 197.596 188.955 197.596Z"
         fill="currentColor"
@@ -363,8 +363,10 @@ export function RecordroomShell({ children, onJump, build }: RecordroomShellProp
         {/* ─── Desktop sidebar ─── */}
         <aside className="rr-side">
           <div className="rr-side__brand">
-            <BrandMark />
-            <span className="rr-side__name">{identity.name}</span>
+            <Link className="rr-side__brand-link" href="/">
+              <BrandMark />
+              <span className="rr-side__name">{identity.name}</span>
+            </Link>
           </div>
           {onJump ? <JumpButton onJump={onJump} /> : null}
           <nav aria-label="Primary" className="rr-side__nav">
@@ -377,10 +379,10 @@ export function RecordroomShell({ children, onJump, build }: RecordroomShellProp
         {/* ─── Main column ─── */}
         <main className="rr-main">
           <header className="rr-head">
-            <span className="rr-head__brand">
+            <Link className="rr-head__brand" href="/">
               <BrandMark />
               <span>{identity.name}</span>
-            </span>
+            </Link>
             <div className="rr-head__actions">
               <IcDialogTrigger aria-label="Open navigation" className="rr-chrome-btn rr-menu-btn" type="button">
                 <Menu aria-hidden="true" size={18} strokeWidth={1.8} />
