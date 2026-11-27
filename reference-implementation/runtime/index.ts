@@ -82,7 +82,7 @@ import {
   buildKnownGap,
   buildRecoveryGapClosureFacts,
   capCoveredCount,
-  GAP_STRING_MAX,
+  ASSISTANCE_TEXT_MAX,
   isValidRecoveryHintShape,
   normalizeGapScope,
   VIOLATION_LIST_MAX,
@@ -2254,8 +2254,8 @@ function safeAttachmentString(value: unknown, maxLength = 160): string | null {
   return trimmed;
 }
 
-function sanitizeAssistanceTimelineString(value: unknown, maxLength = GAP_STRING_MAX): string | null {
-  const redacted = boundGapString(value);
+function sanitizeAssistanceTimelineString(value: unknown, maxLength = ASSISTANCE_TEXT_MAX): string | null {
+  const redacted = boundGapString(value, ASSISTANCE_TEXT_MAX);
   if (!redacted) {
     return null;
   }
