@@ -202,7 +202,7 @@ test("status copy rendered for every seeded scenario avoids banned words", () =>
 // DIRECTION.md, “Data sources /sources”: the loading placeholder has a title bar and rows without a detail panel.
 test("sources loading placeholder uses the list skeleton shape", async () => {
   const loading = await readFile(new URL("./loading.tsx", import.meta.url), "utf8");
-  assert.match(loading, /ListLoadingSkeleton label="data sources" rows=\{6\}/);
+  assert.match(loading, /<SourcesLoadingSkeleton \/>/);
   assert.doesNotMatch(loading, /rr-s-loading__panel|passport|master-detail/);
 });
 
