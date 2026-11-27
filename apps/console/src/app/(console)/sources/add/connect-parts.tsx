@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { connectErrorWords } from "../../lib/connect-error-words.ts";
 import { buttonVariants, IcInput, type ConnectorIconLike } from "@pdpp/brand-react";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
@@ -52,19 +53,19 @@ export function ConnectHeader({
   );
 }
 
-/** The one fold these pages allow: the server's own message, one step away. */
+/** The one fold these pages allow: authored words for the cause, one step away. The server's own message is never shown (it can echo a typed key). */
 export function WentWrong({ message }: { message: string }) {
   return (
     <details className="pdpp-caption text-muted-foreground">
       <summary className="inline-flex min-h-11 cursor-pointer items-center underline decoration-dotted underline-offset-4">
         {gettingReadyCopy.whatWentWrong}
       </summary>
-      <p className="mt-1 break-words">{message.replaceAll(/PDPP/giu, "DataConnect")}</p>
+      <p className="mt-1 break-words">{connectErrorWords(message)}</p>
     </details>
   );
 }
 
-/** A failed start: one plain sentence, the server's message under "What went wrong". */
+/** A failed start: one plain sentence, the cause in authored words under "What went wrong". */
 export function StartFailed({ message, sentence }: { message: string; sentence: string }) {
   return (
     <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-destructive" role="alert">

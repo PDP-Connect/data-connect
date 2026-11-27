@@ -120,7 +120,7 @@ test("getting ready: waiting view says the name once and 'This can take a minute
   assert.deepEqual(bannedCopyProblems(html), []);
 });
 
-test("getting ready: failed view has the sentence, 'Try again', and the server message only under 'What went wrong'", async () => {
+test("getting ready: failed view has the sentence, 'Try again', and authored words for the cause only under 'What went wrong'", async () => {
   const { GettingReadyBody } = await bodyModule;
   const html = renderToStaticMarkup(
     createElement(GettingReadyBody, { name: "Amazon", onRetry() {}, view: { detail: "registry unreachable", kind: "failed" } })
@@ -128,7 +128,8 @@ test("getting ready: failed view has the sentence, 'Try again', and the server m
   const text = visibleText(html).replace(/\s+/g, " ");
   assert.match(text, /Amazon couldn't be set up\. Check that this computer is online, then try again\./);
   assert.match(html, />Try again</);
-  assert.match(html, /<summary[^>]*>\s*What went wrong\s*<\/summary>\s*<p[^>]*>registry unreachable<\/p>/);
+  assert.match(html, /<summary[^>]*>\s*What went wrong\s*<\/summary>\s*<p[^>]*>DataConnect could not reach the service\.<\/p>/);
+  assert.doesNotMatch(html, /registry unreachable/);
   assert.deepEqual(bannedCopyProblems(html), []);
 });
 
