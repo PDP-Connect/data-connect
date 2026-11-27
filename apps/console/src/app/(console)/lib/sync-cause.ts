@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /** needsPerson: the owner must act (sign in, finish a check); a retry cannot happen by itself. Separate from the button label, which depends on the kind of source. */
 export interface SyncCauseEvidence { reason?: string | null; error?: string | null; connector_error?: unknown }
-export interface SyncCause { sentence: string; action: "Sign in again" | "Try again" | null; known: boolean; needsPerson: boolean }
+export interface SyncCause { sentence: string; action: "Sign in again" | "Try again" | null; known: boolean; needsPerson: boolean; /** The service itself did not answer (retryable). Not a fault in DataConnect's program. */ unavailable?: boolean; /** The service refused the saved credential. */ credentialRejected?: boolean }
 /** Stored evidence only. Raw text selects an authored sentence; it is never displayed. */
 export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): SyncCause {
   const values: string[] = [evidence.reason ?? "", evidence.error ?? ""];
@@ -15,9 +15,10 @@ export function resolveSyncCause(evidence: SyncCauseEvidence, name: string): Syn
   visit(evidence.connector_error,0);
   const text = values.join("\n").toLowerCase();
   if (/(?:^|[^a-z])(?:[a-z]+_)*session_(?:expired|inactive|required|failed)(?:$|[^a-z])|(?:session|sign-in) (?:is |was )?(?:no longer|not) active/.test(text)) return { sentence: `${name} asked for a new sign-in.`, action: "Sign in again", known: true, needsPerson: true };
-  if (/\b(auth_failed|invalid_credentials|authentication_failed|login_failed|credential_invalid|credentials_invalid|stored_credential_rejected)\b/.test(text)) return { sentence: `${name} didn't accept the sign-in.`, action: "Sign in again", known: true, needsPerson: true };
+  if (/\b(auth_failed|invalid_credentials|authentication_failed|login_failed|credential_invalid|credentials_invalid|stored_credential_rejected)\b/.test(text)) return { sentence: `${name} didn't accept the sign-in.`, action: "Sign in again", known: true, needsPerson: true, credentialRejected: true };
   if (/\b(auth_blocked|login_blocked|access_denied)\b/.test(text)) return { sentence: `${name} didn't let DataConnect sign in.`, action: "Sign in again", known: true, needsPerson: true };
   if (/\b(interaction_timeout|assistance_timeout|assistance_timed_out|login_timeout)\b/.test(text)) return { sentence: "The sign-in wasn't finished.", action: "Try again", known: true, needsPerson: true };
+  if (/\bupstream_unavailable\b/.test(text)) return { sentence: `${name} was not available.`, action: "Try again", known: true, needsPerson: false, unavailable: true };
   if (/\b(?:rate_limited|upstream_pressure)\b/.test(text)) return { sentence: `${name} asked DataConnect to slow down.`, action: null, known: true, needsPerson: false };
   if (/\bstatic_secret_credential_unavailable\b/.test(text)) return { sentence: `DataConnect could not find the saved sign-in details for ${name}.`, action: "Sign in again", known: true, needsPerson: true };
   if (/\b(?:surface_start_failed|headed_browser_unavailable)\b|browsertype\.launch/.test(text)) return { sentence: "DataConnect could not start its browser.", action: null, known: true, needsPerson: false };

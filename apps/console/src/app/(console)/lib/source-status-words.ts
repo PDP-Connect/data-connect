@@ -261,6 +261,27 @@ function fallbackPillRow(source: RefConnectorSummary, options: SourceStatusOptio
   return { row: 23, words: "Status not available", tone: "faint", action: null , sentence: { text: source.source_kind === "manual" && !lastSuccessfulSync(source) ? "Nothing imported yet. Add an export to copy your records." : `${("Status not available") .replace(FINAL_STOP, "")}.`, slot: null }, problem: false };
 }
 
+/**
+ * The answer for a failed last run, from that run's own cause. With
+ * `any` false it answers only when the cause is a step for the person or an
+ * unavailable service (the cases the server's maintainer verdict gets wrong).
+ */
+function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptions, name: string, any = false): MatchedStatus | null {
+  const run = source.last_run;
+  if (run?.status !== "failed") return null;
+  const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, name);
+  if (!any && !cause.needsPerson && !cause.unavailable) return null;
+  const savedKey = cause.credentialRejected && source.source_binding_kind === "static_secret";
+  const sentence = savedKey ? `${name} no longer accepts the saved key.` : cause.sentence;
+  const label = savedKey ? "Enter the key again" : cause.action;
+  const scheduled = cause.unavailable && source.schedule?.enabled === true;
+  if (scheduled) {
+    const text = `${sentence} DataConnect will try again at the next check.`;
+    return { row: 12, words: text, tone: "plain", action: null, sentence: { text, slot: null }, problem: true };
+  }
+  return { row: 16, words: sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: label && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", label, true) : null, sentence: { text: sentence, slot: null }, problem: true };
+}
+
 function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOptions): MatchedStatus {
   const name = (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, "");
   const projection = projectSourceActionability(source);
@@ -283,6 +304,11 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   }
   if (resolver === "blocked_maintainer") {
     if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}. DataConnect can't yet tell whether it got everything.`, tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. DataConnect can't yet tell whether it got everything.`, slot: null }, problem: false };
+    // The server blames the program for every failed run it cannot classify.
+    // When the run's own cause is a step for the person or an unavailable
+    // service, say that; only an unclassified cause keeps the maintainers.
+    const known = failedRunAnswer(source, options, name);
+    if (known) return known;
     return { row: 13, words: "Waiting on a fix from the DataConnect maintainers", tone: "plain", action: null , sentence: { text: "This is waiting on a fix from the people who maintain DataConnect.", slot: null }, problem: true };
   }
   if (
@@ -292,9 +318,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
     return { row: 12, words: withWhen("Trying again on its own"), tone: "plain", action: null , sentence: { text: backoffSentence(source, options, name), slot: null }, problem: true };
   }
   if (source.last_run?.status === "failed") {
-    const run = source.last_run;
-    const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, (source.connector_display_name || formatConnectorKeyForDisplay(source.connector_id)).replace(BROWSER_SIGN_IN_SUFFIX, ""));
-    return { row: 16, words: cause.sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: cause.action && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", cause.action, true) : null , sentence: { text: cause.sentence, slot: null }, problem: true };
+    return failedRunAnswer(source, options, name, true)!;
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;

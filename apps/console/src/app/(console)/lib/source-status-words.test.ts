@@ -512,3 +512,41 @@ test("a run waiting for a security code is not a failure and leads to the place 
   assert.deepEqual(result.action, { kind: "server_cta", label: "Enter the code", filled: true });
   assert.equal(sourceStateSentence(waiting, { now: NOW, name: "Venmo" }).text, "Venmo is waiting for a security code.");
 });
+
+function failedRun(connector_error: unknown, terminal_reason = "connector_reported_failed") {
+  return { event_count: 0, failure_reason: null, finished_at: SUCCESS, first_at: SUCCESS, last_at: SUCCESS, run_id: "run-test", started_at: SUCCESS, status: "failed", terminal_reason, connector_error } as never;
+}
+const blockedByMaintainer = { ...healthyState, owner_of_state: "maintainer" as const, resolver: "blocked_maintainer" as const };
+const automaticSchedule = { active_run_id: null, automation_mode: "unattended", automation_summary: "Automatic", connector_id: "sample", created_at: SUCCESS, effective_mode: "automatic", enabled: true, human_attention_needed: false, ineligibility_reason: null, interval_seconds: 3600, jitter_seconds: 0, minimum_interval_warning: null, next_due_at: null, notification_posture: "none", object: "schedule", scheduler_backoff: null, trigger_kind: "scheduled", updated_at: SUCCESS } as never;
+const maintainerAction = requiredAction({ audience: "maintainer", kind: "code_fix", cta: "Coverage gap needs review", surface: { kind: "maintainer" }, satisfied_when: { kind: "none" } });
+
+test("a service that was unavailable is not a wait on the maintainers", () => {
+  const unavailable = { code: "upstream_unavailable", message: "Steam answered 503", origin: null, retryable: true };
+  const base = { connector_display_name: "Steam", owner_state: blockedByMaintainer, last_run: failedRun(unavailable), rendered_verdict: verdict("Can't collect", [maintainerAction]) };
+  const withSchedule = sourceStatusWords(source({ ...base, schedule: automaticSchedule }), { now: NOW });
+  assert.equal(withSchedule.words, "Steam was not available. DataConnect will try again at the next check.");
+  assert.equal(withSchedule.action, null);
+  const manual = sourceStatusWords(source(base), { now: NOW });
+  assert.equal(manual.words, "Steam was not available.");
+  assert.deepEqual(manual.action, { kind: "sync_now", label: "Try again", filled: true });
+});
+
+test("a rejected saved key asks for the key, never for another sync", () => {
+  const rejected = { code: "invalid_credentials", message: "Steam rejected the key", origin: null, retryable: false };
+  const result = sourceStatusWords(source({ connector_display_name: "Steam", source_binding_kind: "static_secret", owner_state: blockedByMaintainer, last_run: failedRun(rejected), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
+  assert.equal(result.words, "Steam no longer accepts the saved key.");
+  assert.deepEqual(result.action, { kind: "repair_sign_in", label: "Enter the key again", filled: true });
+});
+
+test("only a fault in DataConnect's own program keeps the maintainers sentence", () => {
+  const result = sourceStatusWords(source({ connector_display_name: "Steam", owner_state: blockedByMaintainer, last_run: failedRun(null, "connector_protocol_violation"), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
+  assert.equal(result.row, 13);
+  assert.equal(result.words, "Waiting on a fix from the DataConnect maintainers");
+});
+
+test("a sign-in that expired is the person's step even when the server blames the program", () => {
+  const expired = { code: "session_expired", message: "Venmo ended the session", origin: null, retryable: false };
+  const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: blockedByMaintainer, last_run: failedRun(expired), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
+  assert.equal(result.words, "Venmo asked for a new sign-in.");
+  assert.equal(result.action?.label, "Sign in again");
+});
