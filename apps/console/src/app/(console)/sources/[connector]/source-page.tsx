@@ -902,7 +902,7 @@ function ConnectorPageView({
         </div> : null}
       </Section> : null}
       {!neverConnected ? apps : null}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} notInstalled={installPromptShown} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} notInstalled={connectorNotInstalled} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
       {!archived && !neverConnected ? <RecentRunsSection recentRuns={[...recentRuns.filter(isRunningSync), ...recentRuns.filter((run) => !isRunningSync(run))]} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration

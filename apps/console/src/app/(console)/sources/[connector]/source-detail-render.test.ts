@@ -606,3 +606,11 @@ test("while a sync runs, Recent syncs lists it first and the page offers Stop", 
   assert.match(section.querySelector("li")?.textContent ?? "", /In progress/);
   assert.ok([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "Stop"), "Stop is offered");
 });
+
+// Round 8 B4: the Schedule section takes the fact "the connector is not installed", not the install button's display flag.
+test("the Schedule section is given the real not-installed fact", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./source-page.tsx", import.meta.url), "utf8");
+  assert.match(source, /<ScheduleSummary [^>]*notInstalled=\{connectorNotInstalled\}/);
+  assert.doesNotMatch(source, /<ScheduleSummary [^>]*notInstalled=\{installPromptShown\}/);
+});
