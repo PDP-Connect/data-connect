@@ -5,7 +5,7 @@ import test from "node:test";
 import { resolveSyncCause } from "../lib/sync-cause.ts";
 import { sourceStatusWords, sourceStateSentence } from "../lib/source-status-words.ts";
 import { buildSourcesDemoSummaries } from "../sources/sources-demo-data.ts";
-import { syncDaySentence } from "../syncs/daily-syncs-view.tsx";
+import { currentActionShown, syncDaySentence } from "../syncs/daily-syncs-view.tsx";
 import { toSourceInstanceView } from "../sources/sources-view-model.ts";
 import { buildHomeViewModel } from "../components/views/standing-view-model.ts";
 import { syncPractice } from "./practice.ts";
@@ -157,4 +157,22 @@ test("a mixed known and unknown missing kind never lists records as another kind
  const [stored]=fixture.history.data;assert.ok(stored);
  const sentence=syncDaySentence({...stored,missing:[{stream:"messages",retryable:false},{stream:null,retryable:false}]},"Northwind",["Messages","records"]);
  assert.ok(!sentence.includes("Messages, records"));
+});
+
+test("a failed day never joins a cause that needs the person to a wait on the maintainers",()=>{
+  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days") { throw Error("mode"); }
+  const base={...fixture.history.data[0]!,ran:1,failed:1,last_outcome:"failed" as const,could_not_start:0,missing:undefined,evidence:{reason:"session_expired",error:null,connector_error:null}};
+  const maintainers=syncDaySentence({...base,currentState:"Now: Waiting on a fix from the DataConnect maintainers."},"Venmo");
+  assert.equal(maintainers,"Failed: Venmo asked for a new sign-in");
+  const same=syncDaySentence({...base,currentState:"Now: Venmo asked for a new sign-in. See Venmo for the next step."},"Venmo");
+  assert.equal(same,"Failed: Venmo asked for a new sign-in");
+  const different=syncDaySentence({...base,evidence:{reason:"rate_limited",error:null,connector_error:null},currentState:"Now: Venmo asked for a new sign-in."},"Venmo");
+  assert.match(different,/ · Now: Venmo asked for a new sign-in\.$/);
+});
+test("the current step button is not drawn under a sync that worked",()=>{
+  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days") { throw Error("mode"); }
+  const base=fixture.history.data[0]!;
+  assert.equal(currentActionShown({...base,last_outcome:"finished",currentState:"Now: x"}),false);
+  assert.equal(currentActionShown({...base,last_outcome:"failed",currentState:undefined}),false);
+  assert.equal(currentActionShown({...base,last_outcome:"failed",currentState:"Now: x"}),true);
 });

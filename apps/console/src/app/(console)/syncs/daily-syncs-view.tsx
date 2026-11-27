@@ -18,17 +18,26 @@ export function syncCause(cause: string | null, name: string): string | null {
   return result.known ? result.sentence : null;
 }
 export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames: string[] = []): string {
-  const current = row.currentState ? ` · ${row.currentState}` : "";
+  const currentPart = row.currentState ? ` · ${row.currentState}` : "";
+  const current = currentPart;
   const knownMissing=[...new Set(missingNames.filter(candidate=>candidate!=="records"))];
   const missing = row.missing?.length ? ` · ${knownMissing.length ? knownMissing.join(", ") : "Some records"} didn't come` : "";
   if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}${current}`; }
   if (row.last_outcome === "failed") {
-    const cause = resolveSyncCause(row.evidence ?? {reason:row.cause},name).sentence;
-    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
+    const resolved = resolveSyncCause(row.evidence ?? {reason:row.cause},name);
+    const cause = resolved.sentence;
+    // "Now" must not repeat the cause, nor send a step that is the person's to the maintainers.
+    const now = row.currentState?.replace(/^Now: /,"").replace(/\. See .* for the next step\.$/,".") ?? "";
+    const currentAfterFailure = row.currentState && (now === cause || (resolved.needsPerson && now.startsWith("Waiting on a fix from the DataConnect maintainers"))) ? "" : currentPart;
+    return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${currentAfterFailure}`;
   }
   const checked = row.ran === 1 ? row.manual === 1 ? "You started it" : "Checked once" : `Checked ${row.ran.toLocaleString("en-US")} times`;
   const incomplete = row.failed+row.stopped+row.interrupted;
   return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete.toLocaleString("en-US")} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
+}
+/** The current step button belongs under the newest sync of a source, and only when that sync failed. */
+export function currentActionShown(row: CurrentSyncDay): boolean {
+  return row.last_outcome === "failed" && row.currentState !== undefined;
 }
 export function syncDayProblem(row: CurrentSyncDay): boolean {
   if (row.currentProblem !== undefined) {return row.currentProblem;}
@@ -51,7 +60,7 @@ export function SyncHistoryDays({rows,sources,offset,demo,onlyProblems=false,exp
           <span className="hidden shrink-0 text-[13px] text-muted-foreground sm:inline">{historyTime(row.last_at,offset)}</span>
         </Link>
         {row.currentState ? <ul className="text-[13px] text-muted-foreground">{Object.entries(sources.find(source=>source.id===row.connection_id)?.currentKinds ?? {}).map(([kind,value])=><li key={kind}>{historyKindName(sources,row.connection_id,kind)} · {value.line}</li>)}</ul> : null}
-        {sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action?.label}</Link></div> : null}
+        {currentActionShown(row) && sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action ? <div className="mt-3"><Link className={buttonVariants()} href={`/sources/${encodeURIComponent(row.connection_id)}`}>{sources.find(source=>source.id===row.connection_id)?.currentAnswer?.action?.label}</Link></div> : null}
       </li>)}</ul>
     </Section>;
   })}</>;

@@ -45,7 +45,7 @@ for(const state of AGREEMENT_STATES) { test(`five places agree: ${state}`,async(
  assert.equal(text(<SourceRowStatus instance={list} />).replace(/\s+/g," "),status.words.replace(" · ",""));
  if(homeRow?.status) { assert.equal(text(<SourceStatusText status={homeRow.status} />),status.words); }
  assert.ok(page.length>0);
- assert.ok(text(history).includes(status.words),"history must print the present short words");
+ assert.ok(text(history).includes(status.words.replace(/\.$/,"")),"history must print the present short words (a failed day that already says the same cause prints it once)");
  assert.ok(text(sync).includes(status.words),"sync page must print the present short words");
  if(state.startsWith("device")) {
   assert.ok(status.words.startsWith("The computer that holds this data (Practice computer) could not send 4,959 records"),status.words);
@@ -53,7 +53,7 @@ for(const state of AGREEMENT_STATES) { test(`five places agree: ${state}`,async(
   assert.ok(sourceStateSentence(source,{now,name:"Northwind"}).text.startsWith("The computer that holds this data"));
  }
  const expected=status.action?[status.action.label]:[];
- assert.deepEqual(labels(history),expected,"history action must be the current source action");
+ assert.deepEqual(labels(history),currentRow.last_outcome==="failed"?expected:[],"history action must be the current source action, drawn only under a sync that failed");
  assert.deepEqual(labels(sync),expected,"sync page action must be the current source action");
  assert.equal(home.needs.filter(need=>need.kind!=="approval").length,status.action?1:0,"Needs you equals sources with an action, including lifecycle recovery");
  assert.equal(syncDayProblem(currentRow),Boolean((historySource as HistorySource & {currentProblem:boolean}).currentProblem),"Only problems uses the current answer");
