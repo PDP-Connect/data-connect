@@ -42,7 +42,7 @@ const DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER = /\bisSupportedBrowserCollector
 const RENDERS_NOTICE = /browserBoundRequest\s*\?\s*\(?\s*<BrowserBoundEnrollmentNotice/;
 const PENDING_BROWSER_TITLE = /Browser setup not available yet/;
 const PACKAGED_PENDING_COPY = /Browser setup is not available in this dashboard yet/;
-const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add source\s*<\/Link>/;
+const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add a data source\s*<\/Link>/;
 const CONNECT_APPS_LINK = /href="\/connect"[\s\S]{0,120}>\s*Connect apps\s*<\/Link>/;
 const FORBIDDEN_MONOREPO_COPY = /PDPP monorepo checkout|generated monorepo commands|Manual browser setup/;
 

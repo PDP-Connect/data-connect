@@ -175,7 +175,7 @@ function BrowserBoundEnrollmentNotice({
           className="underline underline-offset-2 hover:text-foreground"
           href="/sources/add"
         >
-          Add source
+          Add a data source
         </Link>{" "}
         page.
       </p>

@@ -32,7 +32,7 @@ export function DeveloperModeSetting() {
             Show data sources that are still being built
           </span>
           <span className="text-[13px] text-muted-foreground">
-            This shows in-development data sources on Add source. It is stored
+            This shows in-development data sources on Add a data source. It is stored
             in this browser and is off by default.
           </span>
         </span>
