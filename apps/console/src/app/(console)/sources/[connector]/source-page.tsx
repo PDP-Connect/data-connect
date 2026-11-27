@@ -932,6 +932,7 @@ function ConnectorPageView({
             />
             {!neverConnected && !revoked ? addAnotherAccountAction : null}
             <ConnectionDangerZone
+              connectorNotInstalled={connectorNotInstalled}
               hasRecords={recordTotal.count !== 0}
               activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
               connectionId={connectorInstanceId ?? connectionId}

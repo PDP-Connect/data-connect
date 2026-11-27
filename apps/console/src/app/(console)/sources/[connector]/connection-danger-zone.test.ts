@@ -199,3 +199,12 @@ test("on a rejected key the Manage section does not repeat the top button", asyn
   assert.match(page, /topButtonShown=\{sourceStatus\.action\?\.kind === "repair_sign_in"\}/);
   assert.match(page, /if \(setupFailed \|\| topButtonShown\) return null;/);
 });
+
+// Round 9 (F6): while the connector is not installed, "Copy everything again" cannot run; the page says why instead.
+test("Copy everything again is replaced by its reason while the connector is not installed", async () => {
+  const zone = await readFile(fileURLToPath(new URL("./connection-danger-zone.tsx", import.meta.url)), "utf8");
+  assert.match(zone, /connectorNotInstalled \?/);
+  assert.match(zone, /needs \{serviceName\} to be installed again/);
+  const page = await readFile(fileURLToPath(new URL("./source-page.tsx", import.meta.url)), "utf8");
+  assert.match(page, /<ConnectionDangerZone[^>]*connectorNotInstalled=\{connectorNotInstalled\}/);
+});

@@ -24,6 +24,8 @@ interface Props {
 	setupFailed?: boolean;
   inactive?: boolean;
   neverConnected?: boolean;
+  /** The connector is not installed: nothing that has to run it can start. */
+  connectorNotInstalled?: boolean;
   /** False when nothing has been copied: copying everything again would change nothing. */
   hasRecords?: boolean;
 	initialDialog?: "reset" | "disconnect" | "delete";
@@ -48,6 +50,7 @@ export function ConnectionDangerZone({
 	setupFailed = false,
   inactive = false,
   neverConnected = false,
+  connectorNotInstalled = false,
   hasRecords = true,
 	initialDialog,
 }: Props) {
@@ -61,7 +64,9 @@ export function ConnectionDangerZone({
 			{message ? <ActionFeedback message={message} tone="success" /> : null}
 			{connectionId === null ? null : (
 				<>
-					{setupFailed || inactive || !hasRecords ? null : (
+					{setupFailed || inactive || !hasRecords ? null : connectorNotInstalled ? (
+						<p className="pdpp-body text-muted-foreground">Copying everything again needs {serviceName} to be installed again first.</p>
+					) : (
 						<ResetSourceForm
 							connectionId={connectionId}
 							displayName={displayName}
