@@ -3606,7 +3606,6 @@ function StreamStage({
         <CloseConfirmBubble connectorName={connectorName} onCancel={handleCloseCancel} onConfirm={handleCloseConfirm} />
       ) : null}
       {!closeConfirmArmed && status.display !== "trouble" ? <StreamInteractionDock
-        browserLost={status.display === "trouble"}
         connector={connector}
         preview={Boolean(previewState)}
         previewError={previewState === "browser-code-rejected" ? flowPreview.rejected : undefined}
