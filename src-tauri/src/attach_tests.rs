@@ -927,6 +927,87 @@ async fn an_attached_launch_with_an_ended_session_asks_to_pair_again() {
 }
 
 #[tokio::test]
+async fn a_pinned_launch_checks_identity_before_sending_the_owner_session() {
+    const FIXTURE: &str = "attach-launch-fixture";
+    let pinned = test_key(7);
+    let pinned_key = key_text(&pinned);
+    let different = test_key(8);
+    let different_id = server_id(&different);
+
+    for (response_key, answering) in [(Some(different), Some(different_id)), (None, None)] {
+        let (origin, server) = serve_with(1, move |origin, request| {
+            assert_eq!(request.path, "/owner/desktop-pairings/identity");
+            match &response_key {
+                Some(key) => identity_answer(key, origin, request),
+                None => response("404 Not Found", "", ""),
+            }
+        });
+        assert_eq!(
+            decide_attached_launch(
+                &origin,
+                Some(&pinned_key),
+                SessionLookup::Found(FIXTURE.to_string()),
+            )
+            .await,
+            AttachedLaunch::IdentityChanged { answering }
+        );
+        let requests = server.join().expect("identity request");
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].contains(FIXTURE));
+        assert!(!requests[0].contains(OWNER_SESSION_COOKIE));
+    }
+
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&pinned))
+    });
+    assert!(matches!(
+        decide_attached_launch(
+            &origin,
+            Some(&pinned_key),
+            SessionLookup::Found(FIXTURE.to_string()),
+        )
+        .await,
+        AttachedLaunch::OpenConsole { .. }
+    ));
+    let requests = server.join().expect("verified identity and session requests");
+    assert!(requests[0].starts_with("post /owner/desktop-pairings/identity "));
+    assert!(!requests[0].contains(FIXTURE));
+    assert!(requests[1].starts_with("get /owner/session "));
+    assert!(requests[1].contains(&format!("{OWNER_SESSION_COOKIE}={FIXTURE}")));
+}
+
+#[test]
+fn a_memory_only_session_handoff_is_consumed_once() {
+    // Set the value only on isolated child processes; do not mutate the
+    // environment shared by other tests in this test binary.
+    let module = module_path!().split_once("::").expect("nested test module").1;
+    let name = format!("{module}::handoff_receiver_subprocess");
+    for input in ["attach-handoff-fixture", ""] {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--ignored", "--exact", &name, "--test-threads=1"])
+            .env(SESSION_HANDOFF_ENV, input)
+            .output()
+            .expect("run isolated handoff case");
+        let ran = String::from_utf8_lossy(&output.stdout).contains(&format!("{name} ... ok"));
+        assert!(output.status.success() && ran, "isolated handoff assertions did not pass");
+    }
+}
+
+#[test]
+#[ignore = "run by a_memory_only_session_handoff_is_consumed_once"]
+fn handoff_receiver_subprocess() {
+    let input = std::env::var(SESSION_HANDOFF_ENV)
+        .expect("a_memory_only_session_handoff_is_consumed_once sets the handoff variable");
+    take_session_handoff_from_env();
+    assert!(std::env::var_os(SESSION_HANDOFF_ENV).is_none());
+    assert_eq!(
+        take_handed_off_session(),
+        if input.is_empty() { None } else { Some(input) }
+    );
+    assert!(take_handed_off_session().is_none());
+}
+
+#[tokio::test]
 async fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
     let origin = closed_origin();
     let AttachedLaunch::Unreachable { message } =
