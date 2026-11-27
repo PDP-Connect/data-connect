@@ -25,3 +25,9 @@ test("the row menu trigger is 44px on a coarse pointer", () => {
   assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(width|min-width):\s*44px/);
   assert.match(coarse, /\.rr-s-menu-trigger[^{}]*\{[^}]*(height|min-height):\s*44px/);
 });
+
+// Round 7 (F30, F47): `.pdpp-btn--sm` sets min-height: 0 outside any layer, so the Tailwind class
+// `min-h-11` on a small button lost and the button drew 33px tall.
+test("a small button that asks for min-h-11 gets it, whatever the brand sheet says", () => {
+  assert.match(globals, /\.pdpp-btn--sm\.min-h-11\s*\{[^}]*min-height:\s*44px/);
+});

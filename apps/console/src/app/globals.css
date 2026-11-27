@@ -137,3 +137,9 @@ textarea::placeholder {
   color: var(--muted-foreground) !important;
   opacity: 1 !important;
 }
+
+/* The brand sheet gives `.pdpp-btn--sm` min-height: 0 outside any layer, which beats the `min-h-11`
+   utility. A small button that asks for the touch floor gets it here, once. */
+.pdpp-btn--sm.min-h-11 {
+  min-height: 44px;
+}
