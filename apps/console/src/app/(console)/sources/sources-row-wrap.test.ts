@@ -28,3 +28,10 @@ test("the row menu is top-aligned on desktop and the phone layout adds no offset
   assert.ok(phone, "phone menu rule");
   assert.match(phone, /margin-top:\s*0/);
 });
+
+test("the filter field sets no height of its own, so the shared 44 px touch rule applies", async () => {
+  const css = await readFile(fileURLToPath(new URL("./sources-view.css", import.meta.url)), "utf8");
+  const rule = /\.rr-s-filter__input \{([^}]*)\}/.exec(css)?.[1];
+  assert.ok(rule);
+  assert.doesNotMatch(rule, /(?:min-)?height/);
+});

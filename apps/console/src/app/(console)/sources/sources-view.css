@@ -49,7 +49,6 @@
 .rr-s-filter__input {
   width: 100%;
   max-width: 420px;
-  min-height: 36px;
   padding: 6px 10px;
   color: var(--foreground);
   background: var(--background);
