@@ -14,6 +14,7 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   copyBrowserDirectory,
+  findChromiumDir,
   getBrowserDirectoryName,
   getPlaywrightBrowserPath,
   parseBuildOptions,
@@ -155,6 +156,25 @@ describe("playwright-runner build options", () => {
     expect(resolverSource.indexOf("getSystemChromePath()")).toBeLessThan(
       resolverSource.indexOf("getDownloadedChromiumPath()")
     )
+  })
+})
+
+describe("Chromium cache selection", () => {
+  it("skips incomplete and headless-only caches in favor of a usable browser", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-selection-"))
+    try {
+      mkdirSync(join(root, "chromium-1000"))
+      mkdirSync(join(root, "chromium-headless-shell-1100"))
+      const usable = join(root, "chromium-1200")
+      const bin = join(usable, "chrome-linux64")
+      mkdirSync(bin, { recursive: true })
+      writeFileSync(join(bin, "chrome"), "synthetic browser")
+      expect(findChromiumDir(root, "linux")).toBe(usable)
+      rmSync(usable, { recursive: true })
+      expect(findChromiumDir(root, "linux")).toBeNull()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
