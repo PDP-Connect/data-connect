@@ -240,3 +240,28 @@ test("another lineage's claim is refused with the bounded taken reason", async t
   assert.equal(response.error.code, "configuration_migration_required")
   assert.equal(response.error.reason, "taken")
 })
+
+test("unreadable or corrupt setup state refuses setup with a bounded error and is left in place", async t => {
+  const f = await fixture(t)
+  const path = join(f.home, "embedding-state.json")
+  const states = [
+    "{",
+    "null",
+    JSON.stringify({ schemaVersion: 2, configs: {} }),
+    JSON.stringify({ schemaVersion: 1, configs: [] }),
+  ]
+  for (const state of [...states, null]) {
+    await rm(path, { recursive: true, force: true })
+    if (state === null) await mkdir(path)
+    else await writeFile(path, state, { mode: 0o600 })
+    for (const response of [await f.request("GET", "/catalog"), await f.discard()]) {
+      assert.equal(response.status, 409)
+      assert.equal(response.error.code, "internal_error")
+      const text = JSON.stringify(response)
+      assert.equal(text.includes(f.home), false)
+      assert.equal(text.includes("schemaVersion"), false)
+    }
+    // A refusal must not repair the state by writing a fresh one over it.
+    if (state !== null) assert.equal(await readFile(path, "utf8"), state)
+  }
+})
