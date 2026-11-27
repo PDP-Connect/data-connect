@@ -53,3 +53,9 @@ test("two connected apps use the singular and offer a first question", () => {
   assert.match(html, NOW_ASK_IT_RE);
   assert.doesNotMatch(html, SET_UP_REMOTE_ACCESS_RE);
 });
+
+// A command that scrolls sideways must not widen the page: every grid cell can shrink below its content.
+test("each assistant's cell can shrink, so a long command scrolls inside its box instead of widening the page", () => {
+  const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://127.0.0.1:18708", apps: [] }));
+  assert.match(html, /<section class="min-w-0">/);
+});

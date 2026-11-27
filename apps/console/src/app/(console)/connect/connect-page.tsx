@@ -39,7 +39,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
       <Section title="2. Add it to your assistant">
         <div className="grid gap-6 sm:grid-cols-2">
           {assistantInstructions.map((assistant) => (
-            <section key={assistant.name}>
+            <section className="min-w-0" key={assistant.name}>
               <h3 className="pdpp-title">{assistant.name}</h3>
               {needsRemote && REMOTE_ONLY_ASSISTANTS.has(assistant.name) ? (
                 <p className="text-[13px] text-muted-foreground">
