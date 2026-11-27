@@ -446,3 +446,16 @@
     font-size: 12px;
   }
 }
+
+/* A kind's name wraps rather than ending in an ellipsis ("Owned games" was cut at 86 px). */
+.explore-page .rr-x-facet__name {
+  overflow: visible;
+  white-space: normal;
+}
+
+.explore-page .rr-x-facet__label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
