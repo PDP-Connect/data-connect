@@ -254,6 +254,28 @@ html:has(.pdpp-stream-dialog) {
   max-inline-size: min(34rem, 100vw);
 }
 
+/* The helper's text scrolls inside the panel rather than growing past the screen. */
+.pdpp-stream-toast-zone[data-slot="interaction"] .pdpp-stream-toast-bubble {
+  max-block-size: 45dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* At the top the panel sits under the location bar, clear of the bottom controls. */
+.pdpp-stream-toast-zone[data-slot="interaction"][data-position="top"] {
+  inset-block-end: auto;
+  inset-block-start: calc(env(safe-area-inset-top) + 3.5rem);
+}
+
+/* Hidden, the helper is a small pill at the edge, not a full-width strip. */
+.pdpp-stream-toast-zone[data-slot="interaction"][data-collapsed="true"] {
+  inset-inline: auto;
+  inset-inline-start: 0.75rem;
+  max-inline-size: none;
+  padding-inline: 0;
+  margin-inline: 0;
+}
+
 /* The mid-interaction close-confirmation rides above the interaction dock so
    the destructive choice is never tucked under the step panel it is guarding. */
 .pdpp-stream-toast-zone[data-slot="close-confirm"] {

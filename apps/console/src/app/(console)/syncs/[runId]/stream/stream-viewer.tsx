@@ -5755,6 +5755,9 @@ function StreamInteractionDock({
   const router = useRouter();
   const [code, setCode] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  // Where the panel sits. At the top it stays clear of the bottom controls, so
+  // the person can read the page under it; the choice is kept while hidden.
+  const [atTop, setAtTop] = useState(false);
   const [error, setError] = useState<string | null>(previewError ?? null);
   const [isPending, startTransition] = useTransition();
 
@@ -5805,25 +5808,40 @@ function StreamInteractionDock({
     submitLabel = interactionKind === "otp" ? "Checking…" : "Saving…";
   }
 
+  const position = atTop ? "top" : "bottom";
+  const moveButton = (
+    <IcButton
+      className="shrink-0"
+      onClick={() => setAtTop(!atTop)}
+      size="sm"
+      type="button"
+      variant="ghost"
+    >
+      {atTop ? "Move to bottom" : "Move to top"}
+    </IcButton>
+  );
+
   if (collapsed) {
     return (
-      <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-slot="interaction">
-        <IcButton
-          aria-expanded="false"
-          className="pdpp-stream-toast-bubble"
-          onClick={() => setCollapsed(false)}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          Show instructions
-        </IcButton>
+      <div className="pdpp-stream-toast-zone" data-collapsed="true" data-pdpp-stream-ui data-position={position} data-slot="interaction">
+        <div className="pdpp-stream-toast-bubble flex items-center gap-1 p-1">
+          <IcButton
+            aria-expanded="false"
+            onClick={() => setCollapsed(false)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            Show instructions
+          </IcButton>
+          {moveButton}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-slot="interaction">
+    <div className="pdpp-stream-toast-zone" data-pdpp-stream-ui data-position={position} data-slot="interaction">
       <form
         aria-label="Finish signing in"
         autoComplete="off"
@@ -5846,6 +5864,7 @@ function StreamInteractionDock({
         </div>
         <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
         <p className="pdpp-caption text-foreground">{message}</p>
+        <div className="flex flex-wrap gap-2">{moveButton}</div>
         {interactionKind === "otp" ? (
           <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
             id={`code-${interactionId}`}

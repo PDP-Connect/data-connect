@@ -161,3 +161,31 @@ test("finished pages keep the shared heading wrapper, button gaps and missing-ro
 });
 
 test.after(async () => { await React.act(async () => root.unmount()); dom.window.close(); });
+
+// Phone walk: the sign-in helper can be moved between the bottom and the top, shrinks to a small pill, and its text can scroll.
+test("the sign-in helper moves between bottom and top and is small when hidden", async () => {
+  await render(React.createElement(SignInPreview, { key: "browser-code-move", state: "browser-code" }));
+  const zone = () => Array.from(dom.window.document.querySelectorAll('[data-slot="interaction"]')).at(0);
+  assert.equal(zone()?.getAttribute("data-position"), "bottom");
+  const press = async (label: string) => {
+    const button = Array.from(zone()?.querySelectorAll("button") ?? []).find(node => node.textContent?.includes(label));
+    assert.ok(button, label);
+    await React.act(async () => { button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  };
+  await press("Move to top");
+  assert.equal(zone()?.getAttribute("data-position"), "top");
+  await press("Hide instructions");
+  assert.equal(zone()?.getAttribute("data-collapsed"), "true");
+  assert.equal(zone()?.getAttribute("data-position"), "top", "position is kept while hidden");
+  await press("Move to bottom");
+  assert.equal(zone()?.getAttribute("data-position"), "bottom");
+  await render(null);
+});
+
+test("the helper's text area scrolls instead of growing past the screen, and the hidden form is a small pill", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const css = await readFile(new URL("./stream.css", import.meta.url), "utf8");
+  assert.match(css, /\[data-slot="interaction"\]\s*\.pdpp-stream-toast-bubble\s*\{[^}]*max-block-size:[^;]*;[^}]*overflow-y:\s*auto/);
+  assert.match(css, /\[data-slot="interaction"\]\[data-position="top"\]\s*\{[^}]*inset-block-start/);
+  assert.match(css, /\[data-slot="interaction"\]\[data-collapsed="true"\]\s*\{[^}]*inset-inline:\s*auto/);
+});
