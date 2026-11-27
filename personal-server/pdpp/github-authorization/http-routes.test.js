@@ -72,6 +72,51 @@ test("consent handler rejects malformed JSON before invoking the adapter", async
   })
 })
 
+function timelineHandler(path, adapter) {
+  const routes = new Map()
+  registerGithubAuthorizationRoutes({
+    app: { post: (route, ...handlers) => routes.set(route, handlers.at(-1)) },
+    devToken: "test-only-placeholder",
+    adapter,
+  })
+  return routes.get(path)
+}
+
+test("timeline revoke reports body read failure and never invokes the adapter", async () => {
+  let revokeCalls = 0
+  const handle = timelineHandler("/v1/pdpp/local-timeline/revoke", {
+    revokeLocalTimelineSession() { revokeCalls++ },
+  })
+  const response = await handle({
+    req: { json: async () => { throw new SyntaxError("invalid revoke JSON") } },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.equal(revokeCalls, 0)
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "invalid revoke JSON", code: "invalid_request" },
+  })
+})
+
+test("timeline approval does not acknowledge a failed local grant write", async () => {
+  const handle = timelineHandler("/v1/pdpp/local-timeline/consent-requests/:requestId/approve", {
+    issueLocalTimelineGrant() {
+      throw Object.assign(new Error("Grant store unavailable"), { code: "store_unavailable" })
+    },
+  })
+  const response = await handle({
+    req: {
+      json: async () => ({ session_id: "fixture-session", subject_id: "fixture-subject" }),
+      param: () => "fixture-request",
+    },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "Grant store unavailable", code: "store_unavailable" },
+  })
+})
+
 test("consent handler returns the adapter's explicit refusal code", async () => {
   const handle = consentHandler({
     createConsentRequest() {
