@@ -82,7 +82,7 @@ export const ENTER_THE_CODE = "Enter the code";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function lastSuccessfulSync(source: RefConnectorSummary): string | null {
+export function lastSuccessfulSync(source: RefConnectorSummary): string | null {
   return source.connection_health.last_success_at ?? source.last_successful_run?.last_at ?? null;
 }
 

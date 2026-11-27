@@ -5936,7 +5936,7 @@ function StreamInteractionDock({
             Hide instructions
           </IcButton>
         </div>
-        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">{interactionStepLabel(interactionKind)}</p>}
+        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">{interactionStepLabel(interactionKind, message)}</p>}
         {browserLost ? null : <p className="pdpp-caption text-foreground">{message}</p>}
         <div className="flex flex-wrap gap-2">{moveButton}</div>
         {interactionKind === "otp" && !browserLost ? (

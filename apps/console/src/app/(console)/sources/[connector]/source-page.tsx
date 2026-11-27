@@ -86,7 +86,7 @@ import {
   projectSourceActionability,
   type SourceStreamOwnerActionAvailability,
 } from "../../lib/source-actionability.ts";
-import { UNMEASURED_CAVEAT, type SourceStatusAction, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
+import { UNMEASURED_CAVEAT, type SourceStatusAction, lastSuccessfulSync, manifestCredentialKind, sourceStateSentence, sourceStatusWords, sourceNeverConnected } from "../../lib/source-status-words.ts";
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { readConnectorUpdates } from "../connector-updates-read.ts";
@@ -902,7 +902,7 @@ function ConnectorPageView({
         </div> : null}
       </Section> : null}
       {!neverConnected ? apps : null}
-      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} notInstalled={connectorNotInstalled} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
+      {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} lastSuccessfulAt={lastSuccessfulSync(source)} notInstalled={connectorNotInstalled} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
       {!archived && !neverConnected ? <RecentRunsSection recentRuns={[...recentRuns.filter(isRunningSync), ...recentRuns.filter((run) => !isRunningSync(run))]} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
@@ -1891,11 +1891,11 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
   );
 }
 
-export function ScheduleSummary({ displayName, notInstalled = false, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
-  notInstalled?: boolean; displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
+export function ScheduleSummary({ displayName, lastSuccessfulAt = null, notInstalled = false, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
+  notInstalled?: boolean; displayName: string; lastSuccessfulAt?: string | null; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
 }) {
-  const text = disconnected ? "Not checked while disconnected." : notInstalled ? `Not checked until ${displayName} is installed again.` : paused ? "Not checked while paused." : (scheduleError ? null : overdueScheduleSentence(displayName, schedule, now)) ?? scheduleSentence(displayName, scheduleError ? undefined : schedule);
-  const overdue = !scheduleError && !disconnected && !paused && !notInstalled && overdueScheduleSentence(displayName, schedule, now) !== null;
+  const text = disconnected ? "Not checked while disconnected." : notInstalled ? `Not checked until ${displayName} is installed again.` : paused ? "Not checked while paused." : (scheduleError ? null : overdueScheduleSentence(displayName, schedule, now, lastSuccessfulAt)) ?? scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const overdue = !scheduleError && !disconnected && !paused && !notInstalled && overdueScheduleSentence(displayName, schedule, now, lastSuccessfulAt) !== null;
   const next = !overdue && !disconnected && !paused && !notInstalled && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
   const deviceName = device?.device_display_name ?? device?.local_binding_name;

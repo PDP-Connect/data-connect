@@ -63,11 +63,14 @@ export function overdueScheduleSentence(
   _name: string,
   schedule: Pick<RefSchedule, "active_run_id" | "effective_mode" | "enabled" | "interval_seconds" | "last_successful_at"> | null | undefined,
   now: Date,
+  /** The page's own "last synced" fact. The server fills `last_successful_at` from scheduler history only, so a source last synced by hand has it null. */
+  lastSuccessfulAt?: string | null,
 ): string | null {
   const state = scheduleState(schedule);
   if (state.kind !== "scheduled" || !schedule || schedule.active_run_id) return null;
   const seconds = scheduleIntervalSeconds(schedule.interval_seconds);
-  const last = schedule.last_successful_at ? Date.parse(schedule.last_successful_at) : Number.NaN;
+  const lastAt = schedule.last_successful_at ?? lastSuccessfulAt;
+  const last = lastAt ? Date.parse(lastAt) : Number.NaN;
   if (seconds === null || Number.isNaN(last)) return null;
   if (now.getTime() - last <= seconds * 2000) return null;
   return `It should check ${state.every}, but the last successful sync was ${formatRelative(new Date(last), now.getTime())}.`;
