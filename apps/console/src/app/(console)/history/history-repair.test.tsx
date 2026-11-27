@@ -176,3 +176,14 @@ test("the current step button is not drawn under a sync that worked",()=>{
   assert.equal(currentActionShown({...base,last_outcome:"failed",currentState:undefined}),false);
   assert.equal(currentActionShown({...base,last_outcome:"failed",currentState:"Now: x"}),true);
 });
+// The generic "Something stopped" answer is only reached when the last run did not fail, so a
+// day whose sync worked must not say something stopped; named current states still show.
+test("a worked day never joins the generic stopped answer",()=>{
+  const fixture=syncPractice("mixed",0);if(fixture.history.mode!=="days") { throw Error("mode"); }
+  const worked={...fixture.history.data[0]!,ran:1,failed:0,stopped:0,interrupted:0,could_not_start:0,missing:undefined,last_outcome:"finished" as const,records:3};
+  const generic=syncDaySentence({...worked,currentState:"Now: Something stopped Venmo from syncing."},"Venmo");
+  assert.doesNotMatch(generic,/Something stopped/);
+  assert.match(generic,/copied 3 records$/);
+  const named=syncDaySentence({...worked,currentState:"Now: A refresh is due · last synced 14 Nov."},"Venmo");
+  assert.match(named,/ · Now: A refresh is due/);
+});

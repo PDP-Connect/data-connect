@@ -19,10 +19,9 @@ export function syncCause(cause: string | null, name: string): string | null {
 }
 export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames: string[] = []): string {
   const currentPart = row.currentState ? ` · ${row.currentState}` : "";
-  const current = currentPart;
   const knownMissing=[...new Set(missingNames.filter(candidate=>candidate!=="records"))];
   const missing = row.missing?.length ? ` · ${knownMissing.length ? knownMissing.join(", ") : "Some records"} didn't come` : "";
-  if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}${current}`; }
+  if (!row.ran) { return `Not checked · could not start ${row.could_not_start.toLocaleString("en-US")} time${row.could_not_start===1?"":"s"}${currentPart}`; }
   if (row.last_outcome === "failed") {
     const resolved = resolveSyncCause(row.evidence ?? {reason:row.cause},name);
     const cause = resolved.sentence;
@@ -31,6 +30,9 @@ export function syncDaySentence(row: CurrentSyncDay, name: string, missingNames:
     const currentAfterFailure = row.currentState && (now === cause || (resolved.needsPerson && now.startsWith("Waiting on a fix from the DataConnect maintainers"))) ? "" : currentPart;
     return `Failed${row.failed > 1 ? ` ${row.failed.toLocaleString("en-US")} times` : ""}: ${cause.replace(/\.$/, "")}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${currentAfterFailure}`;
   }
+  // The unnamed-cause answer is reached only when the last run did not fail, so beside a
+  // sync that worked it would say something that is not true. Named states still show.
+  const current = /^ · Now: Something stopped /.test(currentPart) ? "" : currentPart;
   const checked = row.ran === 1 ? row.manual === 1 ? "You started it" : "Checked once" : `Checked ${row.ran.toLocaleString("en-US")} times`;
   const incomplete = row.failed+row.stopped+row.interrupted;
   return `${checked} · ${copiedRecords(row.records)}${incomplete ? ` · ${incomplete.toLocaleString("en-US")} did not finish` : ""}${row.could_not_start ? ` · ${row.could_not_start.toLocaleString("en-US")} could not start` : ""}${missing}${current}`;
