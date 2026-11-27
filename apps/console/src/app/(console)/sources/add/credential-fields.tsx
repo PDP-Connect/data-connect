@@ -3,6 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { splitHelpText } from "./credential-help.ts";
 import { IcInput } from "@pdpp/brand-react";
 import { useState } from "react";
 import { signInCopy } from "./connect-copy.ts";
@@ -34,27 +35,38 @@ export function CredentialFields({
 }) {
   return (
     <div className="grid gap-3" data-testid="credential-fields">
-      {fields.map((field) => (
-        <label className="grid gap-1" htmlFor={`${idPrefix}-${field.name}`} key={field.name}>
-          <span className="pdpp-eyebrow">{field.label}</span>
-          {field.helpText ? (
-            <span className="pdpp-caption text-muted-foreground" id={`${idPrefix}-${field.name}-help`}>
-              {field.helpText}
-            </span>
-          ) : null}
-          <IcInput
-            aria-describedby={field.helpText ? `${idPrefix}-${field.name}-help` : undefined}
-            autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
-            className="min-h-11"
-            defaultValue={field.secret ? undefined : field.defaultValue}
-            id={`${idPrefix}-${field.name}`}
-            name={field.name}
-            placeholder={field.placeholder ?? undefined}
-            required={required && field.required}
-            type={field.type}
-          />
-        </label>
-      ))}
+      {fields.map((field) => {
+        const help = field.helpText ? splitHelpText(field.helpText) : null;
+        return (
+          <div className="grid gap-1" key={field.name}>
+            <label className="grid gap-1" htmlFor={`${idPrefix}-${field.name}`}>
+              <span className="pdpp-eyebrow">{field.label}</span>
+              {help ? (
+                <span className="pdpp-caption text-muted-foreground" id={`${idPrefix}-${field.name}-help`}>
+                  {help.short}
+                </span>
+              ) : null}
+            </label>
+            <IcInput
+              aria-describedby={help ? `${idPrefix}-${field.name}-help` : undefined}
+              autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
+              className="min-h-11"
+              defaultValue={field.secret ? undefined : field.defaultValue}
+              id={`${idPrefix}-${field.name}`}
+              name={field.name}
+              placeholder={field.placeholder ?? undefined}
+              required={required && field.required}
+              type={field.type}
+            />
+            {help?.more ? (
+              <details className="pdpp-caption text-muted-foreground">
+                <summary className="inline-flex min-h-11 cursor-pointer items-center underline decoration-dotted underline-offset-4">Where to find it</summary>
+                <p className="mt-1 break-words">{help.more}</p>
+              </details>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
