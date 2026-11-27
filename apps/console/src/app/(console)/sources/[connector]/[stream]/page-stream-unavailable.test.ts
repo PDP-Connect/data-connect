@@ -111,10 +111,11 @@ test("the kind page uses outlined view controls and sentence-case paging copy", 
   // DIRECTION.md, “Values”: buttons are outlined unless they are the page's one main action.
   assert.equal(src.match(/buttonVariants\(\{ className: "min-h-11", size: "sm", variant: "ghost" \}\)/g)?.length, 2);
   // DIRECTION.md, “Values”: section and control labels use sentence case.
-  assert.match(src, /const pagePrefix = `Page \$\{input\.pageNumber\} · \$\{input\.shown\}`/);
-  assert.doesNotMatch(src, /pagePrefix = `page /);
-  assert.doesNotMatch(src, /shown of \$\{/);
-  assert.match(src, /\$\{pagePrefix\} of \$\{input\.totalHeld\.toLocaleString\(\)\}`/);
+  const count = await readFile(new URL("./stream-page-count.ts", import.meta.url), "utf8");
+  assert.match(count, /const pagePrefix = `Page \$\{input\.pageNumber\} · \$\{input\.shown\}`/);
+  assert.doesNotMatch(count, /pagePrefix = `page /);
+  assert.doesNotMatch(count, /shown of \$\{/);
+  assert.match(count, /\$\{pagePrefix\} of \$\{input\.totalHeld\.toLocaleString\(\)\}`/);
 });
 
 test("the kind page shows its title, display name and time once in the row", async () => {
