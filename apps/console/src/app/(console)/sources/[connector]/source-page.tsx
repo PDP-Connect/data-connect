@@ -834,9 +834,9 @@ function ConnectorPageView({
   const scheduleSyncAvailable = connectionPrimaryAction?.kind === "reattach_schedule" && primaryAction.kind === "sync";
   const renderedAt = new Date(now);
   const signInRepairAvailable = credentialUpdateHref !== null;
-  // The Schedule section reads this page's own schedule; the sentence above it must read the same one.
+  // The Schedule section reads this page's own schedule; do not promise cadence when that read failed.
   const answerSource = model.scheduleError ? source : { ...source, schedule: model.schedule };
-  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
+  const sourceStatus = sourceStatusWords(answerSource, { now: renderedAt, offset, scheduleConfirmed: model.scheduleError === null, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
   const stateSentence = sourceStateSentence(answerSource, { now: renderedAt, offset, name: serviceName, signInRepairAvailable, streams: manifest.streams as StreamManifestEntry[], credentialKind: manifestCredentialKind(manifest) });
   const pageStatusAction = sourceStatus.action;
   const hasDeviceLocalRemediation = !archived && sourceStatus.action?.label === "See what to do on that computer";

@@ -7,7 +7,7 @@ import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import { Button } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
 import { ConnectorMark } from "../../components/connector-mark.tsx";
-import { type AppAccess, appSourceName, formatAppLastRead } from "../app-access.ts";
+import { type AppAccess, appSourceName, deriveAppReadingView, formatAppLastRead } from "../app-access.ts";
 import { personDate, personDay } from "../../history/day-cut.ts";
 import { RecentReading } from "./recent-reading.tsx";
 import { useAppRemoval } from "./use-app-removal.ts";
@@ -33,7 +33,7 @@ export function AppPage({
         : null,
     demo === "app-remove-failed"
   );
-  const reading = app.state === "reading" && !removal.removed.includes("all");
+  const { reading, visibleRows, showRemoveAll, justRemoved } = deriveAppReadingView(app, removal.removed);
   const question = (key: string, title: string, sentence: string, submit: () => void, label: string) =>
     removal.question === key ? (
       <div aria-label={title} className="my-3 rounded-md border border-border p-3" role="alertdialog">
@@ -68,7 +68,7 @@ export function AppPage({
       <p className="text-[13px] text-muted-foreground">
         {appPlaceLine(app)}
       </p>
-      {reading ? (
+      {showRemoveAll ? (
         <div className="mt-3 flex flex-col items-start gap-2">
           {app.verified ? null : (
             <p>DataConnect could not confirm who runs this app. Remove its access if you don’t recognise it.</p>
@@ -105,7 +105,7 @@ export function AppPage({
         <>
           <p className="mt-4">
             No longer has access.
-            {removal.removed.includes("all")
+            {justRemoved
               ? " You removed it just now."
               : app.stoppedAt
                 ? ` ${app.stoppedReason === "expired" ? "It ended" : "You removed it"} ${formatAppLastRead(app.stoppedAt)}.`
@@ -124,13 +124,11 @@ export function AppPage({
       {app.state === "waiting" ? null : (
         <Section className="mt-8" title={reading ? "What it can read" : "What it could read"}>
           <ul className="divide-y divide-border">
-            {app.sourceAccess
-              .filter((source) => !reading || (source.in_force && !removal.removed.includes(JSON.stringify(source.source))))
-              .map((source) => {
+            {visibleRows.map((source) => {
                 const key = JSON.stringify(source.source);
                 const name = source.name || appSourceName(source.source) || "Data source";
                 const kinds = appAccessKinds(source);
-                const canRead = reading && !removal.removed.includes(key);
+                const canRead = reading;
                 return (
                   <li className="py-4" key={key}>
                     <div className="flex flex-wrap items-center justify-between gap-3">

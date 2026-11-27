@@ -536,6 +536,21 @@ test("a service that was unavailable is not a wait on the maintainers", () => {
   assert.deepEqual(manual.action, { kind: "sync_now", label: "Try again", filled: true });
 });
 
+test("a stale schedule cannot promise a retry after the schedule read failed", () => {
+  const unavailable = { code: "upstream_unavailable", message: "Steam answered 503", origin: null, retryable: true };
+  const value = source({
+    connector_display_name: "Steam",
+    owner_state: blockedByMaintainer,
+    last_run: failedRun(unavailable),
+    rendered_verdict: verdict("Can't collect", [maintainerAction]),
+    schedule: automaticSchedule,
+  });
+  assert.equal(sourceAnswer(value, { now: NOW, scheduleConfirmed: false }).sentence.text,
+    "Steam was not available.");
+  assert.equal(sourceAnswer(value, { now: NOW, scheduleConfirmed: true }).sentence.text,
+    "Steam was not available. DataConnect will try again at the next check.");
+});
+
 test("a rejected saved key asks for the key, never for another sync", () => {
   const rejected = { code: "invalid_credentials", message: "Steam rejected the key", origin: null, retryable: false };
   const result = sourceStatusWords(source({ connector_display_name: "Steam", source_binding_kind: "static_secret", owner_state: blockedByMaintainer, last_run: failedRun(rejected), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
@@ -561,6 +576,23 @@ test("a sign-in that expired is the person's step even when the server blames th
   const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: blockedByMaintainer, last_run: failedRun(expired), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
   assert.equal(result.words, "Venmo asked for a new sign-in.");
   assert.equal(result.action?.label, "Sign in again");
+});
+
+test("a sign-in failure still needs the owner when this computer cannot start it", () => {
+  const expired = { code: "session_expired", message: "Venmo ended the session", origin: null, retryable: false };
+  const device = source({
+    connector_display_name: "Venmo",
+    source_kind: "local_device",
+    owner_state: blockedByMaintainer,
+    last_run: failedRun(expired),
+    rendered_verdict: verdict("Can't collect", [maintainerAction]),
+  });
+  const answer = sourceAnswer(device, { now: NOW });
+  assert.equal(answer.row, 16);
+  assert.match(answer.sentence.text, /new sign-in/);
+  assert.equal(answer.action, null);
+  assert.equal(answer.needsYou, true);
+  assert.equal(sourceStatusWords(device, { now: NOW }).needsYou, true);
 });
 
 test("an idle source that only syncs when asked is not broken", () => {

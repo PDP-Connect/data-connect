@@ -39,6 +39,23 @@ export interface AppAccess {
   verified: boolean;
 }
 
+/** Current app access with successful local removals applied before refresh. */
+export function deriveAppReadingView(app: Pick<AppAccess, "state" | "sourceAccess">, removed: readonly string[]) {
+  const removals = new Set(removed);
+  const waiting = app.state === "waiting";
+  const currentRows = app.state === "reading" && !removals.has("all")
+    ? app.sourceAccess.filter(row => row.in_force && !removals.has(JSON.stringify(row.source)))
+    : [];
+  const reading = currentRows.length > 0;
+  const stopped = !waiting && !reading;
+  return {
+    currentRows, reading, stopped,
+    showRemoveAll: reading,
+    justRemoved: app.state === "reading" && stopped && removed.length > 0,
+    visibleRows: waiting ? [] : reading ? currentRows : app.sourceAccess,
+  };
+}
+
 export function appSourceName(source: SourceDisplayInput | null | undefined): string | null {
   if (!source) {
     return null;

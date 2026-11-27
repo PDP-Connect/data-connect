@@ -59,6 +59,8 @@ export interface SourceStateSentence {
 }
 
 export interface SourceStatusOptions {
+  /** A failed fresh schedule read invalidates cadence promises from older snapshots. */
+  scheduleConfirmed?: boolean;
   now: Date;
   /**
    * Whether the data source's own page has an address where the person can
@@ -338,7 +340,7 @@ function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptio
     const text = `${sentence} DataConnect will try again at the next check.`;
     return { row: 12, words: text, tone: "plain", action: retryAfterFailure(source), sentence: { text, slot: null }, problem: true };
   }
-  return { row: 16, words: sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: label && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", label, true) : null, sentence: { text: sentence, slot: null }, problem: true };
+  return { needsOwner: cause.needsPerson || undefined, row: 16, words: sentence, tone: cause.action === "Sign in again" ? "attention" : "plain", action: label && canStartSync(source) ? action(cause.action === "Sign in again" ? "repair_sign_in" : "sync_now", label, true) : null, sentence: { text: sentence, slot: null }, problem: true };
 }
 
 const GAP_CONDITIONS = ["retryable_gap", "terminal_gap", "gaps", "partial"];
@@ -361,7 +363,7 @@ function didNotComeRow(source: RefConnectorSummary, options: SourceStatusOptions
   const words = known ? `${head} ${known.sentence}` : head;
   if (known?.needsPerson && known.action === "Sign in again") {
     const savedKey = savedKeyRejected(source, options, known);
-    return { row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
+    return { needsOwner: true, row: 16, words, tone: "attention", action: canStartSync(source) ? action("repair_sign_in", savedKey ? "Enter the key again" : "Sign in again", true) : null, sentence: { text: words, slot: null }, problem: true };
   }
   const scheduled = isScheduled(source.schedule ?? null);
   const slowDown = known?.slowDown === true && scheduled;
@@ -468,7 +470,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
 }
 
 export function sourceAnswer(source: RefConnectorSummary, options: SourceStatusOptions): SourceAnswer {
-  const matched = matchSourceStatus(source, options);
+  const matched = matchSourceStatus(options.scheduleConfirmed === false ? { ...source, schedule: null } : source, options);
   const { needsOwner, ...rest } = matched;
   return { ...rest, needsYou: needsOwner ?? actionIsRequired(matched.action) };
 }
