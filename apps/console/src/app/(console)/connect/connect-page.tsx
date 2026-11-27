@@ -7,15 +7,19 @@ import type { AppAccess } from "../grants/app-access.ts";
 import { assistantInstructions, claudeCodeCommand } from "./assistant-instructions.ts";
 import { CopyAddress } from "./copy-address.tsx";
 import { needsRemoteAccess } from "./remote-access.ts";
+/** The assistants that run on the internet, so they cannot use an address that only works on this network. */
+const REMOTE_ONLY_ASSISTANTS = new Set(["ChatGPT", "Claude"]);
+
 export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[] }) {
   const newest = apps[0];
+  const needsRemote = needsRemoteAccess(origin);
   return (
     <>
       <PageHeader title="Connect an app" />
       <p className="mb-6 text-muted-foreground">
         Give your assistant the address below. It will then ask you, on a DataConnect page, what it may read.
       </p>
-      {needsRemoteAccess(origin) ? (
+      {needsRemote ? (
         <div className="mb-6 rounded-md border border-warning p-4">
           <p>ChatGPT and Claude can't reach this DataConnect yet. Its address only works on your own network.</p>
           <p className="mt-2">
@@ -37,11 +41,20 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
           {assistantInstructions.map((assistant) => (
             <section key={assistant.name}>
               <h3 className="pdpp-title">{assistant.name}</h3>
-              <ol className="list-decimal space-y-2 pl-5 text-[13px]">
-                {assistant.steps.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </ol>
+              {needsRemote && REMOTE_ONLY_ASSISTANTS.has(assistant.name) ? (
+                <p className="text-[13px] text-muted-foreground">
+                  Not available until remote access is on.{" "}
+                  <Link className="underline underline-offset-4" href="/settings/remote-access">
+                    Set up remote access
+                  </Link>
+                </p>
+              ) : (
+                <ol className="list-decimal space-y-2 pl-5 text-[13px]">
+                  {assistant.steps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+              )}
               {assistant.name === "Claude Code" ? <CopyAddress address={claudeCodeCommand(origin)} command /> : null}
               {assistant.help ? (
                 <a

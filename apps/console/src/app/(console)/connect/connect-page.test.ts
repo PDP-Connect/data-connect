@@ -13,7 +13,7 @@ import { ConnectView } from "./connect-page.tsx";
 
 const REMOTE_ACCESS_GIVES_THIS_DATACONNECT_AN_RE = /Remote access gives this DataConnect an address on the internet/;
 const PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE = /pdpp-btn[^>]*href="\/settings\/remote-access"/;
-const WHITESPACE_PRE_WRAP_BREAK_ALL_RE = /whitespace-pre-wrap break-all/;
+const SCROLLS_SIDEWAYS_RE = /overflow-x-auto whitespace-nowrap/;
 const COPY_COMMAND_RE = /Copy command/;
 const NOW_ASK_IT_ANOTHER_APP_X27_RE = /Now ask it|Another app&#x27;s help/;
 const ONE_OTHER_APP_ARE_CONNECTED_RE = /1 other app are connected/;
@@ -24,13 +24,26 @@ test("local setup explains remote access, wraps the address and supplies a copya
   const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://localhost:7663", apps: [] }));
   assert.match(html, REMOTE_ACCESS_GIVES_THIS_DATACONNECT_AN_RE);
   assert.match(html, PDPP_BTN_HREF_SETTINGS_REMOTE_ACCESS_RE);
-  assert.match(html, WHITESPACE_PRE_WRAP_BREAK_ALL_RE);
+  assert.match(html, SCROLLS_SIDEWAYS_RE);
+  assert.doesNotMatch(html, /break-all/);
   assert.match(html, COPY_COMMAND_RE);
   assert.doesNotMatch(html, NOW_ASK_IT_ANOTHER_APP_X27_RE);
   assert.equal(
     claudeCodeCommand("http://localhost:7663"),
     "claude mcp add --transport http dataconnect 'http://localhost:7663/mcp'"
   );
+});
+// Round 7 (F9): paste-this-address steps must not be offered to assistants that cannot reach the address.
+test("while only this computer can reach DataConnect, ChatGPT and Claude show no paste steps, only the way to turn remote access on", () => {
+  const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "http://127.0.0.1:18708", apps: [] }));
+  assert.doesNotMatch(html, /Add custom MCP server/);
+  assert.doesNotMatch(html, /Add custom connector/);
+  assert.match(html, /Not available until remote access is on/);
+  assert.match(html, /claude mcp add/);
+  const remote = renderToStaticMarkup(React.createElement(ConnectView, { origin: "https://data.example", apps: [] }));
+  assert.match(remote, /Add custom MCP server/);
+  assert.match(remote, /Add custom connector/);
+  assert.doesNotMatch(remote, /Not available until remote access is on/);
 });
 test("two connected apps use the singular and offer a first question", () => {
   const html = renderToStaticMarkup(
