@@ -73,3 +73,13 @@ test("the sidebar search button and raw selects draw their edge with the control
     for (const select of source.match(/<select[^>]*className="[^"]*"/g) ?? []) assert.doesNotMatch(select, /border-border\b/, rel);
   }
 });
+
+test("Explore's toolbar buttons, query chevron and lens buttons, and the sources filter use the control border", () => {
+  const read = (rel: string) => readFileSync(resolve(here, rel), "utf8");
+  assert.match(/\.explore-page \.rr-x-toolbar-button,[^{]*\{[^}]*\}/.exec(read("(console)/explore/explore-page.css"))?.[0] ?? "", /border: 1px solid var\(--control-border\)/);
+  assert.match(/\.rr-s-filter__input \{[^}]*\}/.exec(read("(console)/sources/sources-view.css"))?.[0] ?? "", /var\(--control-border\)/);
+  const components = read("../../../../reference-implementation/vendor/brand-react/src/components.css");
+  for (const selector of [".rr-lens", ".rr-x-queryinput__chevron"]) {
+    assert.match(new RegExp(`^\\${selector} \\{[^}]*\\}`, "m").exec(components)?.[0] ?? "", /var\(--control-border/, selector);
+  }
+});

@@ -2529,7 +2529,7 @@
   letter-spacing: 0.04em;
   cursor: pointer;
   background: none;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border, var(--border-strong));
   border-radius: var(--radius-control);
   transition:
     color var(--duration-state) var(--ease-standard),
@@ -2915,7 +2915,7 @@
   color: var(--muted-foreground);
   cursor: pointer;
   background: none;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border, var(--border-strong));
   border-radius: var(--radius-control);
   transition:
     color var(--duration-state) var(--ease-standard),

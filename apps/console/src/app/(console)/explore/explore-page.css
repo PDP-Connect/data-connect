@@ -65,7 +65,7 @@
   font-weight: 500;
   color: var(--foreground);
   background: transparent;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
 }
 

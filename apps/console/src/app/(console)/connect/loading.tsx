@@ -8,7 +8,7 @@ import { NamedPageLoadingSkeleton } from "../components/named-page-loading.tsx";
 export default function ConnectAppLoading() {
   return (
     <RecordroomShellWithPalette>
-      <NamedPageLoadingSkeleton label="Connect an app" shape="text" title="Connect an app" />
+      <NamedPageLoadingSkeleton breadcrumbs={[{ href: "/grants", label: "Apps" }, { label: "Connect an app" }]} label="Connect an app" shape="text" title="Connect an app" />
     </RecordroomShellWithPalette>
   );
 }
