@@ -45,6 +45,25 @@ describe("playwright-runner build options", () => {
     })).toThrow(missingCore)
   })
 
+  it("uses the configured browser cache without resolving the hermetic package", () => {
+    const cache = join(tmpdir(), "release cache")
+    let calls = 0
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: cache },
+      resolveCoreManifest: () => {
+        calls++
+        throw new Error("the explicit cache must not look up playwright-core")
+      },
+    })).toBe(cache)
+    expect(calls).toBe(0)
+  })
+
+  it("keeps an absolute matrix output path when producing a lean binary", () => {
+    const outputPath = resolve(tmpdir(), "matrix output", "runner")
+    expect(parseBuildOptions(["--lean", "--output", outputPath, "--target", "node22-linux-x64"]))
+      .toEqual({ isLean: true, outputPath, requireBrowser: false, target: "node22-linux-x64" })
+  })
+
   it("does not download a browser during npm install", () => {
     const packageDocument = JSON.parse(
       readFileSync(resolve("playwright-runner/package.json"), "utf8")
