@@ -17,6 +17,7 @@ import {
   isFallbackConnectionLabel,
   isSetupFailedSource,
 } from "@pdpp/display";
+import { overdueScheduleSentence } from "../../lib/schedule-words.ts";
 import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
 import { listConnectionsByConnector } from "../../lib/ref-client.ts";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
@@ -1884,8 +1885,9 @@ function AutoPausedBannerRow({ banner, connectorId }: { banner: AutoPausedBanner
 export function ScheduleSummary({ displayName, notInstalled = false, schedule, scheduleError, sourceInstances, now = new Date(), disconnected = false, paused = false, showDeviceLink=true }: {
   notInstalled?: boolean; displayName: string; schedule: RefSchedule | null; scheduleError: string | null; sourceInstances: DeviceSourceInstance[]; now?: Date; disconnected?: boolean; paused?: boolean; showDeviceLink?:boolean;
 }) {
-  const text = disconnected ? "Not checked while disconnected." : notInstalled ? `Not checked until ${displayName} is installed again.` : paused ? "Not checked while paused." : scheduleSentence(displayName, scheduleError ? undefined : schedule);
-  const next = !disconnected && !paused && !notInstalled && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
+  const text = disconnected ? "Not checked while disconnected." : notInstalled ? `Not checked until ${displayName} is installed again.` : paused ? "Not checked while paused." : (scheduleError ? null : overdueScheduleSentence(displayName, schedule, now)) ?? scheduleSentence(displayName, scheduleError ? undefined : schedule);
+  const overdue = !scheduleError && !disconnected && !paused && !notInstalled && overdueScheduleSentence(displayName, schedule, now) !== null;
+  const next = !overdue && !disconnected && !paused && !notInstalled && schedule?.enabled && schedule.effective_mode !== "manual" && schedule.next_due_at && new Date(schedule.next_due_at).getTime() > now.getTime() ? sourceTimeLabel(schedule.next_due_at) : null;
   const device = sourceInstances[0];
   const deviceName = device?.device_display_name ?? device?.local_binding_name;
   const heard = sourceTimeLabel(device?.last_heartbeat_at);

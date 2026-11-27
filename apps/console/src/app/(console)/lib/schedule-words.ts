@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { formatRelative } from "@pdpp/display";
 import type { RefSchedule } from "./ref-client.ts";
 import { scheduleEnabled, scheduleIntervalSeconds } from "./schedule-evidence.ts";
 
@@ -51,4 +52,23 @@ export function scheduleState(schedule: ScheduleFacts | null | undefined): Sched
 
 export function isScheduled(schedule: ScheduleFacts | null | undefined): boolean {
   return scheduleState(schedule).kind === "scheduled";
+}
+
+/**
+ * The honest Schedule line for a scheduled source whose last successful sync is long
+ * past: more than two intervals ago and nothing running. Returns null otherwise, so the
+ * plain promise ("DataConnect checks X every hour.") stays for a source that keeps up.
+ */
+export function overdueScheduleSentence(
+  _name: string,
+  schedule: Pick<RefSchedule, "active_run_id" | "effective_mode" | "enabled" | "interval_seconds" | "last_successful_at"> | null | undefined,
+  now: Date,
+): string | null {
+  const state = scheduleState(schedule);
+  if (state.kind !== "scheduled" || !schedule || schedule.active_run_id) return null;
+  const seconds = scheduleIntervalSeconds(schedule.interval_seconds);
+  const last = schedule.last_successful_at ? Date.parse(schedule.last_successful_at) : Number.NaN;
+  if (seconds === null || Number.isNaN(last)) return null;
+  if (now.getTime() - last <= seconds * 2000) return null;
+  return `It should check ${state.every}, but the last successful sync was ${formatRelative(new Date(last), now.getTime())}.`;
 }

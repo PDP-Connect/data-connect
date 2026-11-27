@@ -547,3 +547,11 @@ test("a Schedule section with nothing to say draws no heading and no Change link
   const none = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: "Venmo", schedule: null, scheduleError: null, sourceInstances: [], now: new Date("2027-01-01") }));
   assert.match(none, /DataConnect checks Venmo only when you ask\./);
 });
+
+test("a schedule that has not produced a sync for days does not read as if all is well", async () => {
+  const { ScheduleSummary } = await import("./source-page.tsx");
+  const schedule = { effective_mode: "automatic", enabled: true, interval_seconds: 3600, last_successful_at: "2026-11-14T12:00:00.000Z", next_due_at: "2026-11-14T13:00:00.000Z" } as never;
+  const html = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: "Steam", schedule, scheduleError: null, sourceInstances: [], now: NOW }));
+  assert.match(html, /It should check every hour, but the last successful sync was 10 days ago\./);
+  assert.doesNotMatch(html, /DataConnect checks Steam every hour/);
+});
