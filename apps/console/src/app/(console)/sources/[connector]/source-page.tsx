@@ -17,6 +17,7 @@ import {
   isFallbackConnectionLabel,
   isSetupFailedSource,
 } from "@pdpp/display";
+import { StopCopying } from "../../connect/status/[connectionId]/stop-copying.tsx";
 import { overdueScheduleSentence } from "../../lib/schedule-words.ts";
 import { scheduleSentence } from "../../connect/status/[connectionId]/first-sync-outcome.ts";
 import { listConnectionsByConnector } from "../../lib/ref-client.ts";
@@ -843,6 +844,7 @@ function ConnectorPageView({
   const recordTotal = sourceRecordCount(source);
   const visibleTotal = recordTotal.count === null ? undefined : `${recordTotal.count.toLocaleString()} record${recordTotal.count === 1 ? "" : "s"}`;
 
+  const runningRunId = scheduleActiveRunId ?? recentRuns.find(isRunningSync)?.run_id ?? null;
   const headerActions = (
           hasDeviceLocalRemediation ? deviceStepsAvailable ? <DeviceSteps panelTargetId="source-device-steps">
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
@@ -883,7 +885,7 @@ function ConnectorPageView({
 
       {!neverConnected ? otherAccounts : null}
       <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
-      {headerActions ? <div className="mb-6 flex flex-wrap items-center gap-3" data-testid="source-actions">{headerActions}</div> : null}
+      {headerActions || (running && runningRunId) ? <div className="mb-6 flex flex-wrap items-center gap-3" data-testid="source-actions">{headerActions}{running && runningRunId ? <StopCopying name={serviceName} preview={Boolean(practiceState)} runId={runningRunId} /> : null}</div> : null}
 
       <div className="min-w-0 max-w-full" id="source-device-steps" />
 
@@ -901,7 +903,7 @@ function ConnectorPageView({
       </Section> : null}
       {!neverConnected ? apps : null}
       {!neverConnected && !archived && !oneTime ? <ScheduleSummary displayName={serviceName} notInstalled={installPromptShown} schedule={schedule} scheduleError={model.scheduleError} sourceInstances={sourceInstances} now={renderedAt} disconnected={revoked} paused={paused} showDeviceLink={sourceStatus.action?.kind !== "view_device"} /> : null}
-      {!archived && !neverConnected ? <RecentRunsSection recentRuns={recentRuns.filter((run) => !["pending", "started", "in_progress", "running"].includes(run.status))} /> : null}
+      {!archived && !neverConnected ? <RecentRunsSection recentRuns={[...recentRuns.filter(isRunningSync), ...recentRuns.filter((run) => !isRunningSync(run))]} /> : null}
           {configuration && !neverConnected ? (
             <ConnectionConfiguration
               config={configuration}
@@ -1680,11 +1682,15 @@ function syncFailureSentence(reason: string | null): string | null {
   return null;
 }
 
+function isRunningSync(sync: RunSummary): boolean {
+  return ["pending", "started", "in_progress", "running"].includes(sync.status);
+}
+
 function syncOutcome(sync: RunSummary): string {
   if (["succeeded", "completed", "success", "succeeded_with_gaps"].includes(sync.status)) return "Finished";
   if (["cancelled", "canceled", "rejected"].includes(sync.status)) return "Stopped";
   if (["failed", "error"].includes(sync.status)) return "Failed";
-  if (["pending", "started", "in_progress", "running"].includes(sync.status)) return "Syncing now";
+  if (isRunningSync(sync)) return "In progress";
   if (["waiting_for_input", "needs_input", "waiting_for_owner"].includes(sync.status)) return "Needs you";
   return "Stopped";
 }

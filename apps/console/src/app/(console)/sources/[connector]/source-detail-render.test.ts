@@ -597,3 +597,12 @@ test("the reason comes before its action on the source page", async (t) => {
   }
   assert.ok(checked > 0);
 });
+
+test("while a sync runs, Recent syncs lists it first and the page offers Stop", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const document = (await renderDemo("status-11")).window.document;
+  const section = [...document.querySelectorAll("section")].find((node) => node.querySelector("h2")?.textContent === "Recent syncs");
+  assert.ok(section, "Recent syncs is listed");
+  assert.match(section.querySelector("li")?.textContent ?? "", /In progress/);
+  assert.ok([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "Stop"), "Stop is offered");
+});
