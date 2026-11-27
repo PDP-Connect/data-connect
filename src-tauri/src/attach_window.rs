@@ -635,6 +635,11 @@ pub(crate) async fn detach_and_restart<R: Runtime>(app: &AppHandle<R>) -> Result
     Ok(notice)
 }
 
+#[cfg(test)]
+#[derive(Default)]
+/// (window label, URL, cookie name) of each deletion `delete_cookies_named` would make.
+struct ConsoleCookieDeletesForTest(Mutex<Vec<(String, String, &'static str)>>);
+
 /// Delete the remote session cookie from the console webview's store.
 /// Cookies are keyed by host, not port, so a stale remote cookie could
 /// otherwise reach a different server on the same host. Session cookies are
@@ -647,6 +652,17 @@ pub(crate) async fn forget_console_session_cookie<R: Runtime>(app: &AppHandle<R>
     let Ok(url) = tauri::Url::parse(origin) else {
         return;
     };
+    #[cfg(test)]
+    if let Some(deletes) = app.try_state::<ConsoleCookieDeletesForTest>() {
+        if let Ok(mut calls) = deletes.0.lock() {
+            calls.push((
+                window.label().to_string(),
+                url.to_string(),
+                attach::OWNER_SESSION_COOKIE,
+            ));
+        }
+        return;
+    }
     match crate::webview_cookies::delete_cookies_named(
         window.as_ref(),
         &url,

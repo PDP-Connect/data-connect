@@ -24,6 +24,7 @@ fn app(data_root: &Path, environment_override: bool) -> tauri::App<MockRuntime> 
     let app = mock_app_with_data_dir(data_root);
     app.manage(AttachWindowState::default());
     app.manage(RelaunchRecorderForTest(Mutex::new(Vec::new())));
+    app.manage(ConsoleCookieDeletesForTest::default());
     app.manage(EnvironmentOverrideForTest(environment_override));
     app
 }
@@ -897,7 +898,9 @@ fn detach_from_the_window_restarts_without_a_session() {
     let data_root = tempfile::tempdir().expect("tempdir");
     let app = app(data_root.path(), false);
     let attach_window = window(&app, ATTACH_WINDOW_LABEL);
-    saved(data_root.path(), &closed_origin());
+    let _console = window(&app, crate::unified::CONSOLE_WINDOW_LABEL);
+    let old_origin = closed_origin();
+    saved(data_root.path(), &old_origin);
     let notice =
         body(invoke_from(&attach_window, "detach_from_server", json!({})).expect("detach"));
     assert!(notice
@@ -906,6 +909,37 @@ fn detach_from_the_window_restarts_without_a_session() {
         .starts_with("Disconnected from 127.0.0.1:"));
     assert_eq!(relaunches(&app), vec![None]);
     assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+    assert_eq!(
+        *app.state::<ConsoleCookieDeletesForTest>().0.lock().unwrap(),
+        console_cookie_delete(&old_origin)
+    );
+}
+
+fn console_cookie_delete(origin: &str) -> Vec<(String, String, &'static str)> {
+    let url = tauri::Url::parse(origin).expect("origin").to_string();
+    vec![(
+        crate::unified::CONSOLE_WINDOW_LABEL.to_string(),
+        url,
+        "pdpp_owner_session",
+    )]
+}
+
+/// With no console window open there is no cookie store to clean, and detach
+/// still completes.
+#[test]
+fn detach_without_a_console_window_deletes_no_cookie() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    saved(data_root.path(), &closed_origin());
+    invoke_from(&attach_window, "detach_from_server", json!({})).expect("detach");
+    assert_eq!(relaunches(&app), vec![None]);
+    assert!(app
+        .state::<ConsoleCookieDeletesForTest>()
+        .0
+        .lock()
+        .unwrap()
+        .is_empty());
 }
 
 /// Attaching elsewhere ends the old pairing: the old server is asked to
@@ -915,6 +949,7 @@ fn switching_servers_signs_out_of_the_previous_one() {
     let data_root = tempfile::tempdir().expect("tempdir");
     let app = app(data_root.path(), false);
     let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let _console = window(&app, crate::unified::CONSOLE_WINDOW_LABEL);
     let (previous, previous_server) =
         serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
     saved(data_root.path(), &previous);
@@ -950,6 +985,10 @@ fn switching_servers_signs_out_of_the_previous_one() {
             .expect("saved")
             .origin,
         origin
+    );
+    assert_eq!(
+        *app.state::<ConsoleCookieDeletesForTest>().0.lock().unwrap(),
+        console_cookie_delete(&previous)
     );
 }
 
