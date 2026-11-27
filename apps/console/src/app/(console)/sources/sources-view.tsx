@@ -129,12 +129,12 @@ export function SourcesView({
           ))}
           {filteredRows.length === 0 ? (
             <li className="rr-s-no-results">
-              {query ? "No data sources match that filter." : onlyDisconnected ? `No connected data sources. ${disconnected.length.toLocaleString()} ${disconnected.length === 1 ? "is" : "are"} disconnected.` : "No data sources on this page."}
+              {query ? "No data sources match that filter." : onlyDisconnected ? "No data sources are connected." : "No data sources on this page."}
             </li>
           ) : null}
         </ul>
 
-      <FoldedGroup open={onlyDisconnected} instances={disconnected} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Disconnected" note="These data sources are disconnected. Their records stay available. Set up again to start collecting again." />
+      <FoldedGroup open={onlyDisconnected} instances={disconnected} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Disconnected" note="Their records stay available. Set up again to start collecting again." />
       <FoldedGroup instances={archived} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Archived" note="These data sources no longer sync. Their records stay available." />
       <FoldedGroup instances={setupNotCompleted} interactive={interactive} reactivateAction={reactivateAction} resumeAction={resumeAction} resumeScheduleAction={resumeScheduleAction} resumeSetupAction={resumeSetupAction} revokeAction={revokeAction} runNowAction={runNowAction} label="Setup never completed" note="These setup attempts did not finish. No records were collected. Continue setup to try again." />
       </section>

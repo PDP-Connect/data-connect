@@ -367,11 +367,13 @@ test("only disconnected data sources: say so and show them, never an empty page 
   const base = instances.find((instance) => !(instance.archived || instance.revoked || instance.setupFailed));
   assert.ok(base);
   const one = renderSourcesView([{ ...base, id: "gone", revoked: true }]);
-  assert.match(one, /No connected data sources\. 1 is disconnected\./);
+  assert.match(one, /No data sources are connected\./);
+  // Round 8 (F37): "disconnected" once in the summary and once in the row, not in a line and a note as well.
+  assert.ok((one.match(/disconnected/gi) ?? []).length <= 2, "summary and row only");
   assert.doesNotMatch(one, /No data sources on this page/);
   assert.match(one, /<details[^>]*\bopen\b[^>]*>\s*<summary>Disconnected · 1/);
   const two = renderSourcesView([{ ...base, id: "gone", revoked: true }, { ...base, id: "gone-2", revoked: true }]);
-  assert.match(two, /No connected data sources\. 2 are disconnected\./);
+  assert.match(two, /No data sources are connected\./);
   // A connected source keeps the group closed.
   assert.doesNotMatch(renderSourcesView([base, { ...base, id: "gone", revoked: true }]), /<details[^>]*\bopen\b/);
 });
