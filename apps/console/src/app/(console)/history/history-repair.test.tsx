@@ -11,7 +11,7 @@ import { buildHomeViewModel } from "../components/views/standing-view-model.ts";
 import { syncPractice } from "./practice.ts";
 test("expired sign-in nested beneath generic run failure keeps its known action",()=>{
   const cause=resolveSyncCause({reason:"connector_reported_failed",connector_error:{code:"service_session_inactive",cause_chain:[{message:"The authenticated session is no longer active."}]}},"Northwind");
-  assert.deepEqual(cause,{sentence:"Northwind asked for a new sign-in.",action:"Sign in again",known:true});
+  assert.deepEqual(cause,{sentence:"Northwind asked for a new sign-in.",action:"Sign in again",known:true,needsPerson:true});
   assert.equal(resolveSyncCause({reason:"unknown",error:"machine_failure_code=123"},"Northwind").known,false);
 });
 test("same failed-sync evidence gives every current surface the history cause and action",()=>{

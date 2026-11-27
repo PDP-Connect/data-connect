@@ -147,7 +147,7 @@ test("finished pages keep the shared heading wrapper, button gaps and missing-ro
       const missingRow = dom.window.document.querySelector('[aria-label="Didn\'t come"] li');
       assert.ok(missingRow);
       assert.ok(missingRow.classList.contains("px-3"));
-      assert.match(missingRow.textContent ?? "", /the next time DataConnect checks Northwind/);
+      assert.match(missingRow.textContent ?? "", /Nothing is scheduled for Northwind, so it will not try again by itself/);
     } else {
       const start = Array.from(dom.window.document.querySelectorAll("a")).find(node => node.textContent === "Start again");
       assert.ok(start);
