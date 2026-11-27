@@ -843,10 +843,7 @@ function ConnectorPageView({
   const recordTotal = sourceRecordCount(source);
   const visibleTotal = recordTotal.count === null ? undefined : `${recordTotal.count.toLocaleString()} record${recordTotal.count === 1 ? "" : "s"}`;
 
-  return (
-    <RecordroomShellWithPalette>
-      <PageHeader
-        actions={
+  const headerActions = (
           hasDeviceLocalRemediation ? deviceStepsAvailable ? <DeviceSteps panelTargetId="source-device-steps">
             <ConnectionDeviceRecoverySteps connectionHealth={connectionHealth} localDeviceProgress={overview.localDeviceProgress ?? null} renderedVerdict={connectionRenderedVerdict} sourceInstances={sourceInstances} connectionId={connectorInstanceId ?? connectionId} connectorId={connectorId} providerOrigin={model.providerOrigin} />
           </DeviceSteps> : null : running && !(sourceStatus.row === 8 && pageStatusAction?.kind === "server_cta") ? null : <ConnectorHeaderActions
@@ -866,7 +863,11 @@ function ConnectorPageView({
             storedCredentialUpdateHref={storedCredentialUpdateHref}
             statusAction={pageStatusAction}
           />
-        }
+  );
+
+  return (
+    <RecordroomShellWithPalette>
+      <PageHeader
         breadcrumbs={[{ href: "/sources", label: "Data sources" }]}
         count={neverConnected ? undefined : visibleTotal}
         description={undefined}
@@ -882,6 +883,7 @@ function ConnectorPageView({
 
       {!neverConnected ? otherAccounts : null}
       <SourceStateSentenceText connectionId={connectionId} sentence={stateSentence} status={sourceStatus} />
+      {headerActions ? <div className="mb-6 flex flex-wrap items-center gap-3" data-testid="source-actions">{headerActions}</div> : null}
 
       <div className="min-w-0 max-w-full" id="source-device-steps" />
 
@@ -1241,13 +1243,13 @@ function ConnectorPrimaryHeaderAction({
     return <Link className={buttonVariants({ size: "sm", variant: "default" })} href={addSourceHrefForConnector(connectorId)}>Set up again</Link>;
   }
   if (statusAction?.kind === "resume") {
-    return <ResumeConnectionButton connectionId={connectionId} label={statusAction.label} />;
+    return <ResumeConnectionButton connectionId={connectionId} filled={statusAction.filled} label={statusAction.label} />;
   }
   if (statusAction?.kind === "repair_sign_in") {
-    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={browserSessionRepairHref ?? storedCredentialUpdateHref ?? credentialUpdateHref ?? addSourceHrefForConnector(connectorId)}>{statusAction.label}</Link>;
+    return <Link className={buttonVariants({ size: "sm", variant: statusAction.filled ? "default" : "ghost" })} href={browserSessionRepairHref ?? storedCredentialUpdateHref ?? credentialUpdateHref ?? addSourceHrefForConnector(connectorId)}>{statusAction.label}</Link>;
   }
   if (statusAction?.kind === "repair_credential" && credentialUpdateHref) {
-    return <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;
+    return <Link className={buttonVariants({ size: "sm", variant: statusAction.filled ? "default" : "ghost" })} href={credentialUpdateHref}>{statusAction.label}</Link>;
   }
   if (statusAction?.kind === "continue_setup") {
     return <form action={resumeSetupConnectionAction}><input name="connection_id" type="hidden" value={routeConnectionId} /><IcButton size="sm" type="submit" variant={statusAction.filled ? "default" : "ghost"}>{statusAction.label}</IcButton></form>;
@@ -1285,8 +1287,8 @@ function ConnectorPrimaryHeaderAction({
   return null;
 }
 
-function ResumeConnectionButton({ connectionId, label }: { connectionId: string | null; label: string }) {
-  return <form action={resumeConnectionAction}><input name="connection_id" type="hidden" value={connectionId ?? ""} /><IcButton size="sm" type="submit" variant="ghost">{label}</IcButton></form>;
+function ResumeConnectionButton({ connectionId, filled, label }: { connectionId: string | null; filled: boolean; label: string }) {
+  return <form action={resumeConnectionAction}><input name="connection_id" type="hidden" value={connectionId ?? ""} /><IcButton size="sm" type="submit" variant={filled ? "default" : "ghost"}>{label}</IcButton></form>;
 }
 
 function reauthActionPresentation({

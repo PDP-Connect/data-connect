@@ -474,7 +474,7 @@ test("positive kinds never carry the whole-kind failure sentence", async () => {
 
 test("polished controls give disconnected setup one filled action and device navigation one home", async () => {
   const disconnected = (await renderDemo("status-3")).window.document;
-  assert.match([...disconnected.querySelectorAll("header a")].find((node) => node.textContent === "Set up again")?.className ?? "", /variant-default/);
+  assert.match([...disconnected.querySelectorAll("[data-testid=source-actions] a")].find((node) => node.textContent === "Set up again")?.className ?? "", /variant-default/);
   const device = (await renderDemo("status-10-local-device")).window.document;
   assert.equal([...device.querySelectorAll("a")].filter((node) => node.textContent === "View this device").length, 1);
   assert.equal((visibleOutsideDetails(await renderDemo("status-19")).match(/Rename/g) ?? []).length, 1);
@@ -513,7 +513,7 @@ for(const state of AGREEMENT_STATES) {
     assert.ok(element.textContent?.startsWith(sentence.text));
     const primaryLabels=new Set(["Try again","Sign in again","Install again","Resume schedule","See what to do on that computer","View this device"]);
     if(status.action?.label === "Sync now") {primaryLabels.add("Sync now");}
-    const actual=[...dom.window.document.querySelectorAll("header a, header button")].map(node=>node.textContent?.trim() ?? "").filter(label=>primaryLabels.has(label));
+    const actual=[...dom.window.document.querySelectorAll("[data-testid=source-actions] a, [data-testid=source-actions] button")].map(node=>node.textContent?.trim() ?? "").filter(label=>primaryLabels.has(label));
     assert.deepEqual(actual,status.action ? [status.action.label] : []);
     dom.window.close();
   });
@@ -554,4 +554,46 @@ test("a schedule that has not produced a sync for days does not read as if all i
   const html = renderToStaticMarkup(createElement(ScheduleSummary, { displayName: "Steam", schedule, scheduleError: null, sourceInstances: [], now: NOW }));
   assert.match(html, /It should check every hour, but the last successful sync was 10 days ago\./);
   assert.doesNotMatch(html, /DataConnect checks Steam every hour/);
+});
+
+test("every required recovery action on the source page is filled; optional ones are not", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const wrong: string[] = [];
+  for (let row = 1; row <= 24; row++) {
+    const model = buildRecoveryDemoModel(row as SourceStatusRow);
+    const status = sourceStatusWords(model.source, { now: NOW });
+    // A disconnected source has one way forward; its Set up again is filled by the round-7 rule.
+    if (!status.action || row === 3) continue;
+    const document = (await renderDemo(`status-${row}`)).window.document;
+    const control = [...document.querySelectorAll("[data-testid=source-actions] a, [data-testid=source-actions] button")].find((node) => node.textContent?.trim() === status.action?.label);
+    if (!control) { wrong.push(`row ${row} ${status.action.label} not in header`); continue; }
+    const filled = /variant-default/.test(control.className) || control.getAttribute("data-variant") === "default";
+    if (filled !== status.action.filled) wrong.push(`row ${row} ${status.action.label} filled=${filled} expected=${status.action.filled}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("the header action takes its style from the shared required-action fact, not a fixed one", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./source-page.tsx", import.meta.url), "utf8");
+  for (const kind of ["repair_sign_in", "repair_credential", "resume"]) {
+    const branch = source.slice(source.indexOf(`statusAction?.kind === "${kind}"`)).split("\n").slice(0, 3).join("\n");
+    assert.match(branch, /statusAction\.filled/, kind);
+    assert.doesNotMatch(branch, /variant: "ghost"|variant="ghost"/, kind);
+  }
+});
+
+test("the reason comes before its action on the source page", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  let checked = 0;
+  for (const row of [4, 8, 16]) {
+    const document = (await renderDemo(`status-${row}`)).window.document;
+    const status = sourceStatusWords(buildRecoveryDemoModel(row as SourceStatusRow).source, { now: NOW });
+    const sentence = document.querySelector('[data-testid="source-state-sentence"]');
+    const control = [...document.querySelectorAll("a, button")].find((node) => node.textContent?.trim() === status.action?.label);
+    if (!sentence || !control) continue;
+    checked++;
+    assert.ok(sentence.compareDocumentPosition(control) & 4, `row ${row}: the button follows the sentence`);
+  }
+  assert.ok(checked > 0);
 });
