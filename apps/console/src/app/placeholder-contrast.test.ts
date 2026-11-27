@@ -63,3 +63,13 @@ test("inputs, selects and outlined buttons draw their edge with the control bord
   assert.doesNotMatch(shell, /border(-color)?:[^;]*(?<!, )var\(--input\)/);
   assert.match(read("../../../../reference-implementation/vendor/operator-ui/src/ui/button.tsx"), /border-\[var\(--control-border\)\]/);
 });
+
+test("the sidebar search button and raw selects draw their edge with the control border", () => {
+  const read = (rel: string) => readFileSync(resolve(here, rel), "utf8");
+  const shell = read("../../../../reference-implementation/vendor/brand-react/src/shell.css");
+  assert.match(/\.rr-search-button \{[^}]*\}/.exec(shell)?.[0] ?? "", /border: 1px solid var\(--control-border, var\(--border\)\)/);
+  for (const rel of ["(console)/audit/activity-view.tsx", "(console)/syncs/daily-syncs-view.tsx", "(console)/sources/[connector]/[stream]/record-order-select.tsx"]) {
+    const source = read(rel);
+    for (const select of source.match(/<select[^>]*className="[^"]*"/g) ?? []) assert.doesNotMatch(select, /border-border\b/, rel);
+  }
+});

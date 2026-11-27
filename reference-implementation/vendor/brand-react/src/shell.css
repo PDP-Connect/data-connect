@@ -216,13 +216,13 @@ html:has(.rr-app) {
   text-align: left;
   cursor: pointer;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border, var(--border));
   border-radius: var(--radius-control);
 }
 .rr-search-button:hover {
   color: var(--foreground);
   background: var(--muted);
-  border-color: var(--border-strong);
+  border-color: var(--foreground);
 }
 
 /* ─── Main column ─────────────────────────────────────────────────── */

@@ -22,7 +22,7 @@ export function RecordOrderSelect({
       <span>Sort</span>
       <select
         aria-label="sort records"
-        className="rounded-md border border-border bg-background px-2 py-1 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="rounded-md border border-[var(--control-border)] bg-background px-2 py-1 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onChange={(event) => {
           router.replace(recordOrderHref(pathname, currentSearch, event.currentTarget.value as "asc" | "desc"), {
             scroll: false,
