@@ -334,12 +334,16 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
     const bookkeeping = new Set(["storage_migration_ledger"]);
     // What the upgrade may change in a value: id columns, a connection named after its retired
     // id, and the id field inside a stored manifest.
-    const upgraded = (name: string, column: string, value: unknown): unknown => {
+    const upgraded = (name: string, row: Record<string, unknown>, column: string, value: unknown): unknown => {
       if (typeof value !== "string") {
         return value;
       }
-      if (ID_COLUMNS.has(column) || (name === "connector_instances" && column === "display_name")) {
+      if (ID_COLUMNS.has(column)) {
         return renamed(value);
+      }
+      // A connection's label follows the rename only on a connection of the renamed connector.
+      if (name === "connector_instances" && column === "display_name") {
+        return renamed(String(row.connector_id)) === renamed(value) ? renamed(value) : value;
       }
       if (name === "connectors" && column === "manifest") {
         const manifest = JSON.parse(value) as { connector_id?: string };
@@ -355,6 +359,10 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
       tableOf(before, "records").rows.length > 0 && tableOf(before, "record_changes").rows.length > 0,
       "the fixture holds owner records"
     );
+    assert.ok(before.storage_migration_ledger, "the fixture holds a migration ledger");
+    // A table first start creates holds no rows, so nothing escapes the comparison below.
+    const created = Object.keys(after).filter((name) => !before[name] && tableOf(after, name).rows.length > 0);
+    assert.deepEqual(created, [], "first start fills no table the old store lacked");
     for (const [name, table] of Object.entries(before)) {
       // Every column of every row is unchanged, except that each retired id is renamed.
       const columns = table.columns.filter((column) => column !== advancing[name]);
@@ -364,7 +372,7 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
           .filter((row) => !collided[name]?.(row))
           .map((row) =>
             Object.fromEntries(
-              Object.entries(row).map(([column, value]) => [column, upgraded(name, column, value)])
+              Object.entries(row).map(([column, value]) => [column, upgraded(name, row, column, value)])
             )
           ),
       };
