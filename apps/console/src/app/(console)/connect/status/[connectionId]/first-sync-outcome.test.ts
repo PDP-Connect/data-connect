@@ -285,7 +285,11 @@ test("failed: a known cause gets its plain sentence and action, the raw reason s
   assert.doesNotMatch(text, /venmo_session_failed|What went wrong/);
   assert.match(text, /Technical details/);
   const noRun = firstSyncOutcome(status({ ...failed, run: null }), "Venmo", withOrders);
-  assert.ok(noRun.kind === "failed" && noRun.technical === null && noRun.wentWrong === failed.last_error?.reason);
+  assert.ok(noRun.kind === "failed" && noRun.technical === null);
+  // Owner text is never a raw code: with no run to link to the fold holds the server's plain remediation, or nothing.
+  assert.equal(noRun.wentWrong, null);
+  const prose = firstSyncOutcome(status({ ...failed, run: null, last_error: { reason: "venmo_session_failed: x", remediation: "Wait a few minutes and try again." } }), "Venmo", withOrders);
+  assert.ok(prose.kind === "failed" && prose.wentWrong === "Wait a few minutes and try again.");
 });
 test("partial: a gap with no known cause says DataConnect could not copy it", () => {
   const outcome = firstSyncOutcome(status(), "Northwind", { ...withOrders, gaps: [{ kind: "skip_result", stream: "returns", reason: "odd", message: "odd_code: raw detail" }] });

@@ -161,6 +161,12 @@ function savedSecretLabel(status: ConnectionSetupStatus): string {
 		: "Enter the key again";
 }
 
+/** Prose only: a single token, or one with a code-style word, is not owner text. */
+function plainRemediation(value: string | null | undefined): string | null {
+	const text = value?.trim();
+	return text && /\s/.test(text) && !/\b[a-z0-9]+_[a-z0-9_]+\b/i.test(text) ? text : null;
+}
+
 function retryLabel(status: ConnectionSetupStatus): string {
 	if (status.setup_kind === "manual_upload") return "Choose another file";
 	if (status.setup_kind === "static_secret") return savedSecretLabel(status);
@@ -343,10 +349,9 @@ export function firstSyncOutcome(
 					: undefined,
 			// With a run id the raw reason belongs to the technical page only; the
 			// fold stays for a failure that has no run to link to.
+			// The fold holds the server's plain remediation, never the raw reason code.
 			wentWrong:
-				title || technical
-					? null
-					: status.last_error?.reason?.trim() || null,
+				title || technical ? null : plainRemediation(status.last_error?.remediation),
 		};
 	}
 	if (NEEDS_YOU_STATES.has(status.setup_state)) {
