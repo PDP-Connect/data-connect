@@ -14,7 +14,7 @@ import {SourceStatusText} from "../components/source-status-text.tsx";
 import {SourceStateSentenceText} from "../sources/[connector]/source-state-sentence.tsx";
 import {applyCurrentSourceWords} from "./current-source-words.ts";
 import {withCurrentSourceState} from "../syncs/current-source-state.ts";
-import {SyncHistoryDays,syncDayProblem} from "../syncs/daily-syncs-view.tsx";
+import {historyActionLabel,SyncHistoryDays,syncDayProblem} from "../syncs/daily-syncs-view.tsx";
 import {oneSyncPractice} from "../syncs/[runId]/one-sync-model.ts";
 import {syncPractice} from "./practice.ts";
 import type {HistorySource} from "./source-names.ts";
@@ -53,7 +53,9 @@ for(const state of AGREEMENT_STATES) { test(`five places agree: ${state}`,async(
   assert.ok(sourceStateSentence(source,{now,name:"Northwind"}).text.startsWith("The computer that holds this data"));
  }
  const expected=status.action?[status.action.label]:[];
- assert.deepEqual(labels(history),currentRow.last_outcome==="failed"?expected:[],"history action must be the current source action, drawn only under a sync that failed");
+ const historyLabels=[...new JSDOM(renderToStaticMarkup(history)).window.document.querySelectorAll("a")].map(link=>link.textContent ?? "").filter(label=>/^Open .+ to /.test(label));
+ // The history button opens the data source's page, so it names the step and says it opens the page.
+ assert.deepEqual(historyLabels,currentRow.last_outcome==="failed"?expected.map(label=>historyActionLabel(label,historySource.name)):[],"history action must be the current source action, drawn only under a sync that failed");
  assert.deepEqual(labels(sync),expected,"sync page action must be the current source action");
  assert.equal(home.needs.filter(need=>need.kind!=="approval").length,status.action?1:0,"Needs you equals sources with an action, including lifecycle recovery");
  assert.equal(syncDayProblem(currentRow),Boolean((historySource as HistorySource & {currentProblem:boolean}).currentProblem),"Only problems uses the current answer");
