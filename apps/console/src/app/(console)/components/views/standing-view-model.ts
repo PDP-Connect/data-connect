@@ -90,6 +90,19 @@ export interface HomeAppRow {
   reads: string;
 }
 
+/**
+ * What an empty Data sources list says. Sources that need the person are listed above, not in the list,
+ * so "No active data sources." would contradict the count and the Needs you row.
+ */
+export function sourcesEmptyLine(input: { needingSources: readonly { name: string }[]; total: number | null }): string {
+  const needing = input.needingSources.length;
+  if (needing === 0) return "No active data sources.";
+  if (input.total !== null && needing >= input.total) {
+    return needing === 1 ? `${input.needingSources[0]?.name} is listed above under Needs you.` : `All ${needing} are listed above under Needs you.`;
+  }
+  return "The rest are not active.";
+}
+
 export interface HomeData {
   addSourceHref: string;
   activeTokenCount: number;
@@ -110,6 +123,8 @@ export interface HomeData {
   needsMore: boolean;
   needsVisible: boolean;
   noSources: boolean;
+  /** The one sentence for an empty Data sources list; null when the list is shown or the section needs none. */
+  sourcesEmptyLine: string | null;
   /** Logos for the first-run row: only services this install's catalog offers. */
   offeredSources: { iconId: string; name: string }[];
   recordCount: string | null;
@@ -406,6 +421,9 @@ export function buildHomeViewModel(input: HomeInputs): HomeData {
     needsMore: !needsReadFailed && input.approvalsHaveMore,
     needsVisible: needs.length > 0 || needsReadIncomplete,
     noSources,
+    sourcesEmptyLine: dataSources.length === 0 && !sourceReadFailed && !firstRun && !noSources
+      ? sourcesEmptyLine({ needingSources: needs.filter((need) => need.source), total: dataSourceTotal })
+      : null,
     offeredSources: (input.offeredSources ?? []).slice(0, 5).map((entry) => ({ iconId: entry.connectorKey, name: entry.displayName })),
     recordCount: recordTotal === null ? null : number(recordTotal),
     reloadHref: input.reloadHref,

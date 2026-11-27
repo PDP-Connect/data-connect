@@ -11,6 +11,7 @@ import { classifyKnownGaps, type KnownGap } from "../../../lib/run-gaps.ts";
 import { RETRY_AFTER_FAILURE_LABEL, emptyFirstSyncWords, resolveSyncCause } from "../../../lib/sync-cause.ts";
 import type { StreamManifestEntry } from "@pdpp/display";
 import { sourceRecordLabel } from "../../../lib/source-record-label.ts";
+import { keptSecretWord } from "../../../lib/saved-secret-words.ts";
 import type {
 	ConnectionSetupStatus,
 	RefSchedule,
@@ -98,7 +99,7 @@ export type FirstSyncOutcome =
 			readonly wentWrong: string | null;
 			readonly technical: OutcomeLink | null;
 	  }
-	| { readonly kind: "paused"; readonly open: OutcomeLink }
+	| { readonly kind: "paused"; readonly kept: string; readonly open: OutcomeLink }
 	| {
 			readonly kind: "revoked";
 			readonly note: string;
@@ -290,6 +291,7 @@ export function firstSyncOutcome(
 	if (status.setup_state === "paused") {
 		return {
 			kind: "paused",
+			kept: `Paused. Your records and ${keptSecretWord(status.credential.credential_kind)} are kept.`,
 			open: {
 				href: sourceRecordsHref(status),
 				label: outcomeCopy.seeData(name),

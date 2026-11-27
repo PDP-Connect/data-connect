@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { TechnicalDetailsLink } from "../../components/technical-details-link.tsx";
 import { SyncNowButton } from "../../sources/[connector]/sync-now-button.tsx";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
@@ -40,6 +41,6 @@ export function OneSyncView({ model, offset, practice = false }: { model: OneSyn
     {m.missing.some(row=>row.name === "records") ? <p>Some records didn’t come.</p> : null}
     {m.missing.some(row=>row.name !== "records") ? <Section title="Didn't come">{m.missing.filter(row=>row.name!=="records").map(row => <div className="py-3" key={row.name}><p>{row.name}</p><p>Didn’t come at this sync.</p></div>)}</Section> : null}
     {m.connection ? <p className="my-6"><Link className="text-primary underline-offset-4 hover:underline" href={`/sources/${encodeURIComponent(m.connection)}`}>See {m.name}</Link></p> : null}
-    <Link className="text-[13px] text-muted-foreground" href={`/syncs/${encodeURIComponent(m.id)}/technical${practice ? "?demo=technical" : ""}`}>Technical details</Link>
+    <TechnicalDetailsLink href={`/syncs/${encodeURIComponent(m.id)}/technical${practice ? "?demo=technical" : ""}`} />
   </>;
 }

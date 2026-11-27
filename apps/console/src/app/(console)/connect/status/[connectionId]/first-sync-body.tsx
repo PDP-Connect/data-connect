@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { TechnicalDetailsLink } from "../../../components/technical-details-link.tsx";
 import {
 	buttonVariants,
 	IcButton,
@@ -163,12 +164,7 @@ function Body({
 						)}
 					</div>
 					{outcome.technical ? (
-						<Link
-							className="pdpp-caption text-muted-foreground underline"
-							href={outcome.technical.href}
-						>
-							{outcome.technical.label}
-						</Link>
+						<TechnicalDetailsLink href={outcome.technical.href} />
 					) : null}
 				</>
 			);
@@ -188,12 +184,7 @@ function Body({
 					</div>
 					{outcome.wentWrong ? <WentWrong message={outcome.wentWrong} /> : null}
 					{outcome.technical ? (
-						<Link
-							className="pdpp-caption text-muted-foreground underline"
-							href={outcome.technical.href}
-						>
-							{outcome.technical.label}
-						</Link>
+						<TechnicalDetailsLink href={outcome.technical.href} />
 					) : null}
 				</>
 			);
@@ -201,7 +192,7 @@ function Body({
 			// The same Resume action the Data sources list offers for a paused data source.
 			return (
 				<>
-				<p className="text-muted-foreground">Paused. Your records and sign-in are kept.</p>
+				<p className="text-muted-foreground">{outcome.kept}</p>
 				<div className="flex flex-wrap gap-2">
 					<form action={resumeAction}>
 						<input name="connection_id" type="hidden" value={connectionId} />

@@ -1117,3 +1117,13 @@ test("Home does not claim the totals could not be checked when they came from a 
   assert.equal(paged.recordCount, null);
   assert.equal(paged.warning, true);
 });
+
+// Round 11 (F1): an empty Data sources list never contradicts the count or the Needs you rows.
+test("the empty Data sources line agrees with what is listed above", async () => {
+  const { sourcesEmptyLine } = await import("./standing-view-model.ts");
+  assert.equal(sourcesEmptyLine({ needingSources: [], total: 0 }), "No active data sources.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "Steam" }], total: 1 }), "Steam is listed above under Needs you.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "A" }, { name: "B" }, { name: "C" }], total: 3 }), "All 3 are listed above under Needs you.");
+  assert.equal(sourcesEmptyLine({ needingSources: [{ name: "Steam" }], total: 3 }), "The rest are not active.");
+  assert.equal(sourcesEmptyLine({ needingSources: [], total: 1 }), "No active data sources.");
+});

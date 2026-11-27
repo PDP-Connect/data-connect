@@ -23,7 +23,8 @@ test("a service that cannot be added has a title, the reason and what to do inst
 test("with no known reason the page says it cannot be added once, then the step", () => {
   const html = renderToStaticMarkup(React.createElement(CannotBeAddedHere, { connectorKey: "venmo", name: "Venmo" }));
   assert.equal((html.match(/can&#x27;t be added here yet|couldn&#x27;t tell/g) ?? []).length, 1);
-  assert.match(html, /Pick another service from the list\./);
+  assert.match(html, /Try again in a few minutes\./);
+  assert.doesNotMatch(html, /Pick another service/);
 });
 
 test("the trail of a Connect page ends with the page itself", async () => {
@@ -40,8 +41,9 @@ test("when DataConnect could not tell, the page says that once, uses the plain n
   const html = renderToStaticMarkup(React.createElement(CannotBeAddedHere, { connectorKey: "github_browser", instead: why.instead, name: "GitHub (browser session)", reason: why.reason }));
   assert.doesNotMatch(html, /can&#x27;t be added here yet/);
   assert.equal((html.match(/couldn&#x27;t (tell|check)/g) ?? []).length, 1);
-  const body = html.slice(html.indexOf('data-testid="cannot-be-added-here"'));
-  assert.doesNotMatch(body, /browser session/);
+  // Round 11 (F37): the header too shows the plain name the catalog list shows.
+  assert.doesNotMatch(html, /browser session/);
+  assert.doesNotMatch(html, /Pick another service/);
   assert.match(html, /<a[^>]*href="\/sources\/add\/github_browser"[^>]*>Try again<\/a>/);
 });
 

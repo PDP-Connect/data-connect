@@ -14,3 +14,8 @@ export function savedSecretNoun(credentialKind: string | null | undefined): "key
 export function savedSecretUpdateLabel(credentialKind: string | null | undefined): string {
   return savedSecretNoun(credentialKind) === "key" ? "Enter the key again" : "Update sign-in details";
 }
+
+/** The saved secret as one word in "Your records and <word> are kept." */
+export function keptSecretWord(credentialKind: string | null | undefined): "key" | "sign-in" {
+  return savedSecretNoun(credentialKind) === "key" ? "key" : "sign-in";
+}

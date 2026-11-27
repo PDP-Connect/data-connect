@@ -138,6 +138,17 @@ textarea::placeholder {
   opacity: 1 !important;
 }
 
+/* Round 11 (F3): a button that draws its own box is drawn 44px high on a touch screen, not only given an
+   invisible hit area. Unlayered, so it also beats `.pdpp-btn--sm { min-height: 0 }` and the operator-ui
+   size variants (`h-7`, `h-8`), which carry their own heights. One rule for every button. */
+@media (pointer: coarse) {
+  .pdpp-btn,
+  [data-slot="button"],
+  button.rr-lens {
+    min-height: 44px;
+  }
+}
+
 /* The brand sheet gives `.pdpp-btn--sm` min-height: 0 outside any layer, which beats the `min-h-11`
    utility. A small button that asks for the touch floor gets it here, once. */
 .pdpp-btn--sm.min-h-11 {

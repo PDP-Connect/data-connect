@@ -8,12 +8,12 @@
  */
 export default function SignInHelperLoading() {
   return (
-    <div aria-busy="true" className="fixed inset-0 z-50 flex flex-col bg-black" role="status">
+    <div aria-busy="true" className="fixed inset-0 z-50 flex flex-col bg-background" role="status">
       <div className="flex shrink-0 items-center gap-2 bg-background px-3 py-1.5 text-[13px] text-muted-foreground">
         <span aria-hidden className="block h-3.5 w-24 animate-pulse rounded bg-muted" />
         <span>Loading the sign-in page…</span>
       </div>
-      <div aria-hidden className="flex-1 animate-pulse bg-muted/20" />
+      <div aria-hidden className="flex-1 animate-pulse bg-muted/40" />
       <div aria-hidden className="absolute inset-x-4 bottom-16 grid gap-3 rounded-lg bg-card p-4 sm:left-auto sm:w-96">
         <h1 className="block h-6 w-48 max-w-full animate-pulse rounded bg-muted"><span className="sr-only">Signing in</span></h1>
         <span className="block h-3 w-32 animate-pulse rounded bg-muted" />

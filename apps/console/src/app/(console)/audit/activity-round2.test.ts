@@ -76,3 +76,10 @@ test("an Activity whose only change is DataConnect's own unnamed sync is empty",
   assert.match(html, /No app has read your data yet\./);
   assert.doesNotMatch(html, /Only changes to access/);
 });
+
+// Round 11 (F-404): the empty Activity's "Connect an app" went to /connect-ai, a route that does not exist (a 404 on every empty Activity).
+test("the empty Activity links to the Connect page that exists", () => {
+  const html = renderToStaticMarkup(React.createElement(ActivityView, { apps: [], rows: [], changes: [], sources: [], offset: 0, firstDay: "2026-08-13" }));
+  assert.match(html, /href="\/connect"[^>]*>Connect an app/);
+  assert.doesNotMatch(html, /connect-ai/);
+});

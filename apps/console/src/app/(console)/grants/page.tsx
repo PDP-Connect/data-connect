@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
 import { buttonVariants } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
@@ -71,9 +72,7 @@ export default async function AppsPage({
           })}
         />
       )}
-      <Link className="mt-6 inline-block text-[13px] text-muted-foreground" href="/grants/technical">
-        Technical details
-      </Link>
+      <TechnicalDetailsLink href="/grants/technical" />
     </RecordroomShellWithPalette>
   );
 }

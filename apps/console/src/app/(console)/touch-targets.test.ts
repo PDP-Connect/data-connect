@@ -31,3 +31,16 @@ test("the row menu trigger is 44px on a coarse pointer", () => {
 test("a small button that asks for min-h-11 gets it, whatever the brand sheet says", () => {
   assert.match(globals, /\.pdpp-btn--sm\.min-h-11\s*\{[^}]*min-height:\s*44px/);
 });
+
+// Round 11 (F3): the drawn box of a button is 44px on a touch screen; the invisible hit area is not enough.
+test("buttons that draw a box get a 44px min-height under a coarse pointer, outside any layer", () => {
+  const rule = /@media \(pointer: coarse\) \{\s*\.pdpp-btn,\s*\[data-slot="button"\],[^{]*\{\s*min-height: 44px;/.exec(globals);
+  assert.ok(rule, "one unlayered coarse-pointer rule for every button");
+});
+
+// Round 11 (F27): an outlined button has one size, in the brand sheet and in operator-ui.
+test("outlined buttons share one size whatever size they ask for", () => {
+  const read = (rel: string) => readFileSync(join(here, "..", "..", "..", "..", "..", "reference-implementation", "vendor", rel), "utf8");
+  assert.match(read("brand-react/src/components.css"), /\.pdpp-btn--ghost\.pdpp-btn--sm \{\s*min-height: 44px;\s*padding: 9px 18px;\s*font-size: 0\.84rem;/);
+  assert.match(read("operator-ui/src/ui/button.tsx"), /compoundVariants: \[\{ class: "h-11 px-\[18px\] text-\[0\.84rem\]", size: \["default", "sm"\], variant: "outline" \}\]/);
+});

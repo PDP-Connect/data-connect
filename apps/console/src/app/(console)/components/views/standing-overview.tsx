@@ -279,9 +279,9 @@ function DataSourcesBlock({ data }: { data: HomeData }) {
           ))}
         </div>
       ) : null}
-      {!data.dataSourceError && data.dataSources.length === 0 && !data.firstRun && !data.noSources ? (
+      {data.sourcesEmptyLine ? (
         <Text as="p" className={SECOND_LINE}>
-          No active data sources.
+          {data.sourcesEmptyLine}
         </Text>
       ) : null}
       {data.sourceTotalLink ? (

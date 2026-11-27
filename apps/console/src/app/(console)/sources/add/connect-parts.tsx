@@ -151,7 +151,7 @@ export function CannotBeAddedHere({
   const undecided = reason ? reason === cannotAddWhy(name, "inspection_unavailable").reason : cannotAddWhy(name, null).undecided;
   return (
     <>
-      <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={name} title={name} />
+      <ConnectHeader connectorKey={connectorKey ?? name} icon={icon} name={sentenceName(name)} title={sentenceName(name)} />
       <div className="grid max-w-xl gap-3 py-4" data-testid="cannot-be-added-here">
         {undecided ? null : <p className="text-foreground">{cannotAddCopy.heading(sentenceName(name))}</p>}
         {why.reason ? <p className={undecided ? "text-foreground" : "pdpp-caption text-muted-foreground"}>{why.reason}</p> : null}

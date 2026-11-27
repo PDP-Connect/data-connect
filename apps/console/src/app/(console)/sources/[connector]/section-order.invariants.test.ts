@@ -37,7 +37,7 @@ async function renderOrder(): Promise<SectionOffsets> {
     collected: src.indexOf("<AcquisitionCoverageSection"),
     configuration: src.indexOf("<ConnectionConfiguration"),
     dangerZone: src.indexOf("<ConnectionDangerZone"),
-    details: src.indexOf('>Technical details</Link>'),
+    details: src.indexOf('<TechnicalDetailsLink'),
     diagnostics: src.indexOf("<ConnectionDiagnostics"),
     runs: src.indexOf("<RecentRunsSection"),
     whatIsHere: src.indexOf('title="What is here"'),

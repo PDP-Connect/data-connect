@@ -76,12 +76,12 @@ export function cannotAddWhy(fullName: string, reason: string | null): { reason:
     case "catalog_unavailable":
     case "inspection_unavailable":
     case "artifact_invalid":
-      return { reason: `DataConnect couldn't check whether ${name} can run on this computer.`, instead: `Try again in a few minutes. ${pickAnother}`, undecided: true };
+      return { reason: `DataConnect couldn't check whether ${name} can run on this computer.`, instead: "Try again in a few minutes.", undecided: true };
     case "not_implemented":
       return { reason: `DataConnect can't collect from ${name} yet.`, instead: `Check again after DataConnect updates. ${pickAnother}`, undecided: false };
     default:
       // An unknown reason still gets a neutral explanation and a way to retry.
-      return { reason: `DataConnect couldn't tell whether ${name} can be set up on this computer.`, instead: `Try again in a few minutes. ${pickAnother}`, undecided: true };
+      return { reason: `DataConnect couldn't tell whether ${name} can be set up on this computer.`, instead: "Try again in a few minutes.", undecided: true };
   }
 }
 

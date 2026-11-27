@@ -472,7 +472,7 @@ export function sourceWorkItemFromConnector(connector: RefConnectorSummary): Sou
     return itemFromConnector(connector, "review", {
       actionLabel: RESUME_PAUSED_CTA_LABEL,
       statusLabel: "is paused",
-      what: "Collection is paused. Your existing records, schedule, and sign-in are kept — resume to start collecting again.",
+      what: "Collection is paused. Your existing records and schedule are kept — resume to start collecting again.",
     });
   }
 

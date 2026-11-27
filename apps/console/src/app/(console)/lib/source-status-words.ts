@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { substituteCommandTemplate } from "../../../lib/pdpp-cli-command.ts";
-import { savedSecretNoun, savedSecretUpdateLabel } from "./saved-secret-words.ts";
+import { keptSecretWord, savedSecretNoun, savedSecretUpdateLabel } from "./saved-secret-words.ts";
 import { EMPTY_FIRST_SYNC_CHECK, RETRY_AFTER_FAILURE_LABEL, emptyFirstSyncWords, resolveSyncCause } from "./sync-cause.ts";
 import { isScheduled, lastSuccessfulSync } from "./schedule-words.ts";
 import { personDay } from "../history/day-cut.ts";
@@ -222,7 +222,7 @@ function lifecycleRow(
           ? action("resume", "Resume", false)
           : action("repair_credential", "Resume", false)
         : action("resume", "Resume", false);
-    return { row: 10, words: "Paused", tone: "faint", action: pausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${savedSecretNoun(options.credentialKind) === "key" ? "key" : "sign-in"}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+    return { row: 10, words: "Paused", tone: "faint", action: pausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${keptSecretWord(options.credentialKind)}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "needs_owner") {
     const requiredAction = ownerAction(source);
@@ -386,7 +386,7 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
       : reattachAction
         ? action("server_cta", reattachAction.cta, false)
         : null;
-    return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${savedSecretNoun(options.credentialKind) === "key" ? "key" : "sign-in"}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
+    return { row: 10, words: withWhen("Automatic sync is off"), tone: "faint", action: ownerPausedAction , sentence: { text: source.source_kind === "local_device" ? `Paused on ${source.local_device_progress?.device_name ?? "the computer that holds this data"}. Resume it there.` : source.status === "paused" ? `Paused. Your records${options.signInRepairAvailable ? ` and ${keptSecretWord(options.credentialKind)}` : ""} are kept.${when ? ` Last synced ${when}.` : ""}` : `Automatic sync is off.${when ? ` Last synced ${when}.` : ""}`, slot: null }, problem: false };
   }
   if (resolver === "blocked_maintainer") {
     if (onlyUnmeasuredCompleteness(source)) return { row: 13, words: `Synced${when ? ` ${when}` : ""}`, tone: "plain", action: null , sentence: { text: `Synced${when ? ` ${when}` : ""}. ${UNMEASURED_CAVEAT}`, slot: null }, problem: false };

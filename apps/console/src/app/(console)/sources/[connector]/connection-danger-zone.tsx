@@ -7,6 +7,7 @@ import { IcButton, IcInput } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useId, useState, useTransition, type ReactNode } from "react";
 import { WentWrong } from "../add/connect-parts.tsx";
+import { keptSecretWord } from "../../lib/saved-secret-words.ts";
 import {
 	deleteConnectionAction,
 	resetAndSyncConnectionAction,
@@ -19,6 +20,8 @@ interface Props {
 	connectionId: string | null;
 	displayName: string;
   serviceName?: string;
+  /** What the source saved ("username_password", a key…): the noun in "Your records and <noun> are kept". */
+  credentialKind?: string | null;
 	error?: string;
 	message?: string;
 	setupFailed?: boolean;
@@ -32,8 +35,8 @@ interface Props {
 }
 
 export const sourceRemovalCopy = {
-	reset: (name: string) =>
-		`Starts over and copies all of ${name} again. Your records and sign-in are kept while it runs.`,
+	reset: (name: string, credentialKind?: string | null) =>
+		`Starts over and copies all of ${name} again. Your records and ${keptSecretWord(credentialKind)} are kept while it runs.`,
 	disconnect: (name: string) =>
 		`Stops checking and signs DataConnect out of ${name}. Your records stay, and apps that can read them still can.`,
 	delete: (name: string) =>
@@ -45,6 +48,7 @@ export function ConnectionDangerZone({
 	connectionId,
 	displayName,
   serviceName = displayName,
+  credentialKind,
 	error,
 	message,
 	setupFailed = false,
@@ -71,6 +75,7 @@ export function ConnectionDangerZone({
 							connectionId={connectionId}
 							displayName={displayName}
               serviceName={serviceName}
+              credentialKind={credentialKind}
 							initialOpen={initialDialog === "reset"}
 						/>
 					)}
@@ -174,11 +179,13 @@ function ResetSourceForm({
 	connectionId,
 	displayName,
   serviceName = displayName,
+  credentialKind,
 	initialOpen,
 }: {
 	connectionId: string;
 	displayName: string;
   serviceName?: string;
+  credentialKind?: string | null;
 	initialOpen: boolean;
 }) {
 	const router = useRouter();
@@ -189,7 +196,7 @@ function ResetSourceForm({
 	} | null>(null);
 	const [isPending, startTransition] = useTransition();
 	const label = "Copy everything again";
-	const sentence = sourceRemovalCopy.reset(serviceName);
+	const sentence = sourceRemovalCopy.reset(serviceName, credentialKind);
 	return (
 		<ActionRow label={label} sentence={sentence} open={open} onClick={() => setOpen(true)}>
 			{open ? (

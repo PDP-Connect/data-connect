@@ -1,4 +1,5 @@
 import { readPersonOffset } from "../../history/server-day.ts";
+import { TechnicalDetailsLink } from "../../components/technical-details-link.tsx";
 import { sourceKindLine } from "../../lib/source-kind-line.ts";
 import { sourceRecordCount } from "../../lib/source-record-count.ts";
 import { sourceRecordLabel, isOwnerRecordKind } from "../../lib/source-record-label.ts";
@@ -940,6 +941,7 @@ function ConnectorPageView({
               connectionId={connectorInstanceId ?? connectionId}
               displayName={displayName}
               serviceName={serviceName}
+              credentialKind={manifestCredentialKind(manifest)}
               initialDialog={model.initialDialog}
               error={dangerError}
               message={dangerMessage ? "Done." : undefined}
@@ -949,7 +951,7 @@ function ConnectorPageView({
             />
           </SourceManage>
 
-      <p className="mb-8 text-sm text-muted-foreground"><Link className="underline underline-offset-4 hover:text-foreground" href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? `?demo=${encodeURIComponent(practiceState)}` : ""}`}>Technical details</Link></p>
+      <div className="mb-8"><TechnicalDetailsLink href={`/sources/${encodeURIComponent(connectionId)}/technical${practiceState ? `?demo=${encodeURIComponent(practiceState)}` : ""}`} /></div>
     </RecordroomShellWithPalette>
   );
 }

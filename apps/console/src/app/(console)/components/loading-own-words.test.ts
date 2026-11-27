@@ -84,3 +84,18 @@ test("the record list loading screen draws list rows with a time on the right, n
   assert.doesNotMatch(src, /w-28/);
   assert.match(src, /justify-between/);
 });
+
+// Round 11 (F5): the helper's loading screen takes theme tokens; a fixed black is dark in the light theme.
+test("the helper's loading screen has no fixed black or white", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../syncs/[runId]/stream/loading.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bbg-(black|white)\b/);
+});
+
+// Round 11 (F4): the loading trail under Add a data source is the loaded trail without its data-named last crumb.
+test("Connect <service> loading draws the loaded trail minus the service's own crumb", () => {
+  const loading = readFileSync(new URL("../sources/add/[connector]/loading.tsx", import.meta.url), "utf8");
+  assert.match(loading, /label: "Home" \}, \{ href: "\/sources", label: "Data sources" \}, \{ href: "\/sources\/add", label: "Add a data source" \}\]/);
+  const header = readFileSync(new URL("../sources/add/connect-parts.tsx", import.meta.url), "utf8");
+  assert.match(header, /Add a data source/);
+});

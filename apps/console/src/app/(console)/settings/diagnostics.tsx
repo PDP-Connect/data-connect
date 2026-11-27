@@ -4,6 +4,7 @@
 // Plain-words errors with the raw code one click away, and the collapsed
 // Details block that holds host internals. Everything inside `Diagnostics`
 // may show codes and flags; nothing outside it may.
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
 import { createContext, isValidElement, useContext, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { type CopyOutcome, copyFailureLine, copyText } from "./copy-text.ts";
@@ -158,7 +159,7 @@ function StatePathsFix({ recover }: { recover: Recover }) {
           </div>
         </> : <div className="grid gap-2">
           <p className="pdpp-caption">Change the folder permissions where DataConnect is installed, then try again.</p>
-          <a className="underline underline-offset-4" href="/settings/technical">Technical details</a>
+          <TechnicalDetailsLink href="/settings/technical" />
           {!fixable ? <Button onClick={recover.onRefresh} type="button" variant="outline">Try again</Button> : null}
         </div>
       ) : null}

@@ -1,4 +1,5 @@
 "use client";
+import { TechnicalDetailsLink } from "../../components/technical-details-link.tsx";
 import { appAccessKinds, appPlaceLine } from "../app-access-words.ts";
 import { buttonVariants, IcButton } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
@@ -196,12 +197,7 @@ export function AppPage({
         </Section>
       )}
       {recent ? <RecentReading {...recent} app={app} demo={demo} /> : null}
-      <Link
-        className="mt-6 inline-block text-[13px] text-muted-foreground"
-        href={`/grants/${encodeURIComponent(app.hrefId)}/technical${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}
-      >
-        Technical details
-      </Link>
+      <TechnicalDetailsLink href={`/grants/${encodeURIComponent(app.hrefId)}/technical${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`} />
     </>
   );
 }

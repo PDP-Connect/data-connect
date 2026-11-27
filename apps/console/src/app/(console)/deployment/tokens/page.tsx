@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { TechnicalDetailsLink } from "../../components/technical-details-link.tsx";
 import { SupportCopy } from "../../components/support-copy.tsx";
 import { IcButton, IcInput, buttonVariants } from "@pdpp/brand-react"
 import { PageHeader } from "@pdpp/operator-ui/components/primitives"
@@ -104,12 +105,7 @@ export default async function TokensPage({
           </form>
         )}
         <PlainTokenList groups={groups} practice={Boolean(practice)} />
-        <Link
-          className="min-h-11 py-3 text-sm underline"
-          href={`/deployment/tokens/technical${params.flow ? `?flow=${encodeURIComponent(params.flow)}` : ""}`}
-        >
-          Technical details
-        </Link>
+        <TechnicalDetailsLink href={`/deployment/tokens/technical${params.flow ? `?flow=${encodeURIComponent(params.flow)}` : ""}`} />
       </main>
     </RecordroomShellWithPalette>
   )

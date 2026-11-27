@@ -90,3 +90,10 @@ test("a lost browser replaces the instruction panel and leaves the corner Stop r
   const css = await readFile(fileURLToPath(new URL("./stream.css", import.meta.url)), "utf8");
   assert.match(css, /\.pdpp-stream-toast-zone\[data-slot="trouble"\]\s*\{\s*--pdpp-stream-toast-offset: 4rem;/);
 });
+
+// Round 11 (F6): the status pill never wraps onto a second line.
+test("the visible status pill does not wrap", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./stream-viewer.tsx", import.meta.url), "utf8");
+  assert.match(source, /<span aria-hidden className="pdpp-caption whitespace-nowrap [^"]*">\{visibleStatusLabel/);
+});

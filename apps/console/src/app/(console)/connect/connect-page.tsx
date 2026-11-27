@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
 import { buttonVariants } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
@@ -97,9 +98,7 @@ export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[
           </p>
         ) : null}
       </Section>
-      <Link className="text-[13px] text-muted-foreground" href="/connect/technical">
-        Technical details
-      </Link>
+      <TechnicalDetailsLink href="/connect/technical" />
     </>
   );
 }

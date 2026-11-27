@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { TechnicalDetailsLink } from "../components/technical-details-link.tsx";
 import { Text } from "@pdpp/brand-react"
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
@@ -48,12 +49,12 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
     <RecordroomShellWithPalette>
       <div className="mx-auto grid min-w-0 w-full max-w-5xl grid-cols-1 gap-6">
         <PageHeader title="Settings" />
-        <Section>
+        <Section title="Access and alerts">
           {managedDesktopHost ? <RemoteAccessRow practiceName={practice?.name} /> : <SettingsRow href="/settings/remote-access" title="Remote access" />}
           <SettingsRow href="/settings/sign-in" title="Password and sign-in" state={signInWords} />
           <SettingsRow href="/deployment/tokens" title="Tokens for scripts and tools" state={summary.tokens === null ? "Could not check" : summary.tokens ? String(summary.tokens) : "None"} />
+          <NotificationsRow practice={!!practice} />
         </Section>
-        <NotificationsRow practice={!!practice} />
         <Section title="Updates">
           <Text as="p">DataConnect {identity.version}</Text>
           <OpenExternalLink href="https://github.com/PDP-Connect/data-connect/releases" className="inline-flex min-h-11 items-center underline">See the latest version</OpenExternalLink>
@@ -81,7 +82,7 @@ export default async function SettingsPage({ searchParams }: { searchParams?: Pr
           </Section>
         ) : null}
         <AboutSection identity={identity} />
-        <Text as="a" href="/settings/technical" link>Technical details</Text>
+        <TechnicalDetailsLink href="/settings/technical" />
       </div>
     </RecordroomShellWithPalette>
   )

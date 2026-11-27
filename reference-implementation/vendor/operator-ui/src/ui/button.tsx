@@ -10,6 +10,8 @@ import { cn } from "./utils.ts";
 const buttonVariants = cva(
   "group/button inline-flex shrink-0 cursor-pointer select-none items-center justify-center whitespace-nowrap rounded-lg border border-transparent bg-clip-padding font-medium text-sm outline-none transition-all focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35 focus-visible:ring-offset-1 focus-visible:ring-offset-background active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
+    // One size for every outlined button, as the brand sheet's outlined .pdpp-btn has.
+    compoundVariants: [{ class: "h-11 px-[18px] text-[0.84rem]", size: ["default", "sm"], variant: "outline" }],
     defaultVariants: {
       size: "default",
       variant: "default",
