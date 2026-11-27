@@ -4090,6 +4090,79 @@ rl.on('line', (line) => {
     });
   });
 
+  await t.test("legacy interaction event carries the same bounded, redacted message as the assistance event", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "u1");
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-interaction-display-"));
+      const connectorPath = join(tmpDir, "connector.mjs");
+      const instruction = `${"Finish the check in the browser. ".repeat(100)}Use password: hunter2 and mail dummy.person@example.test or code 123456.`;
+      writeFileSync(
+        connectorPath,
+        `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({
+      type: 'INTERACTION',
+      request_id: 'int_evt_display',
+      kind: 'credentials',
+      message: ${JSON.stringify(instruction)},
+      schema: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'] }
+    }) + '\\n');
+    return;
+  }
+  if (msg.type === 'INTERACTION_RESPONSE') {
+    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
+        "utf8"
+      );
+      try {
+        let handlerSaw = "";
+        const result = await runConnector({
+          admitRunConnection: fakeAdmitRunConnection(),
+          collectionMode: "full_refresh",
+          connectorId: spotifyManifest.connector_id,
+          connectorPath,
+          manifest: spotifyManifest,
+          onInteraction: async (interaction: unknown) => {
+            handlerSaw = String((interaction as { message: string }).message);
+            return {
+              data: { token: "x" },
+              request_id: (interaction as { request_id: string }).request_id,
+              status: "success",
+              type: "INTERACTION_RESPONSE",
+            };
+          },
+          ownerToken,
+          rsUrl,
+          state: null,
+        });
+        const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requirePathSegment(result.run_id, "result_run_id"))}/timeline`
+        );
+        const legacy = (runTimeline.data || []).find((event) => event.event_type === "run.interaction_required");
+        const structured = (runTimeline.data || []).find((event) => event.event_type === "run.assistance_requested");
+        assert.ok(legacy && structured, "expected both event shapes");
+        const legacyMessage = String(legacy.data.message);
+        assert.equal(legacyMessage, String(structured.data.message));
+        assert.ok(legacyMessage.length <= 2000, `kept ${legacyMessage.length} characters`);
+        assert.ok(!/hunter2|dummy\.person|123456/.test(legacyMessage), "sensitive markers removed");
+        assert.ok(handlerSaw.includes("hunter2"), "the handler still gets the full input");
+        assert.ok(legacy.data.schema, "legacy schema field is kept");
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
+    });
+  });
+
   await t.test("captures interaction timeout lifecycle events", async () => {
     await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
       const ownerToken = await issueOwnerToken(asUrl, "u1");
