@@ -843,7 +843,8 @@ export function buildDuplicateSourceReview(instances: readonly SourceInstanceVie
   const reviews: DuplicateSourceReview[] = [];
   for (const [connectorId, items] of byConnector) {
     const unnamedItems = items.filter((item) => item.needsOwnerLabel);
-    if (items.length <= 1 || unnamedItems.length === 0) {
+    // One account still unnamed beside named ones can already be told apart; the notice is for look-alikes.
+    if (items.length <= 1 || unnamedItems.length === 0 || (unnamedItems.length === 1 && items.length > 1)) {
       continue;
     }
     reviews.push({

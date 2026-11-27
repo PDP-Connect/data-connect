@@ -1959,3 +1959,12 @@ test("toSourceInstanceView: stream with no manifest available falls back to name
   const view = toSourceInstanceView(sum, { manifests: undefined });
   assert.equal(view.streams[0]?.displayLabel, "messages");
 });
+
+// Closing judge, round 6 (F6): the notice goes away once the accounts can be told apart.
+test("duplicate source review is silent when only one account still lacks an owner name", () => {
+  const views = toSourcesView([
+    summary({ connection_id: "cin_old", connector_display_name: "Steam", connector_id: "steam", connector_instance_id: "cin_old", display_name: "Steam (old account)" }),
+    summary({ connection_id: "cin_new", connector_display_name: "Steam", connector_id: "steam", connector_instance_id: "cin_new", display_name: "Steam" }),
+  ]);
+  assert.deepEqual(buildDuplicateSourceReview(views), []);
+});
