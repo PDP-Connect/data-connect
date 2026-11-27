@@ -125,6 +125,8 @@ export function checksHeadline(rows: PlainCheck[]): string {
   if (attention)
     return `${attention} ${attention === 1 ? "check needs" : "checks need"} attention.`
   if (rows.some(row => row.status === "unknown")) return "Checking DataConnect…"
+  if (rows.some(row => row.status === "info"))
+    return "Search by meaning is still getting ready."
   return "Everything is working."
 }
 export function buildServerPractice(state: string) {

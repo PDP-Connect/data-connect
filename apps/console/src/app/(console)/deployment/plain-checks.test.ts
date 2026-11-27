@@ -65,3 +65,19 @@ test("the headline is a status line, so no heading is left with only another hea
   const source = await readFile(new URL("./server-checks.tsx", import.meta.url), "utf8");
   assert.match(source, /<Text as="p" role="status" size="heading">\{checksHeadline\(rows\)\}<\/Text>/);
 });
+
+test("the headline does not say everything works while configured search is still getting ready", () => {
+  const model = buildServerPractice("fine")!
+  const getting = {
+    ...model.inputs,
+    embeddingBackendAvailable: false,
+    embeddingModelCachePresent: false,
+    embeddingWarmStatus: { ...(model.inputs.embeddingWarmStatus ?? {}), status: "downloading", mode: "semantic" },
+  } as typeof model.inputs
+  const rows = plainServerChecks(getting, model.address, model.probe)
+  assert.equal(rows.find(row => row.name === "Search")!.status, "info")
+  assert.doesNotMatch(checksHeadline(rows), /Everything is working/)
+  assert.match(checksHeadline(rows), /Search/)
+  const off = buildServerPractice("search-off")!
+  assert.match(checksHeadline(plainServerChecks(off.inputs, off.address, off.probe)), /Everything is working/)
+})
