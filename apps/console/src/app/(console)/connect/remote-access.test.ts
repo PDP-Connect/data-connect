@@ -34,5 +34,5 @@ test("an address says where it works: this computer, your own network, or anywhe
     assert.deepEqual(addressReach(origin), { kind: "private-network", phrase: "only works on your own network" }, origin);
   assert.deepEqual(addressReach("https://data.example.com"), { kind: "public", phrase: null });
   // An address that cannot be read is not offered as usable from the internet.
-  assert.equal(addressReach("not a url").kind, "private-network");
+  for (const bad of ["not a url", "ftp://nas", "http://user:pw@nas:3000"]) assert.deepEqual(addressReach(bad), { kind: "unusable", phrase: null }, bad);
 });

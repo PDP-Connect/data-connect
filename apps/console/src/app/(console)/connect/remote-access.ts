@@ -3,17 +3,19 @@
 
 const PRIVATE_172_ADDRESS = /^172\.(1[6-9]|2\d|3[01])\./;
 
-export type AddressKind = "this-computer" | "private-network" | "public";
+export type AddressKind = "this-computer" | "private-network" | "public" | "unusable";
 
 /** Who can use an address: only this computer, only the owner's own network, or anyone on the internet. */
 export function addressReach(origin: string): { kind: AddressKind; phrase: string | null } {
-  let host: string;
+  let url: URL;
   try {
-    host = new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    url = new URL(origin);
   } catch {
-    // A value that is not an address is never offered as reachable from the internet.
-    return { kind: "private-network", phrase: "only works on your own network" };
+    return { kind: "unusable", phrase: null };
   }
+  // Not an address an assistant could use: other schemes, or sign-in details inside the address.
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password) return { kind: "unusable", phrase: null };
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host === "::1" || host.startsWith("127.")) return { kind: "this-computer", phrase: "only works on this computer" };
   const privateName =
     host.endsWith(".local") || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.") ||

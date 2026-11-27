@@ -12,6 +12,15 @@ const REMOTE_ONLY_ASSISTANTS = new Set(["ChatGPT", "Claude"]);
 
 export function ConnectView({ origin, apps }: { origin: string; apps: AppAccess[] }) {
   const newest = apps[0];
+  if (addressReach(origin).kind === "unusable") {
+    return (
+      <>
+        <PageHeader title="Connect an app" breadcrumbs={[{ href: "/grants", label: "Apps" }, { label: "Connect an app" }]} />
+        <p>DataConnect does not have a usable address yet.</p>
+        <Link className={buttonVariants()} href="/settings/remote-access">Set up remote access</Link>
+      </>
+    );
+  }
   const needsRemote = needsRemoteAccess(origin);
   return (
     <>

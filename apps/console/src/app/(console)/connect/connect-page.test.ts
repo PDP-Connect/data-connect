@@ -47,6 +47,12 @@ test("while only this computer can reach DataConnect, ChatGPT and Claude show no
   assert.match(remote, /Add custom connector/);
   assert.doesNotMatch(remote, /Not available until remote access is on/);
 });
+test("a malformed address renders as unavailable without copy or cloud steps", () => {
+  const html = renderToStaticMarkup(React.createElement(ConnectView, { origin: "not-an-address", apps: [] }));
+  assert.match(html, /DataConnect does not have a usable address yet/);
+  assert.doesNotMatch(html, /Add custom MCP server|Add custom connector|Copy command|Copy your address|not-an-address/);
+});
+
 test("two connected apps use the singular and offer a first question", () => {
   const html = renderToStaticMarkup(
     React.createElement(ConnectView, { origin: "https://data.example", apps: buildAppPractice("several").apps })
