@@ -346,3 +346,15 @@ test("partial: no automatic-retry promise without an active schedule or when the
   assert.match(render({ ...withOrders, gaps: [retryable] }), /It will try again the next time DataConnect checks Amazon\./);
   assert.doesNotMatch(render({ ...withOrders, schedule: undefined, gaps: [retryable] }), /It will try again|Nothing is scheduled/);
 });
+
+// Round 3, finding 3: a present recovery link is the primary button whatever its label.
+test("partial: Try again is the primary button and See your data the secondary", async () => {
+  const { FirstSyncBody } = await bodyModule;
+  const facts = { ...withOrders, gaps: [{ kind: "skip_result", reason: "stream_collection_failed", message: "x", recovery_hint: { retryable: true } }] };
+  const html = renderToStaticMarkup(createElement(FirstSyncBody, bodyProps(firstSyncOutcome(status(), "Amazon", facts))));
+  const cls = (label: string) => new RegExp(`<a[^>]*class="([^"]*)"[^>]*>(?:<!-- -->)?${label}`).exec(html)?.[1] ?? "";
+  // The default variant has no modifier class; the secondary one is the ghost variant.
+  assert.ok(cls("Try again").includes("pdpp-btn"));
+  assert.doesNotMatch(cls("Try again"), /pdpp-btn--ghost/);
+  assert.match(cls("See your Amazon data"), /pdpp-btn--ghost/);
+});

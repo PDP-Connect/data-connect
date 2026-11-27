@@ -147,18 +147,13 @@ function Body({
 						))}
 					</DataList>
 					<div className="flex flex-wrap gap-2">
-						{outcome.retry?.label === "Sign in again" ? (
+						{outcome.retry ? (
 							<>
 								<LinkButton link={outcome.retry} primary />
 								<LinkButton link={outcome.primary} primary={false} />
 							</>
 						) : (
-							<>
-								<LinkButton link={outcome.primary} primary />
-								{outcome.retry ? (
-									<LinkButton link={outcome.retry} primary={false} />
-								) : null}
-							</>
+							<LinkButton link={outcome.primary} primary />
 						)}
 					</div>
 					{outcome.technical ? (
