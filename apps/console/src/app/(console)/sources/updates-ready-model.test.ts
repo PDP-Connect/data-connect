@@ -96,3 +96,27 @@ test("a long list of data sources reads as a count, a short one keeps the names"
   const three = buildUpdatesReadyModel(snapshot(["a", "b", "c"]), sourcesByConnector(["a", "b", "c"]));
   assert.equal(three?.namesText, "Data source 1, Data source 2, and Data source 3");
 });
+
+// Review: the count is of sources, not of distinct labels.
+test("five affected accounts count as five even when two share a name", () => {
+  const model = buildUpdatesReadyModel(snapshot(["a", "b", "c", "d"]), {
+    a: [{ displayName: "Amazon" }, { displayName: "Amazon" }],
+    b: [{ displayName: "Chase" }],
+    c: [{ displayName: "Mail" }],
+    d: [{ displayName: "Photos" }],
+  });
+  assert.equal(model?.namesText, "5 data sources");
+  assert.deepEqual(model?.names, ["Amazon · account 1", "Amazon · account 2", "Chase", "Mail", "Photos"]);
+});
+
+test("seventeen accounts all named Amazon read as 17 data sources, each listed apart", () => {
+  const model = buildUpdatesReadyModel(snapshot(["a"]), { a: Array.from({ length: 17 }, () => ({ displayName: "Amazon" })) });
+  assert.equal(model?.namesText, "17 data sources");
+  assert.equal(new Set(model?.names).size, 17);
+  assert.equal(model?.names[0], "Amazon · account 1");
+});
+
+test("two accounts with the same name stay apart in the short list", () => {
+  const model = buildUpdatesReadyModel(snapshot(["a"]), { a: [{ displayName: "Amazon" }, { displayName: "Amazon" }] });
+  assert.equal(model?.namesText, "Amazon · account 1 and Amazon · account 2");
+});

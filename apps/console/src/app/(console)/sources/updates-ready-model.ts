@@ -17,6 +17,8 @@ export interface UpdatesReadyKind {
 export interface UpdatesReadyModel {
   buttonLabel: "Update" | "Update both" | "Update all";
   kinds: UpdatesReadyKind[];
+  /** Every affected source by name, two of the same name told apart; one entry per source. */
+  names: string[];
   namesText: string;
   seeChangesHref: string;
 }
@@ -34,21 +36,43 @@ function listNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
 }
 
-/** More names than this read as a count; the names are on the page "See what changes" opens. */
+/**
+ * More names than this read as a count; the names are listed under "Show them"
+ * in the notice. ("See what changes" opens the Add page, which lists services,
+ * not the affected sources.)
+ */
 const MAX_NAMES_LISTED = 3;
 
 function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
   if (kinds.length === 0) return null;
-  const names = [...new Set(kinds.flatMap((kind) => kind.sourceNames))].sort((a, b) => a.localeCompare(b));
+  // One entry per source: two sources with the same name are still two.
+  const names = kinds.flatMap((kind) => kind.sourceNames).sort((a, b) => a.localeCompare(b));
   if (names.length === 0) return null;
   return {
     buttonLabel: kinds.length === 1 ? "Update" : kinds.length === 2 ? "Update both" : "Update all",
     kinds,
+    names,
     namesText: names.length > MAX_NAMES_LISTED ? `${names.length} data sources` : listNames(names),
     seeChangesHref: kinds.length === 1
       ? `/sources/add?source_q=${encodeURIComponent(kinds[0]?.connectorId ?? "")}`
       : "/sources/add",
   };
+}
+
+/** Tell sources that share a name apart: "Amazon · account 1", "Amazon · account 2". */
+function tellAccountsApart(kinds: UpdatesReadyKind[]): UpdatesReadyKind[] {
+  const totals = new Map<string, number>();
+  for (const name of kinds.flatMap((kind) => kind.sourceNames)) totals.set(name, (totals.get(name) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  return kinds.map((kind) => ({
+    ...kind,
+    sourceNames: kind.sourceNames.map((name) => {
+      if ((totals.get(name) ?? 0) < 2) return name;
+      const ordinal = (seen.get(name) ?? 0) + 1;
+      seen.set(name, ordinal);
+      return `${name} · account ${ordinal}`;
+    }),
+  }));
 }
 
 /** Build ready updates using the same install lifecycle rules as the Add page. */
@@ -97,13 +121,13 @@ export function buildUpdatesReadyModel(
 
   const kinds = [...kindsByLifecycle.values()].map((kind) => ({
     ...kind,
-    sourceNames: [...new Set(kind.sourceNames)].sort((a, b) => a.localeCompare(b)),
+    sourceNames: [...kind.sourceNames].sort((a, b) => a.localeCompare(b)),
   }));
-  return modelFromKinds(kinds.sort((a, b) => {
+  return modelFromKinds(tellAccountsApart(kinds.sort((a, b) => {
     const firstA = a.sourceNames[0] ?? "";
     const firstB = b.sourceNames[0] ?? "";
     return firstA.localeCompare(firstB);
-  }));
+  })));
 }
 
 export interface ConnectorUpdatesRead {
