@@ -13,7 +13,7 @@ const LOADS_CONFIG_WITH_RETRY_HELPER =
 const CONFIG_LOAD_OBSERVATION =
   /logDebug\("stream_neko_client_config", \{ browserSessionId: session\.browserSessionId, \.\.\.observation \}\)/;
 const CONFIG_LOAD_CATCH_SETS_INLINE_ERROR =
-  /\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setError\(err instanceof Error \? plainBrowserTrouble\(err\.message\) : "The browser could not start\. Try again\."\);/;
+  /\.catch\(\(err: unknown\) => \{\s+if \(!cancelled\) \{\s+setErrorKind\("mount"\);\s+setError\(err instanceof Error \? plainBrowserTrouble\(err\.message\) : "The browser could not start\. Try again\."\);/;
 const INLINE_ERROR_PANEL = /COULDNT_REACH_BROWSER/;
 const INLINE_RETRY_BUTTON = /Try again/;
 const RETRY_RELOADS_CONFIG = /setConfigLoadRetryEpoch\(\(epoch\) => epoch \+ 1\)/;
