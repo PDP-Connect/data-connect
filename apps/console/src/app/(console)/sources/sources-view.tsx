@@ -244,8 +244,9 @@ function RowAction({ instance, interactive, pending, onSync, resumeAction, resum
   const action = instance.statusWords.action;
 
   if (!action) return null;
-  // DIRECTION.md, Values: on list rows the row's button is outlined; the page's one filled button is "Add a data source".
-  const variant = "ghost";
+  // DIRECTION.md, Values said a row's button is outlined. Changed (closing judge, round 6): a needed
+  // action is the filled one and "Add a data source" goes quiet (lib/action-emphasis.ts).
+  const variant = instance.statusWords.needsYou ? "default" : "ghost";
   if (action.kind === "sync_now" || action.kind === "retry_first_sync") {
     return (
       <IcButton className="rr-s-row__action" disabled={!interactive || pending || instance.isRunning} onClick={onSync} size="sm" type="button" variant={variant}>

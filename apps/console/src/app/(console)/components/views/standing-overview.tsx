@@ -9,6 +9,7 @@ import { cn } from "@pdpp/operator-ui/ui/utils";
 import Link from "next/link";
 import { ConnectorMark } from "../connector-mark.tsx";
 import { SourceStatusText } from "../source-status-text.tsx";
+import { actionEmphasis } from "../../lib/action-emphasis.ts";
 import type { HomeData, HomeNeedRow, HomeSourceRow } from "./standing-view-model.ts";
 
 // One primary button for the same action everywhere: Apps uses the same maker.
@@ -17,8 +18,9 @@ const FILLED_BUTTON = primaryButtonVariants({
   variant: "default",
 });
 
-// Lead decision (home-pictures 3): every button in the needs-you box is outlined;
-// the box itself is the emphasis. DIRECTION.md, Values: buttons use the stronger line.
+// Lead decision (home-pictures 3) was: every button in the needs-you box is outlined.
+// Changed (closing judge, round 6): the needed action is the page's one filled button and
+// "Connect an app" goes quiet while something needs the person (lib/action-emphasis.ts). DIRECTION.md, Values: buttons use the stronger line.
 const OUTLINED_BUTTON = cn(
   buttonVariants({ size: "default", variant: "outline" }),
   "h-[30px] rounded-[6px] border-border-strong px-2.5 text-[13px] dark:border-border-strong"
@@ -174,7 +176,7 @@ function NeedRow({ need }: { need: HomeNeedRow }) {
       </div>
       {need.actionLabel ? (
         <Link
-          className={`${OUTLINED_BUTTON} col-start-2 justify-self-start min-[560px]:col-start-3 min-[560px]:justify-self-end`}
+          className={`${FILLED_BUTTON} col-start-2 justify-self-start min-[560px]:col-start-3 min-[560px]:justify-self-end`}
           href={need.actionHref}
         >
           {need.actionLabel}
@@ -349,7 +351,7 @@ function AppsBlock({ data }: { data: HomeData }) {
               All access tokens
             </Link>
           ) : null}
-          <Link className={FILLED_BUTTON} href={data.appsHref}>
+          <Link className={actionEmphasis(data.needsVisible).optional === "quiet" ? OUTLINED_BUTTON : FILLED_BUTTON} href={data.appsHref}>
             Connect an app
           </Link>
         </div>

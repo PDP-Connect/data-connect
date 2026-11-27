@@ -53,6 +53,7 @@ import {
 import { runConnectorNowAction } from "./actions.ts";
 import { readConnectorUpdates } from "./connector-updates-read.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
+import { actionEmphasis } from "../lib/action-emphasis.ts";
 import { SourcesView } from "./sources-view.tsx";
 import {
   buildSourcesRuntimeAdvisory,
@@ -179,7 +180,7 @@ export default async function RecordsIndexPage({
 
   return (
     <RecordroomShellWithPalette host={host}>
-      <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} />
+      <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} quietAdd={actionEmphasis(instances.some((instance) => instance.statusWords.needsYou)).optional === "quiet"} />
       <SourcesView
         instances={instances}
         interactive={true}
@@ -206,11 +207,13 @@ export default async function RecordsIndexPage({
 }
 
 function SourcesHeader({
+  quietAdd = false,
   error,
   message,
   notice,
   purgeRetryId,
 }: {
+  quietAdd?: boolean;
   error?: string;
   message?: string;
   notice?: string;
@@ -220,7 +223,7 @@ function SourcesHeader({
     <header className="rr-s-header" data-pdpp-reference-revision={REFERENCE_REVISION}>
       <div className="rr-s-header__title-row">
         <Text as="h1" className="rr-s-header__title" size="title" weight="semi">Data sources</Text>
-        <Link className={buttonVariants({ size: "sm", variant: "default" })} href={`${SOURCES_PATH}/add`}>Add a data source</Link>
+        <Link className={buttonVariants({ size: "sm", variant: quietAdd ? "ghost" : "default" })} href={`${SOURCES_PATH}/add`}>Add a data source</Link>
       </div>
       {notice ? (
         // Lead decision (list-pictures 5): the demo line matches Home's, 13px in the second text colour.
