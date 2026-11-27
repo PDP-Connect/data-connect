@@ -88,11 +88,16 @@ const sections = [
   },
 ] as const
 
+/** A sentence the overview already says is not said again in its section; a section left empty is not drawn. */
+export const visibleSections = sections
+  .map((section) => ({ ...section, paragraphs: section.paragraphs.filter((paragraph) => !(overview as readonly string[]).includes(paragraph)) }))
+  .filter((section) => section.paragraphs.length > 0)
+
 export function PrivacyContent() {
   return (
     <div>
       <PrivacyOverview />
-      {sections.map((section) => {
+      {visibleSections.map((section) => {
         const body = (
           <div className="grid gap-3">
             {section.paragraphs.map((paragraph) => (

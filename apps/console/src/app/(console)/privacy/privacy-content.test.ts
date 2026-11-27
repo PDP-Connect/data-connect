@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url"
 
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 const PAGE_CONTENT_RE = /<PrivacyContent \/>/
-const SECTION_MAP_RE = /sections\.map\(\(section\) =>/
+const SECTION_MAP_RE = /visibleSections\.map\(\(section\) =>/
 const SECTION_RENDER_RE = /<Section\s+id=\{section\.id\}\s+key=\{section\.id\}\s+title=\{section\.title\}\s*>/
 const ABOUT_PRIVACY_LINK_RE = /<Text[\s\S]*?as=\{Link\}[\s\S]*?href="\/privacy"[\s\S]*?>\s*Privacy\s*<\/Text>/
 const PRIVACY_HREF_RE = /href="\/privacy"/g
@@ -25,7 +25,6 @@ test("the privacy page renders each required section", async () => {
 
   assert.match(page, PAGE_CONTENT_RE)
   for (const title of [
-    "What DataConnect keeps",
     "Where it keeps them",
     "Who can read your records",
     "What DataConnect sends out on its own",
@@ -35,6 +34,7 @@ test("the privacy page renders each required section", async () => {
     assert.ok(content.includes(`title: "${title}"`), `${title} must be rendered as a section`)
   }
   assert.match(content, SECTION_MAP_RE)
+  assert.ok(content.includes('title: "What DataConnect keeps"'), "the keeps section stays in the data; the overview already says it")
   assert.match(content, SECTION_RENDER_RE)
 })
 
@@ -90,4 +90,17 @@ test("the list of what is sent out folds under its visible heading", async () =>
   const content = await readFile(`${HERE}privacy-content.tsx`, "utf8")
   assert.match(content, /fold: true/)
   assert.match(content, /<details[^>]*>\s*<summary[^>]*>\{section\.title\}<\/summary>/)
+})
+
+// Round 10 (F45): the overview's sentences stand once on the page, not again in a section.
+test("no sentence of the privacy page is said twice", async () => {
+  const { renderToStaticMarkup } = await import("react-dom/server")
+  const React = await import("react")
+  ;(globalThis as { React?: unknown }).React = React
+  const { PrivacyContent } = await import("./privacy-content.tsx")
+  const html = renderToStaticMarkup(React.createElement(PrivacyContent))
+  const sentences = [...html.matchAll(/<p[^>]*>([^<]{30,})<\/p>/g)].map((match) => match[1])
+  assert.ok(sentences.length > 5)
+  assert.deepEqual(sentences.filter((value, index) => sentences.indexOf(value) !== index), [])
+  assert.match(html, /data-testid="privacy-overview"/)
 })
