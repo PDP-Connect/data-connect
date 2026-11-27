@@ -12,8 +12,9 @@ export function formatStreamPageCount(input: {
   pageNumber: number;
   shown: number;
   totalHeld: number | null;
-}): string {
+}): string | null {
   const onlyPage = input.pageNumber === 1 && !input.hasMore;
+  if (onlyPage && !input.filtered) return null;
   if (onlyPage) {
     const noun = input.filtered ? "matching record" : "record";
     return `${input.shown.toLocaleString()} ${noun}${input.shown === 1 ? "" : "s"}`;

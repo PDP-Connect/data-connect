@@ -8,8 +8,9 @@ import { formatStreamPageCount } from "./stream-page-count.ts";
 const base = { filtered: false, hasMore: false, matchingCount: null, pageNumber: 1, shown: 2, totalHeld: 2 };
 
 test("one page that holds everything reads '2 records', not 'Page 1 · 2 of 2'", () => {
-  assert.equal(formatStreamPageCount(base), "2 records");
-  assert.equal(formatStreamPageCount({ ...base, shown: 1, totalHeld: 1 }), "1 record");
+  // Round 10 (F26): the header already says "2 records"; an unfiltered single page adds no second line.
+  assert.equal(formatStreamPageCount(base), null);
+  assert.equal(formatStreamPageCount({ ...base, shown: 1, totalHeld: 1 }), null);
   assert.equal(formatStreamPageCount({ ...base, filtered: true, matchingCount: 2 }), "2 matching records");
 });
 

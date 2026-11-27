@@ -319,7 +319,7 @@ export default async function StreamPage({
       />
 
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <p className="pdpp-caption text-muted-foreground">{pageCount}</p>
+        {pageCount ? <p className="pdpp-caption text-muted-foreground">{pageCount}</p> : <span />}
         <div className="flex flex-wrap items-center gap-2">
           {tableView ? (
             <Link
