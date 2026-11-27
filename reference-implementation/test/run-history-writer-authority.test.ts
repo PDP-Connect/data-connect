@@ -564,6 +564,67 @@ test("scheduler.appendRunHistory upserts scheduler-only enrichment onto the spin
   }
 });
 
+for (const order of ["scheduler first", "runtime first"] as const) {
+  test("scheduler failure classification wins when " + order, async () => {
+    const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-failure-order-");
+    initDb(dbPath);
+    try {
+      const runId = "run_failure_order";
+      const connectorInstanceId = "cin_failure_order";
+      const failureReason = "The scheduler timed out while waiting for completion.";
+      const connectorError = { code: "scheduler_timeout", message: failureReason, retryable: true };
+      const runtimeMessage = "The runtime reported a different terminal failure.";
+      const store = createSqliteSchedulerStore();
+      await emitSpineEvent(startedEvent(runId, connectorInstanceId, "scheduled"));
+
+      const schedulerFailed = () => {
+        const entry = {
+          attempt: 2,
+          checkpointSummary: { streams: 0 },
+          completedAt: "2026-04-29T04:00:00.000Z",
+          connectorError,
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId,
+          failureReason,
+          knownGaps: [],
+          recordsEmitted: 0,
+          runId,
+          source: { id: CONNECTOR_ID, kind: "connector" as const },
+          startedAt: "2026-04-29T03:59:00.000Z",
+          status: "failed" as const,
+        };
+        return store.appendRunHistory(entry);
+      };
+      const runtimeFailed = () => {
+        const event = terminalEvent(runId, connectorInstanceId, "run.failed", "failed");
+        return emitSpineEvent({
+          ...event,
+          data: { ...event.data, failure_origin: "runtime", failure_message: runtimeMessage },
+        });
+      };
+
+      if (order === "scheduler first") {
+        await schedulerFailed();
+        assert.equal(readRunHistoryRow(runId)?.failure_reason, failureReason);
+        await runtimeFailed();
+      } else {
+        await runtimeFailed();
+        assert.equal(readRunHistoryRow(runId)?.failure_reason, runtimeMessage);
+        await schedulerFailed();
+      }
+
+      assert.equal(countRunHistoryRows(runId), 1);
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "failed");
+      assert.equal(row?.scheduler_managed, 1);
+      assert.equal(row?.failure_reason, failureReason);
+      assert.deepEqual(JSON.parse(row?.connector_error_json ?? "null"), connectorError);
+    } finally {
+      closeDb();
+    }
+  });
+}
+
 test("listRunHistory (scheduler cadence hydration) stays scoped to scheduler_managed rows", async () => {
   const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-scoped-list-");
   initDb(dbPath);
