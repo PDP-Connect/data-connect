@@ -17,7 +17,8 @@ let read: AddSourceCatalogRead;
 mock.module("./add-source-catalog-read.ts", {
   namedExports: {
     readAddSourceCatalog: async () => read,
-    findCatalogEntry: (value: AddSourceCatalogRead) => value.catalog[0],
+    findCatalogEntry: (value: AddSourceCatalogRead, key: string) =>
+      value.catalog.find((entry) => entry.connectorKey === key) ?? null,
   },
 });
 mock.module("./getting-ready.tsx", {
@@ -25,15 +26,20 @@ mock.module("./getting-ready.tsx", {
 });
 const page = import("./[connector]/page.tsx");
 
-test("connect page offers retry on the same service when the catalog is unavailable", async () => {
-  read = {
-    catalog: [ynab],
+function transientRead(overrides: Partial<AddSourceCatalogRead>): AddSourceCatalogRead {
+  return {
+    catalog: [],
     catalogNotFresh: null,
     catalogTransientlyUnavailable: true,
     existingConnectionCounts: {},
     existingConnectionIds: {},
     lifecycleFor: () => ({ catalog: null, installed: null }),
+    ...overrides,
   };
+}
+
+test("connect page offers retry on the same service when the catalog is unavailable", async () => {
+  read = transientRead({ catalog: [ynab] });
   const { default: ConnectServicePage } = await page;
   const html = renderToStaticMarkup(await ConnectServicePage({ params: Promise.resolve({ connector: "ynab" }) }));
   assert.match(html, /check for new services/);
@@ -42,9 +48,18 @@ test("connect page offers retry on the same service when the catalog is unavaila
 });
 
 test("connect page waits for an installed service to register despite a transient catalog", async () => {
-  read = { ...read, catalog: [{ ...ynab, registrationStatus: undefined }], lifecycleFor: () => installed("ynab") };
+  read = transientRead({ catalog: [{ ...ynab, registrationStatus: undefined }], lifecycleFor: () => installed("ynab") });
   const { default: ConnectServicePage } = await page;
   const html = renderToStaticMarkup(await ConnectServicePage({ params: Promise.resolve({ connector: "ynab" }) }));
   assert.match(html, /data-testid="getting-ready"/);
   assert.doesNotMatch(html, /check for new services/);
+});
+
+test("connect page offers retry, not cannot-add, for a service missing from a transient catalog read", async () => {
+  read = transientRead({ catalog: [ynab] });
+  const { default: ConnectServicePage } = await page;
+  const html = renderToStaticMarkup(await ConnectServicePage({ params: Promise.resolve({ connector: "claude-code" }) }));
+  assert.match(html, /check for new services/);
+  assert.match(html, /href="\/sources\/add\/claude-code"[^>]*>Try again/);
+  assert.doesNotMatch(html, /data-testid="cannot-be-added-here"/);
 });

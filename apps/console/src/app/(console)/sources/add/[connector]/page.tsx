@@ -40,6 +40,15 @@ export default async function ConnectServicePage({ params }: { params: Promise<{
     throw err;
   }
   const entry = findCatalogEntry(read, connectorKey);
+  if (!entry && read.catalogTransientlyUnavailable) {
+    // A catalog read that failed for now lists no packages, so a service known
+    // only from its package is missing; that is not "can't be added".
+    return (
+      <RecordroomShellWithPalette>
+        <AddSourceLoadFailed href={addSourceHref(connectorKey)} message={notFreshCopy(null)} />
+      </RecordroomShellWithPalette>
+    );
+  }
   if (!entry) {
     return (
       <RecordroomShellWithPalette>
