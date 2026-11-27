@@ -265,15 +265,22 @@ function fallbackPillRow(source: RefConnectorSummary, options: SourceStatusOptio
 }
 
 /**
- * The answer for a failed last run, from that run's own cause. With
+ * The answer for a failed last run, or a run that finished with gaps, from that run's own
+ * cause (the failure, or the gaps' causes). With
  * `any` false it answers only when the cause is a step for the person or an
  * unavailable service (the cases the server's maintainer verdict gets wrong).
  */
 function failedRunAnswer(source: RefConnectorSummary, options: SourceStatusOptions, name: string, any = false): MatchedStatus | null {
   const run = source.last_run;
-  if (run?.status !== "failed") return null;
-  const cause = resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, name);
-  if (!any && !cause.needsPerson && !cause.unavailable) return null;
+  if (!run) return null;
+  const failed = run.status === "failed";
+  // A run that finished with gaps has no failure, but each gap carries its own cause.
+  const gaps = Array.isArray(run.known_gaps) ? run.known_gaps : [];
+  if (!failed && gaps.length === 0) return null;
+  const cause = failed
+    ? resolveSyncCause({ reason: run.failure_reason ?? run.terminal_reason, connector_error: run.connector_error }, name)
+    : resolveSyncCause({ connector_error: gaps }, name);
+  if ((!failed || !any) && !cause.needsPerson && !cause.unavailable) return null;
   const savedKey = cause.credentialRejected && source.source_binding_kind === "static_secret";
   const sentence = savedKey ? `${name} no longer accepts the saved key.` : cause.sentence;
   const label = savedKey ? "Enter the key again" : cause.action;
@@ -333,6 +340,11 @@ function matchSourceStatus(source: RefConnectorSummary, options: SourceStatusOpt
   }
   if (resolver === "system_degraded") {
     const label = source.rendered_verdict?.pill.label;
+    // "Something stopped" is the server's answer for a cause it did not name; the run may name it.
+    if (label !== "Missing optional data" && label !== "Some records stuck") {
+      const known = failedRunAnswer(source, options, name);
+      if (known) return known;
+    }
     const base = label === "Missing optional data"
       ? "Some optional data is missing"
       : label === "Some records stuck"

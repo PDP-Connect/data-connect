@@ -567,3 +567,24 @@ test("an idle source that only syncs when asked is not broken", () => {
   assert.equal(scheduled.words, "A refresh is due · last synced 14 Nov");
   assert.deepEqual(scheduled.action, { kind: "sync_now", label: "Sync now", filled: false });
 });
+
+function partialRun(known_gaps: unknown[], status = "succeeded_with_gaps") {
+  return { event_count: 0, failure_reason: null, finished_at: SUCCESS, first_at: SUCCESS, known_gaps, last_at: SUCCESS, run_id: "run-test", started_at: SUCCESS, status } as never;
+}
+const sessionGap = { kind: "skip_result", stream: "transactions", reason: "session_expired", message: "Venmo ended the session (session_expired) before transactions were read" };
+
+test("a partial sync with a known cause gives that cause and next step, as the first-sync page does", () => {
+  const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: blockedByMaintainer, last_run: partialRun([sessionGap]), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
+  assert.equal(result.words, "Venmo asked for a new sign-in.");
+  assert.equal(result.action?.label, "Sign in again");
+});
+
+test("a partial sync with no known cause keeps the maintainers sentence", () => {
+  const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: blockedByMaintainer, last_run: partialRun([{ kind: "skip_result", stream: "transactions", reason: "unknown_thing" }]), rendered_verdict: verdict("Can't collect", [maintainerAction]) }), { now: NOW });
+  assert.equal(result.row, 13);
+});
+
+test("a partial sync with a known cause reads it when the server says only that something stopped", () => {
+  const result = sourceStatusWords(source({ connector_display_name: "Venmo", owner_state: { ...healthyState, resolver: "system_degraded" }, last_run: partialRun([sessionGap]), rendered_verdict: verdict("Can't collect") }), { now: NOW });
+  assert.equal(result.words, "Venmo asked for a new sign-in.");
+});
