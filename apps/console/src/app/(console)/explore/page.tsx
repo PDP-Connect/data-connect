@@ -46,6 +46,7 @@ import { getRsInternalUrl, ReferenceServerUnreachableError } from "../lib/owner-
 import { listConnectorManifests } from "../lib/rs-client.ts";
 import { verifyDashboardSession } from "../lib/verify-session.ts";
 import { ExploreCanvas } from "./explore-canvas.tsx";
+import { ExploreClock } from "./explore-clock.tsx";
 import { buildPeekRelationships, type PeekRelationships } from "./explore-peek-relationships.ts";
 
 /** Parse the peek body JSON the assembler attached, for child → parent links. */
@@ -159,14 +160,16 @@ export default async function RecordsExplorerPage({
     }
     return (
       <RecordroomShellWithPalette host="this server">
-        <ExploreCanvas
-          connectorIcons={connectorIcons}
-          data={data}
-          explorePath={dashboardRoutes.section.explore}
-          order={order}
-          peekRelationships={peekRelationships}
-          recordsBasePath={dashboardRoutes.section.records}
-        />
+        <ExploreClock now={Date.now()}>
+          <ExploreCanvas
+            connectorIcons={connectorIcons}
+            data={data}
+            explorePath={dashboardRoutes.section.explore}
+            order={order}
+            peekRelationships={peekRelationships}
+            recordsBasePath={dashboardRoutes.section.records}
+          />
+        </ExploreClock>
       </RecordroomShellWithPalette>
     );
   } catch (err) {

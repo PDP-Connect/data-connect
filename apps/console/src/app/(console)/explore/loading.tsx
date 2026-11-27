@@ -17,7 +17,7 @@ import { EXPLORE_LOADING_MESSAGE } from "./explore-presentation.ts";
 export default function ExploreLoading() {
   return (
     <RecordroomShellWithPalette host="this server">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8">
+      <div className="mx-auto w-full max-w-5xl">
         <p aria-live="polite" className="mb-4 text-[13px] text-muted-foreground" role="status">
           {EXPLORE_LOADING_MESSAGE}
         </p>

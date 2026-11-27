@@ -24,10 +24,17 @@ function humanText(value: string | undefined): string | undefined {
 }
 
 /** The feed title rule: authored title, first human text, then the human kind. */
-export function exploreRecordTitle({ preview, stream }: Pick<ExplorerFeedEntry, "preview" | "stream">): string {
+export function exploreRecordTitle({ preview, snippet, stream }: Pick<ExplorerFeedEntry, "preview" | "stream"> & { snippet?: string | undefined }): string {
   const title = humanText(preview?.title);
   if (title) {
     return title;
+  }
+  // A search hit carries only the matched text, not a preview; that text is the best name it has.
+  if (!preview) {
+    const matched = humanText(snippet);
+    if (matched) {
+      return matched;
+    }
   }
 
   const text = humanText(preview?.body) ?? humanText(preview?.author) ?? preview?.fields?.map((field) => humanText(field.value)).find(Boolean);
@@ -62,7 +69,7 @@ export function exploreDataSourceRows(
 }
 
 /** The one row's visible text, kept free of wire names and technical identifiers. */
-export function exploreRecordRow(entry: Pick<ExplorerFeedEntry, "connectionDisplayName" | "displayAt" | "preview" | "stream">, now = Date.now()) {
+export function exploreRecordRow(entry: Pick<ExplorerFeedEntry, "connectionDisplayName" | "displayAt" | "preview" | "stream"> & { snippet?: string | undefined }, now = Date.now()) {
   return {
     kind: exploreKindLabel(entry.stream),
     source: entry.connectionDisplayName ?? "Data source",

@@ -36,3 +36,19 @@ test("a multi-source permission event separates the past grant from the app's co
  const sentence=changeSentence({id:"event",trace_id:"trace",day:"2026-11-25",at:"2026-11-25T12:00:00Z",client_id:"client",change:"allowed",source_id:null,source_kind:null,connection_id:null,sources:[{source_id:"mail",source_kind:"connector",connection_id:null},{source_id:"old-service",source_kind:"connector",connection_id:null}]},app,sources);
  assert.ok(sentence.endsWith("Now it can read Mail 1, Mail 2, Mail 3 and 2 more."));
 });
+
+test("DataConnect's own sync is named as itself, never as 'connector runtime'", () => {
+  const base = buildAppPractice("one").apps.at(0) as NonNullable<ReturnType<typeof buildAppPractice>["apps"][number]>;
+  const runtime = { ...base, name: "DataConnect connector runtime", clientIds: ["dataconnect-connector-runtime"] };
+  const sentence = changeSentence({ id: "e", trace_id: "t", day: "2026-11-25", at: "2026-11-25T12:00:00Z", client_id: "dataconnect-connector-runtime", change: "allowed", source_id: "steam", source_kind: "connector", connection_id: null }, runtime, [{ id: "s", connector: "steam", name: "Steam", serviceName: "Steam" }]);
+  assert.doesNotMatch(sentence, /connector runtime/i);
+  assert.match(sentence, /DataConnect/);
+});
+
+test("the activity page's words use no internal names", async () => {
+  const { readFile } = await import("node:fs/promises");
+  for (const file of ["./activity-view.tsx", "./loading.tsx", "./error.tsx"]) {
+    const text = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.doesNotMatch(text, /audit events|not what it asked\./, file);
+  }
+});

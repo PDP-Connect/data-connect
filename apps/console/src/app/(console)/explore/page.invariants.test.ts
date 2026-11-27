@@ -56,7 +56,7 @@ const RECORD_DETAIL_NO_STREAM_HREF_APPEND_RE =
 const INSPECTOR_STREAM_HREF_RE =
   /streamRecordsHref=\{!feedStateOnly && data\.peek \? buildStreamRecordsHref\(recordsBasePath, data\.peek\) : null\}/;
 const INSPECTOR_STREAM_LINK_RE =
-  /<a className="rr-x-stream-all" href=\{streamRecordsHref\}>Browse this kind →<\/a>/;
+  /<a className="rr-x-stream-all" href=\{streamRecordsHref\}>\{browseKindLinkText\(streamLabel \?\? humanizeFieldLabel\(record\.stream\)\)\}<\/a>/;
 const CANVAS_PASSES_RECORDS_BASE_RE =
   /<RecordInspector[\s\S]*record=\{feedStateOnly \? null : data\.peek\}[\s\S]*relationships=\{peekRelationships\}/;
 const HEADER_FULL_STREAM_USES_HELPER_RE =
@@ -175,7 +175,7 @@ const ASSEMBLER_ROLES_SEAM_RE =
   /function declaredRolesFromCapabilities\([\s\S]*\):\s*DeclaredFieldRoles\s*\{[\s\S]*parseFieldRole\(cap\.role\)/;
 const ASSEMBLER_PASSES_ROLES_RE = /buildRecordPreview\(kind, data, dtypes, droles\)/;
 // The live feed uses one shared presentation rule for its title and context.
-const CANVAS_RECORD_ROW_HELPER_RE = /const \{ title, source: sourceName, kind, time \} = exploreRecordRow\(entry\);/;
+const CANVAS_RECORD_ROW_HELPER_RE = /const \{ title, source: sourceName, kind, time \} = exploreRecordRow\(entry, useExploreNow\(\)\);/;
 const CANVAS_ROW_CONTEXT_RE = /<span className="rr-x-row__meta">\{kind\} · \{sourceName\}<\/span>/;
 const CANVAS_ROW_TITLE_TEXT_RE = /<span className="rr-x-row__title">\{title\}<\/span>/;
 const CANVAS_ROW_NO_LEGACY_SUMMARY_RE = /entry\.summary|matchExcerpt/;

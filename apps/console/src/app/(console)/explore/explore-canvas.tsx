@@ -147,6 +147,7 @@ import {
   EXPLORE_FAILED_MESSAGE,
   exploreRecordRow,
 } from "./explore-presentation.ts";
+import { useExploreNow } from "./explore-clock.tsx";
 import "./explore-page.css";
 
 const UNDERSCORE_RE = /_/g;
@@ -1494,7 +1495,7 @@ function SearchHeader({
   return (
     <div className="rr-x-search-header">
       <span className="rr-x-search-header__title">
-        Search results for &lsquo;{query}&rsquo;
+        Search results
       </span>
       {/* Most relevant / Most recent sort toggle. "Most recent" is available only
           when the descriptor can be time-ordered or paged; for relevance_bounded
@@ -1564,7 +1565,7 @@ function StreamDoorLink({
   });
   return (
     <a className="rr-x-stream-door" href={streamHref}>
-      See all '{query}' records from <ConnectorMark spacing="around" connectorId={door.connectorId} icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
+      See all matching records from <ConnectorMark spacing="around" connectorId={door.connectorId} icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
     </a>
   );
 }
@@ -1797,7 +1798,7 @@ function FeedRow({
   onClearSelection: () => void;
   onArrow: (direction: -1 | 1) => void;
 }) {
-  const { title, source: sourceName, kind, time } = exploreRecordRow(entry);
+  const { title, source: sourceName, kind, time } = exploreRecordRow(entry, useExploreNow());
   const detailHref = buildRecordDetailHref(recordsBasePath, entry);
   const rowClassName = `rr-x-row${selected ? " is-selected" : ""}`;
   const content = (

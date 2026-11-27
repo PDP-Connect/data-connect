@@ -1,6 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { appAccessLines, appPlaceLine } from "./app-access-words.ts";
 import { IcButton } from "@pdpp/brand-react";
 import Link from "next/link";
 import { personDate } from "../history/day-cut.ts";
@@ -42,7 +43,7 @@ export function AppAccessList({
               href={`/grants/${encodeURIComponent(app.hrefId)}${demo ? `?demo=${encodeURIComponent(demo)}` : ""}`}
             >
               <span className="block font-medium text-[15px]">{app.name}</span>
-              {app.place && app.place !== "no address given" && app.place !== app.name ? <span className="block text-[13px] text-muted-foreground">{app.place}</span> : null}
+              {appPlaceLine(app) ? <span className="block text-[13px] text-muted-foreground">{appPlaceLine(app)}</span> : null}
               {stopped ? (
                 <span className="block text-[13px] text-muted-foreground">
                   {app.stoppedReason === "expired" ? "Ended" : "Removed"}
@@ -51,7 +52,7 @@ export function AppAccessList({
               ) : (
                 <>
                   <span className="block text-[13px] text-muted-foreground">
-                    Can read {app.readsAllSources ? "all your data sources" : sourcePhrase(app.sources)}
+                    Can read {sourcePhrase(appAccessLines(app))}
                   </span>
                   <span className="block text-[13px] text-muted-foreground">
                     {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}` : "Has not read anything yet"}

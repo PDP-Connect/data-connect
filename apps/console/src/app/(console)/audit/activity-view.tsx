@@ -31,7 +31,10 @@ function currentAccessNames(app:AppAccess,sources:HistorySource[]):string[] {
     }
     return [...currentNames.values()];
  }
+/** The client DataConnect's own sync runs as; it is not an app a person allowed. */
+const OWN_SYNC_CLIENT_IDS = new Set(["dataconnect-connector-runtime", "dataconnect-console"]);
 export function changeSentence(change: AccessChange, app: AppAccess, sources: HistorySource[]): string {
+
   const sameService=(left:string,right:string)=>canonicalConnectorKey(left).replaceAll("_","-")===canonicalConnectorKey(right).replaceAll("_","-");
   const storedSources = change.sources ?? (change.source_id ? [{source_id:change.source_id,connection_id:change.connection_id,source_kind:change.source_kind}] : []);
   const rawSources = storedSources;
@@ -41,6 +44,9 @@ export function changeSentence(change: AccessChange, app: AppAccess, sources: Hi
     return name === "Data source" && matched ? matched.name || appSourceName(matched.source) || name : name;
   }).filter(name=>name !== "Data source"))];
   const knownSource = names.length ? `${names.slice(0,3).join(", ")}${names.length > 3 ? ` and ${names.length-3} more` : ""}` : null;
+  if (OWN_SYNC_CLIENT_IDS.has(change.client_id) || app.clientIds.some((id) => OWN_SYNC_CLIENT_IDS.has(id))) {
+    return knownSource ? `DataConnect's own sync was set up for ${knownSource}.` : "DataConnect's own sync was set up for a data source.";
+  }
   if (change.change === "not_allowed") { return `You didn't allow ${app.name}.`; }
   if (change.change === "removed") { return knownSource ? `You stopped ${app.name} reading ${knownSource}.` : `You removed ${app.name}'s access.`; }
   if(storedSources.length>1 && app.state === "reading") {
@@ -82,7 +88,7 @@ export function ActivityView({ rows, changes, apps, sources, offset, days = 7, p
   const hasItems=rows.some(row=>(params.only_access!=="true" && row.reads>0) || row.permission_refusals>0) || changes.some(change=>apps.some(app=>app.clientIds.includes(change.client_id)));
   return <>
     <PageHeader title="Activity" description="What apps read, and when." />
-    <p className="mb-6 text-[13px] text-muted-foreground">DataConnect keeps what an app read, not what it asked.</p>
+    <p className="mb-6 text-[13px] text-muted-foreground">DataConnect records what an app read, not what it asked for.</p>
     {hasItems ? <HistoryFilters path="/audit">{demo ? <input type="hidden" name="demo" value={demo} /> : null}<select aria-label="App" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" name="app" defaultValue={params.app ?? ""}><option value="">All apps</option>{apps.filter(app=>app.state==="reading" || rows.some(row=>row.app===app && row.reads>0)).sort((a,b)=>a.name.localeCompare(b.name,"en",{numeric:true})).map(app => <option key={app.hrefId} value={app.hrefId}>{app.name}{apps.some(other=>other !== app && other.name === app.name) ? ` (${app.place})` : ""}</option>)}</select><select aria-label="Data source" className="min-h-11 max-w-full rounded-md border border-border bg-background px-3" name="connection_id" defaultValue={params.connection_id ?? ""}><option value="">All data sources</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select><label className="flex min-h-11 items-center gap-2"><input name="only_access" type="checkbox" value="true" defaultChecked={params.only_access === "true"} />Only changes to access</label></HistoryFilters> : null}
     <AppendHistory key={JSON.stringify(params)} initial={{content:<ActivityDays rows={rows} changes={changes} apps={apps} sources={sources} offset={offset} params={params} demo={demo} days={days} />,next:beforeDay ?? null,firstDay}} load={loadMore} label="Earlier" />
     {!hasItems && (params.app || params.connection_id || params.only_access) ? <><p>Nothing matches.</p><Link href="/audit">Show everything</Link></> : null}

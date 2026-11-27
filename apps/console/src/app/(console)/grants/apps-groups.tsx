@@ -1,9 +1,8 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { buttonVariants, IcButton, IcInput, Text } from "@pdpp/brand-react";
+import { IcButton, IcInput, Text } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { AppAccess } from "./app-access.ts";
@@ -129,9 +128,7 @@ export function AppsGroups({
         </Section>
       ) : (
         <Section title="No app can read your data yet.">
-          <Link className={buttonVariants()} href="/connect">
-            Connect an app
-          </Link>
+          <p>Use the button above to let one read it.</p>
         </Section>
       )}
       {stopped.length ? (

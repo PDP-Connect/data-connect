@@ -34,3 +34,13 @@ export function oneSyncPractice(state: string, now = Date.now()): OneSyncModel {
 export function oneSyncKindNames(sources: HistorySource[], connection: string | null, kinds: string[]): Record<string,string> {
   return Object.fromEntries(kinds.map(kind=>[kind,historyKindName(sources,connection,kind)]));
 }
+
+/** A failed run says its cause once; the source's current line is shown only when it says something else. */
+export function currentStateAddsToFailure(outcome: OneSyncModel["outcome"], causeSentence: string, currentState: string): boolean {
+  return !(outcome === "failed" && currentState.includes(causeSentence));
+}
+
+/** What the totals under a run are called: after a failure that brought nothing, they are what came before. */
+export function hereNowTitle(outcome: OneSyncModel["outcome"], thisSyncBroughtRecords: boolean): string {
+  return outcome === "failed" && !thisSyncBroughtRecords ? "Already copied before this sync" : "What is here now";
+}

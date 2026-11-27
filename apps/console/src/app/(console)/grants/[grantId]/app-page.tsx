@@ -1,4 +1,5 @@
 "use client";
+import { appPlaceLine } from "../app-access-words.ts";
 import { buttonVariants, IcButton } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 // Copyright The PDP-Connect Contributors
@@ -54,24 +55,7 @@ export function AppPage({
       <Link href="/grants">Apps</Link>
       <PageHeader
         actions={
-          reading ? (
-            <div className="flex flex-col items-start gap-2">
-              <IcButton onClick={() => removal.setQuestion("all")} variant="destructive">
-                Remove access
-              </IcButton>
-              {removal.error?.source === "all" ? (
-                <div className="text-destructive" role="alert">
-                  <p>Access could not be removed.</p>
-                  <IcButton disabled={removal.busy} onClick={() => void removal.remove("all")} variant="ghost">
-                    Try again
-                  </IcButton>
-                  <Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>
-                    What went wrong
-                  </Link>
-                </div>
-              ) : null}
-            </div>
-          ) : app.state === "waiting" ? (
+          app.state === "waiting" ? (
             <Link
               className={buttonVariants()}
               href={demo ? "/consent?demo=one" : `/grants/approvals/${encodeURIComponent(app.pendingId || app.hrefId)}`}
@@ -83,14 +67,29 @@ export function AppPage({
         title={app.name}
       />
       <p className="text-[13px] text-muted-foreground">
-        {!app.place || app.place === "no address given" || app.place === app.name ? "" : app.place}
-        {app.verified ? "" : `${!app.place || app.place === "no address given" || app.place === app.name ? "" : " · "}not verified`}
+        {appPlaceLine(app)}
       </p>
-      {app.verified ? null : (
-        <p className="text-[13px] text-muted-foreground">
-          DataConnect could not confirm who runs this app. Remove its access if you don’t recognise it.
-        </p>
-      )}
+      {reading ? (
+        <div className="mt-3 flex flex-col items-start gap-2">
+          {app.verified ? null : (
+            <p>DataConnect could not confirm who runs this app. Remove its access if you don’t recognise it.</p>
+          )}
+          <IcButton onClick={() => removal.setQuestion("all")} variant="destructive">
+            Remove access
+          </IcButton>
+          {removal.error?.source === "all" ? (
+            <div className="text-destructive" role="alert">
+              <p>Access could not be removed.</p>
+              <IcButton disabled={removal.busy} onClick={() => void removal.remove("all")} variant="ghost">
+                Try again
+              </IcButton>
+              <Link className="ml-3 underline" href={`/grants/${encodeURIComponent(app.hrefId)}/technical`}>
+                What went wrong
+              </Link>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {app.state === "waiting" ? (
         <>
           <p>{app.name} is waiting for your answer.</p>
@@ -99,7 +98,7 @@ export function AppPage({
         <>
           <p className="mt-4">
             Can read your data{app.since ? ` since ${date(app.since)}` : ""}.{" "}
-            {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}.` : "Has not read anything yet."}{" "}
+            {app.lastRead ? `Last read ${formatAppLastRead(app.lastRead)}.` : ""}{" "}
             {app.expiresAt ? `Access ends ${date(app.expiresAt)}.` : "Access lasts until you remove it."}
           </p>
         </>
@@ -160,7 +159,7 @@ export function AppPage({
                           <p className="text-[13px] text-muted-foreground">
                             {source.last_read_at
                               ? `Last read ${formatAppLastRead(source.last_read_at)}`
-                              : source.neverRead
+                              : source.neverRead && app.lastRead
                                 ? "Has not read anything yet"
                                 : ""}
                           </p>
@@ -168,7 +167,7 @@ export function AppPage({
                       </div>
                       {canRead ? (
                         <Button onClick={() => removal.setQuestion(key)} size="sm" variant="link">
-                          Remove
+                          Remove {name}
                         </Button>
                       ) : null}
                     </div>

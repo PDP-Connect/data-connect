@@ -64,8 +64,8 @@ test("the boundary renders the same loading skeleton the route's loading.tsx use
   assert.match(src, IMPORTS_LOADING_SKELETON_RE);
   assert.match(src, USES_LOADING_SKELETON_RE);
   assert.match(src, RECOVERING_TESTID_RE);
-  // loading.tsx uses ListLoadingSkeleton label="audit events" rows={8}.
-  assert.match(src, /ListLoadingSkeleton label="audit events" rows=\{8\}/);
+  // loading.tsx uses ListLoadingSkeleton label="activity" rows={8}.
+  assert.match(src, /ListLoadingSkeleton label="activity" rows=\{8\}/);
 });
 
 test("the boundary retries unbounded on a capped backoff held at module scope, with no manual-retry terminal state", async () => {
