@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import { ListLoadingSkeleton } from "../components/route-loading.tsx";
 import "./sources-view.css";
+import { SourcesLoadingSkeleton } from "./sources-loading-skeleton.tsx";
 
 /**
  * Route-level loading state for the data sources list.
@@ -14,7 +14,7 @@ import "./sources-view.css";
 export default function RecordsLoading() {
   return (
     <RecordroomShellWithPalette>
-      <ListLoadingSkeleton label="data sources" rows={6} />
+      <SourcesLoadingSkeleton />
     </RecordroomShellWithPalette>
   );
 }

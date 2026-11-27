@@ -138,8 +138,8 @@ test("filter, notices, loading shape, and pager remain in their specified positi
   assert.match(view, /sources-runtime-advisory/);
   assert.match(view, /sources-duplicate-review/);
   assert.match(page, /ConnectorSummaryPager/);
-  // DIRECTION.md, “Data sources /sources”: loading uses the title-and-rows list shape.
-  assert.match(loading, /ListLoadingSkeleton label="data sources" rows=\{6\}/);
+  // DIRECTION.md, “Data sources /sources”: loading shows the page's title and button, then plain rows.
+  assert.match(loading, /<SourcesLoadingSkeleton \/>/);
 });
 
 test("blank overview still offers the existing Add a data source route", async () => {
