@@ -44,7 +44,7 @@ test("the helper says what a lost browser means, offers Try again and hides Done
 test("a lost browser's card keeps no sign-in instruction, and the round buttons say what they do in words", async () => {
   const src = await readFile(VIEWER, "utf8");
   const dock = src.slice(src.indexOf("Finish signing in"));
-  assert.match(dock, /\{browserLost \? null : <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in<\/p>\}/);
+  assert.match(dock, /\{browserLost \? null : <p className="pdpp-caption text-muted-foreground">\{interactionStepLabel\(interactionKind\)\}<\/p>\}/);
   assert.match(dock, /\{browserLost \? null : <p className="pdpp-caption text-foreground">\{message\}<\/p>\}/);
   assert.match(src, /pdpp-stream-control-label">More</);
   assert.match(src, /pdpp-stream-control-label">Stop</);

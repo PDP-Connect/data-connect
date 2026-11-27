@@ -10,6 +10,7 @@
  * remote media, while the direct-CDP canvas is sized by Remote Surface's assembled session. */
 "use client";
 
+import { interactionStepLabel } from "./interaction-step.ts";
 import "./stream.css";
 import {
   assessNekoMediaSettle,
@@ -5935,7 +5936,7 @@ function StreamInteractionDock({
             Hide instructions
           </IcButton>
         </div>
-        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>}
+        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">{interactionStepLabel(interactionKind)}</p>}
         {browserLost ? null : <p className="pdpp-caption text-foreground">{message}</p>}
         <div className="flex flex-wrap gap-2">{moveButton}</div>
         {interactionKind === "otp" && !browserLost ? (
