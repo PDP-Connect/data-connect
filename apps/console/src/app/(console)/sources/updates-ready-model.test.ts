@@ -85,3 +85,14 @@ test("update demos seed each requested count and the finished failure result", (
   assert.equal(finished.model.buttonLabel, "Update both");
   assert.equal(finished.initialResult, "Updated data source Calendar. Could not update data source Email.");
 });
+
+// Phone walk: seventeen names in one sentence is unreadable; a long list becomes a count.
+test("a long list of data sources reads as a count, a short one keeps the names", () => {
+  const many = Array.from({ length: 17 }, (_, index) => `kind${index}`);
+  const model = buildUpdatesReadyModel(snapshot(many), sourcesByConnector(many));
+  assert.ok(model);
+  assert.equal(model.namesText, "17 data sources");
+  assert.equal(model.buttonLabel, "Update all");
+  const three = buildUpdatesReadyModel(snapshot(["a", "b", "c"]), sourcesByConnector(["a", "b", "c"]));
+  assert.equal(three?.namesText, "Data source 1, Data source 2, and Data source 3");
+});

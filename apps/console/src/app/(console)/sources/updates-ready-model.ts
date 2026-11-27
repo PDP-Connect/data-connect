@@ -34,6 +34,9 @@ function listNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
 }
 
+/** More names than this read as a count; the names are on the page "See what changes" opens. */
+const MAX_NAMES_LISTED = 3;
+
 function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
   if (kinds.length === 0) return null;
   const names = [...new Set(kinds.flatMap((kind) => kind.sourceNames))].sort((a, b) => a.localeCompare(b));
@@ -41,7 +44,7 @@ function modelFromKinds(kinds: UpdatesReadyKind[]): UpdatesReadyModel | null {
   return {
     buttonLabel: kinds.length === 1 ? "Update" : kinds.length === 2 ? "Update both" : "Update all",
     kinds,
-    namesText: listNames(names),
+    namesText: names.length > MAX_NAMES_LISTED ? `${names.length} data sources` : listNames(names),
     seeChangesHref: kinds.length === 1
       ? `/sources/add?source_q=${encodeURIComponent(kinds[0]?.connectorId ?? "")}`
       : "/sources/add",
