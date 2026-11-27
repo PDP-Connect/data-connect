@@ -34,7 +34,13 @@
 ## Behavior
 
 - Developer mode is off by default.
-- When enabled, the Add source page shows the developer connector sources panel and the development connector filter.
+- When enabled, Add source can show development-tier connectors and the
+  developer connector sources panel. This changes visibility, not whether a
+  connector can be installed or set up. Once the package catalog answers, a
+  connector with no offered package, no installed package, and no registered
+  setup is omitted. A visible connector can still be unavailable on this host.
+  There is no separate development filter on Add source; the hidden-count
+  notice links back to Settings.
 - Remote access is Off by default. Public URL requires an HTTPS origin and an
   owner password in the same blocking flow.
 
@@ -42,3 +48,9 @@
 
 - Developer mode is browser-local. Remote access is a desktop configuration and
   is unavailable in a normal browser session.
+
+Developer mode only affects development-tier visibility on Add source. Once
+package inventory has loaded, connectors with no package, no installed package,
+and no registration are filtered separately, even when developer mode is on.
+While package inventory is temporarily unavailable, that filter is deferred and
+Add source shows the catalog recovery notice. See `../components/source-setup-catalog.tsx`.

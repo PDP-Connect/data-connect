@@ -124,6 +124,9 @@ export async function runOwnedHarness(
       { once: true }
     )
   )
+  // Teardown aborts too, so this rejects on every run. Only the race below
+  // observes it; a start that throws before the race must not leave it unhandled.
+  aborted.catch(() => {})
   try {
     root = await mkdtemp(
       join(process.env.TEST_TMPDIR || tmpdir(), "dataconnect-e2e-")

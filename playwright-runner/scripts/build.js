@@ -70,16 +70,16 @@ export function getPlaywrightBrowserPath({
 }
 
 // Find the chromium directory
-function findChromiumDir(basePath) {
+export function findChromiumDir(basePath, platformName = PLATFORM) {
   if (!existsSync(basePath)) {
     return null
   }
 
   const entries = readdirSync(basePath)
-  const chromiumDir = entries.find(e => e.startsWith("chromium-"))
-
-  if (chromiumDir) {
-    return join(basePath, chromiumDir)
+  for (const entry of entries) {
+    if (!/^chromium-\d+$/.test(entry)) continue
+    const dir = join(basePath, entry)
+    if (findChromiumExecutable(dir, platformName)) return dir
   }
   return null
 }
@@ -100,7 +100,7 @@ export function getBrowserDirectoryName(browserPath, platformName = PLATFORM) {
     : posix.basename(browserPath)
 }
 
-function findChromiumExecutable(chromiumDir) {
+function findChromiumExecutable(chromiumDir, platformName = PLATFORM) {
   const candidates = {
     darwin: [
       join(
@@ -152,7 +152,7 @@ function findChromiumExecutable(chromiumDir) {
       join(chromiumDir, "chrome-win64", "chrome.exe"),
       join(chromiumDir, "chrome-win", "chrome.exe"),
     ],
-  }[PLATFORM]
+  }[platformName]
   return candidates?.find(existsSync) || null
 }
 
@@ -201,7 +201,12 @@ function getOutputName() {
 
 function optionValue(argv, name) {
   const index = argv.indexOf(name)
-  return index === -1 ? null : argv[index + 1] || null
+  if (index === -1) return null
+  const value = argv[index + 1]
+  if (!value || value.startsWith("--")) {
+    throw new Error(`${name} requires a value`)
+  }
+  return value
 }
 
 export function parseBuildOptions(argv) {

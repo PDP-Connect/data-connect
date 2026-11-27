@@ -11,12 +11,16 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, waitFor } from "@testing-library/react"
+import { flushTelemetry, persistAndFlush } from "@/lib/telemetry/client"
+import { trackHostCompleted, trackHostStarted } from "@/lib/telemetry/events"
 import { TooltipProvider } from "@/components/ui/tooltip"
 // Imported statically so the ~400 ms cold transform of the whole app graph is
 // paid at file import (which has no per-test timeout), not inside the 5 s test
 // budget. Nothing in the graph reads the Tauri marker at import time; every
 // isTauriRuntime() check runs inside a hook or handler.
+import { deriveTimeline } from "./apps/timeline/timeline-derivation"
 import App from "./App"
+import { deriveIconUrls } from "./apps/icon-url"
 
 const invokedCommands: string[] = []
 
@@ -54,11 +58,27 @@ vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: async () => new Response(JSON.stringify({}), { status: 200 }),
 }))
 
+vi.mock("@/lib/telemetry/client", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry/client")>()),
+  flushTelemetry: vi.fn(async () => {}),
+  persistAndFlush: vi.fn(),
+}))
+
+vi.mock("@/lib/telemetry/events", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/telemetry/events")>()),
+  trackHostCompleted: vi.fn(),
+  trackHostStarted: vi.fn(),
+}))
+
 describe("legacy App bootstrap", () => {
   afterEach(() => {
     cleanup()
     invokedCommands.length = 0
     vi.restoreAllMocks()
+    vi.mocked(flushTelemetry).mockClear()
+    vi.mocked(persistAndFlush).mockClear()
+    vi.mocked(trackHostCompleted).mockClear()
+    vi.mocked(trackHostStarted).mockClear()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     delete (window as any).__TAURI_INTERNALS__
   })
@@ -80,5 +100,102 @@ describe("legacy App bootstrap", () => {
       expect(invokedCommands).toContain("start_personal_server")
       expect(invokedCommands).toContain("check_connector_updates")
     })
+  })
+
+  it("records host completion and flushes with keepalive on pagehide", async () => {
+    window.history.pushState({}, "", "/__loading")
+    render(
+      <TooltipProvider delayDuration={0}>
+        <App />
+      </TooltipProvider>
+    )
+
+    await waitFor(() => expect(trackHostStarted).toHaveBeenCalledTimes(1))
+    expect(trackHostCompleted).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event("pagehide"))
+    expect(trackHostCompleted).toHaveBeenCalledTimes(1)
+    expect(trackHostCompleted).toHaveBeenCalledWith(expect.any(Number))
+    expect(persistAndFlush).toHaveBeenCalledTimes(1)
+    expect(flushTelemetry).toHaveBeenLastCalledWith({ keepalive: true })
+  })
+
+  it("stops observing pagehide when the app unmounts", async () => {
+    window.history.pushState({}, "", "/__loading")
+    const { unmount } = render(
+      <TooltipProvider delayDuration={0}>
+        <App />
+      </TooltipProvider>
+    )
+
+    await waitFor(() => expect(trackHostStarted).toHaveBeenCalledTimes(1))
+    unmount()
+    window.dispatchEvent(new Event("pagehide"))
+    expect(trackHostCompleted).not.toHaveBeenCalled()
+    expect(persistAndFlush).not.toHaveBeenCalled()
+  })
+})
+
+it("places valid four-digit early calendar years on the timeline", async () => {
+  const { deriveTimeline } = await import("./apps/timeline/timeline-derivation")
+  const result = deriveTimeline({ streams: [{
+    stream: { id: "archive", label: "Archive", fields: [{ name: "date", format: "date" }],
+      primaryKey: [], timestampFields: ["date"] },
+    records: [
+      { id: "date", data: { date: "0099-01-01" } },
+      { id: "datetime", data: { date: "0004-02-29T12:00:00Z" } },
+      { id: "invalid", data: { date: "0003-02-29" } },
+    ],
+    hasMore: false,
+  }] }, { maxRecords: 10, maxStreams: 1 })
+  expect(result.dayGroups.map(group => group.dayKey)).toEqual(["0099-01-01", "0004-02-29"])
+  expect(result.undatedRecords.map(record => record.recordId)).toEqual(["invalid"])
+})
+
+describe("app icon candidates", () => {
+  it("keeps an explicit icon first, deduplicates it, and resolves fallbacks at the app origin", () => {
+    expect(deriveIconUrls("https://app.example/workspace/home", "  https://app.example/favicon.ico  ")).toEqual([
+      "https://app.example/favicon.ico",
+      "https://app.example/icon.svg",
+      "https://app.example/icon.png",
+      "https://app.example/apple-touch-icon.png",
+    ])
+  })
+
+  it("retains a valid explicit icon when the app address cannot be resolved", () => {
+    expect(deriveIconUrls("not-an-app-url", "  https://icons.example/app.png  ")).toEqual([
+      "https://icons.example/app.png",
+    ])
+    expect(deriveIconUrls(null, "   ")).toEqual([])
+  })
+})
+
+describe("timeline read failure states", () => {
+  const stream = {
+    id: "demo.events",
+    label: "Demo",
+    fields: [{ name: "event_time", type: "string", format: "date-time" }],
+    primaryKey: ["id"],
+    timestampFields: ["event_time"],
+  }
+  const limits = { maxRecords: 20, maxStreams: 2 }
+
+  it("keeps unusable timestamps listed separately instead of losing their records", () => {
+    const read = deriveTimeline({ streams: [{
+      stream, hasMore: false, records: [
+        { id: "missing-zone", data: { title: "Missing zone", event_time: "2025-02-28T09:15:00" } },
+        { id: "impossible-date", data: { title: "Impossible date", event_time: "2025-02-30T09:15:00Z" } },
+      ],
+    }] }, limits)
+    expect(read.dayGroups).toEqual([])
+    expect(read.undatedRecords).toHaveLength(2)
+    expect(read.undatedRecords.every(record => record.reason === "no-usable-timestamp")).toBe(true)
+    expect(read.processedRecordCount).toBe(2)
+  })
+
+  it("does not present an empty partial page as a complete timeline", () => {
+    const read = deriveTimeline({ streams: [{ stream, hasMore: true, records: [] }] }, limits)
+    expect(read.dayGroups).toEqual([])
+    expect(read.omittedRecordCount).toBe(0)
+    expect(read.isTruncated).toBe(true)
   })
 })

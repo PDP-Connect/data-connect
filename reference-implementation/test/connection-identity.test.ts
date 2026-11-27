@@ -10,3 +10,8 @@ test("a matching connector's own display name is preserved", () => {
   assert.equal(projectPinnedConnectionDisplayName(instance, "example-connection", "example"), "Example workspace");
   assert.equal(projectPinnedConnectionDisplayName(instance, "example-connection", null), "Example workspace");
 });
+
+test("a display name is not projected for a different pinned connector", () => {
+  const instance = { connectorId: "example", displayName: "Example workspace" };
+  assert.equal(projectPinnedConnectionDisplayName(instance, "example-connection", "other"), null);
+});

@@ -246,6 +246,32 @@ test("ownership guard refuses each unsafe condition before a write", async t => 
   }
 })
 
+test("ownership guard fails without an existing owned data path or marker", async t => {
+  const root = await mkdtemp(join(tmpdir(), "e2e-owner-missing-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const data = join(root, "data")
+  const sentinel = join(root, "sentinel")
+  await writeFile(sentinel, "untouched")
+  const before = await snapshot(sentinel)
+  const env = {
+    E2E_BASE_URL: "http://127.0.0.1:1234",
+    E2E_HARNESS_ROOT: root,
+    E2E_DATA_DIR: data,
+    E2E_HARNESS_NONCE: "fixture-nonce",
+    E2E_OWNER_PASSWORD: "test-only",
+  }
+  await t.test("a missing data directory is not created", async () => {
+    await assert.rejects(assertHarnessOwnership(env, loopback), { code: "ENOENT", path: data })
+    assert.deepEqual(await snapshot(sentinel), before)
+  })
+  await t.test("an existing data directory without a marker is not adopted", async () => {
+    await mkdir(data)
+    await assert.rejects(assertHarnessOwnership(env, loopback), { code: "ENOENT", path: join(data, MARKER) })
+    await assert.rejects(readFile(join(data, MARKER), "utf8"), { code: "ENOENT" })
+    assert.deepEqual(await snapshot(sentinel), before)
+  })
+})
+
 test("watcher stop waits for an in-flight write and prevents subsequent ticks", async () => {
   let release
   let started
@@ -273,6 +299,23 @@ test("watcher stop waits for an in-flight write and prevents subsequent ticks", 
   assert.equal(writes, 1)
   await delay(20)
   assert.equal(writes, 1, "no write may start after awaited stop")
+})
+
+test("watcher stop surfaces the original asynchronous tick error without retrying it", async () => {
+  const error = new Error("fixture write failed")
+  let attempts = 0
+  const stop = startWatcher(async () => {
+    attempts++
+    throw error
+  }, 1)
+  await assert.rejects(stop(), err => err === error)
+  await assert.rejects(stop(), err => err === error)
+  assert.equal(attempts, 1)
+})
+
+test("watcher stop also preserves a synchronous tick failure", async () => {
+  const stop = startWatcher(() => { throw new TypeError("fixture invalid state") }, 1)
+  await assert.rejects(stop(), { name: "TypeError", message: "fixture invalid state" })
 })
 
 test("child environment excludes ambient backend, credential, and loader configuration", () => {
@@ -318,4 +361,27 @@ test("streamed diagnostics redact a password split between chunks and authentica
     lines.join("\n"),
     /secret-value|session-token|bearer-token/
   )
+})
+
+test("owned harness preserves a startup error and removes its scratch directory", async () => {
+  const failure = new Error("synthetic startup failure")
+  let root
+  await assert.rejects(runOwnedHarness(({ root: ownedRoot }) => {
+    root = ownedRoot
+    throw failure
+  }), error => error === failure)
+  assert.ok(root)
+  await assert.rejects(stat(root), { code: "ENOENT" })
+})
+
+test("owned harness preserves a nonzero result and removes its scratch directory", async () => {
+  let root
+  const result = await runOwnedHarness(async ({ root: ownedRoot }) => {
+    root = ownedRoot
+    await writeFile(join(root, "fixture.txt"), "scratch fixture")
+    return 17
+  })
+  assert.equal(result, 17)
+  assert.ok(root)
+  await assert.rejects(stat(root), { code: "ENOENT" })
 })

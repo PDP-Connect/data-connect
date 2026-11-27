@@ -48,6 +48,117 @@ function createRedemptionApp({ externalOrigin } = {}) {
   return { app, redemptions }
 }
 
+function consentHandler(adapter) {
+  const routes = new Map()
+  registerGithubAuthorizationRoutes({
+    app: { post: (path, ...handlers) => routes.set(path, handlers.at(-1)) },
+    devToken: "test-only",
+    adapter,
+  })
+  return routes.get("/v1/pdpp/consent-requests")
+}
+
+test("consent handler rejects malformed JSON before invoking the adapter", async () => {
+  let called = false
+  const handle = consentHandler({ createConsentRequest() { called = true } })
+  const response = await handle({
+    req: { json: async () => { throw new SyntaxError("invalid fixture JSON") } },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.equal(called, false)
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "invalid fixture JSON", code: "invalid_request" },
+  })
+})
+
+function timelineHandler(path, adapter) {
+  const routes = new Map()
+  registerGithubAuthorizationRoutes({
+    app: { post: (route, ...handlers) => routes.set(route, handlers.at(-1)) },
+    devToken: "test-only-placeholder",
+    adapter,
+  })
+  return routes.get(path)
+}
+
+test("timeline revoke reports body read failure and never invokes the adapter", async () => {
+  let revokeCalls = 0
+  const handle = timelineHandler("/v1/pdpp/local-timeline/revoke", {
+    revokeLocalTimelineSession() { revokeCalls++ },
+  })
+  const response = await handle({
+    req: { json: async () => { throw new SyntaxError("invalid revoke JSON") } },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.equal(revokeCalls, 0)
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "invalid revoke JSON", code: "invalid_request" },
+  })
+})
+
+test("timeline approval does not acknowledge a failed local grant write", async () => {
+  const handle = timelineHandler("/v1/pdpp/local-timeline/consent-requests/:requestId/approve", {
+    issueLocalTimelineGrant() {
+      throw Object.assign(new Error("Grant store unavailable"), { code: "store_unavailable" })
+    },
+  })
+  const response = await handle({
+    req: {
+      json: async () => ({ session_id: "fixture-session", subject_id: "fixture-subject" }),
+      param: () => "fixture-request",
+    },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "Grant store unavailable", code: "store_unavailable" },
+  })
+})
+
+test("consent handler returns the adapter's explicit refusal code", async () => {
+  const handle = consentHandler({
+    createConsentRequest() {
+      throw Object.assign(new Error("The request has no data selection"), { code: "missing_selection" })
+    },
+  })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture", scopes: [] }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    status: 400,
+    body: { error: "The request has no data selection", code: "missing_selection" },
+  })
+})
+
+test("consent handler forwards rich authorization details without replacing legacy scopes", async () => {
+  const details = [{ type: "fixture", locations: ["https://example.invalid/collection"] }]
+  const payload = { session_id: "fixture", scopes: ["repo:read"], authorization_details: details }
+  const seen = []
+  const grant = { request_id: "request-fixture" }
+  const handle = consentHandler({ createConsentRequest(input) { seen.push(input); return grant } })
+  const response = await handle({
+    req: { json: async () => payload },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(seen, [{ sessionId: "fixture", scopes: ["repo:read"], authorizationDetails: details }])
+  assert.deepEqual(response, { body: grant, status: 201 })
+})
+
+test("consent handler supplies a stable default code for an uncoded adapter error", async () => {
+  const handle = consentHandler({ createConsentRequest() { throw new Error("synthetic fixture error") } })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture", scopes: ["repo:read"] }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, {
+    body: { error: "synthetic fixture error", code: "invalid_request" },
+    status: 400,
+  })
+})
+
 test("credential redemption accepts direct local request origin", async () => {
   const { app, redemptions } = createRedemptionApp()
   const authorization = await redemptionAuthorization({
@@ -121,4 +232,61 @@ test("credential redemption rejects HTTP downgrade proofs for owned tunnel host"
   )
 
   assert.equal(response.status, 403)
+})
+
+test("local timeline routes are registered by default", () => {
+  const routes = []
+  registerGithubAuthorizationRoutes({
+    app: { post: path => routes.push(path) },
+    devToken: "test-only",
+    adapter: {},
+  })
+
+  assert.deepEqual(routes.filter(path => path.includes("/local-timeline/")), [
+    "/v1/pdpp/local-timeline/consent-requests",
+    "/v1/pdpp/local-timeline/consent-requests/:requestId/approve",
+    "/v1/pdpp/local-timeline/revoke",
+  ])
+})
+
+test("disabling local timeline preserves the non-timeline routes", () => {
+  const routes = []
+  registerGithubAuthorizationRoutes({
+    app: { post: path => routes.push(path) },
+    devToken: "test-only",
+    adapter: {},
+    enableLocalTimeline: false,
+  })
+
+  assert.deepEqual(routes, [
+    "/v1/pdpp/credentials/:sessionId/redeem",
+    "/v1/pdpp/consent-requests",
+    "/v1/pdpp/consent-requests/:requestId/approve",
+    "/v1/pdpp/introspect",
+  ])
+})
+
+test("consent handler forwards the full selection DTO and the adapter response", async () => {
+  let received
+  const agreed = { request_id: "fixture-request" }
+  const handle = consentHandler({
+    createConsentRequest(input) { received = input; return agreed },
+  })
+  const scopes = ["fixture.records"]
+  const details = [{ type: "fixture" }]
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture-session", scopes, authorization_details: details }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(received, { sessionId: "fixture-session", scopes, authorizationDetails: details })
+  assert.deepEqual(response, { status: 201, body: agreed })
+})
+
+test("consent handler assigns invalid_request when an adapter refusal has no code", async () => {
+  const handle = consentHandler({ createConsentRequest() { throw new Error("synthetic refusal") } })
+  const response = await handle({
+    req: { json: async () => ({ session_id: "fixture-session" }) },
+    json: (body, status) => ({ body, status }),
+  })
+  assert.deepEqual(response, { status: 400, body: { code: "invalid_request", error: "synthetic refusal" } })
 })
