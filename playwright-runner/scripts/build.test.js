@@ -193,6 +193,31 @@ describe("playwright-runner build options", () => {
 })
 
 describe("Chromium cache selection", () => {
+  it("reports an absent browser cache without creating it", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-absent-"))
+    try {
+      const absent = join(root, "not-installed")
+      expect(findChromiumDir(absent, "linux")).toBeNull()
+      expect(() => readFileSync(absent)).toThrow(/ENOENT/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("does not package a cached browser executable for the wrong platform", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-cache-foreign-"))
+    try {
+      const dir = join(root, "chromium-1200")
+      const windows = join(dir, "chrome-win64")
+      mkdirSync(windows, { recursive: true })
+      writeFileSync(join(windows, "chrome.exe"), "synthetic Windows browser")
+      expect(findChromiumDir(root, "linux")).toBeNull()
+      expect(findChromiumDir(root, "win32")).toBe(dir)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("skips incomplete and headless-only caches in favor of a usable browser", () => {
     const root = mkdtempSync(join(tmpdir(), "browser-cache-selection-"))
     try {
