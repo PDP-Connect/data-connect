@@ -182,8 +182,8 @@ const fixtureSource = "fixture-source";
 
 test("canonical hashing rejects a non-JSON numeric value before returning a digest", () => {
   assert.throws(() => hashCanonicalJson({ count: 1n }), {
-    name: "TypeError",
     message: /BigInt/,
+    name: "TypeError",
   });
   assert.match(hashCanonicalJson({ count: "1" }), /^[a-f0-9]{64}$/);
 });
@@ -274,38 +274,57 @@ test("local-device batch commits to envelope order and preserves that order on t
   const first = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
   const second = buildLocalDeviceRecordEnvelope({
     ...envelopeFixture,
-    sourceInstanceId: fixtureSource,
     record: { ...envelopeFixture.record, key: "second" },
+    sourceInstanceId: fixtureSource,
   });
-  const build = (records: readonly typeof first[]) =>
-    buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records });
+  const build = (records: readonly (typeof first)[]) =>
+    buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, records, sourceInstanceId: fixtureSource });
   const forward = build([first, second]);
   const reverse = build([second, first]);
-  assert.deepEqual(forward.records.map((record) => record.record_key), [first.record_key, "second"]);
-  assert.deepEqual(reverse.records.map((record) => record.record_key), ["second", first.record_key]);
+  assert.deepEqual(
+    forward.records.map((record) => record.record_key),
+    [first.record_key, "second"]
+  );
+  assert.deepEqual(
+    reverse.records.map((record) => record.record_key),
+    ["second", first.record_key]
+  );
   assert.notEqual(forward.body_hash, reverse.body_hash);
 });
 
 test("envelope-only metadata changes the batch hash without leaking into records", () => {
   const envelope = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
-  const original = buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records: [envelope] });
+  const original = buildLocalDeviceIngestBatchRequest({
+    ...envelopeFixture,
+    records: [envelope],
+    sourceInstanceId: fixtureSource,
+  });
   const changed = buildLocalDeviceIngestBatchRequest({
     ...envelopeFixture,
-    sourceInstanceId: fixtureSource,
     records: [{ ...envelope, body_hash: `${envelope.body_hash}-changed` }],
+    sourceInstanceId: fixtureSource,
   });
   assert.deepEqual(changed.records, original.records);
   assert.notEqual(changed.body_hash, original.body_hash);
 });
 
 test("an empty local-device batch has a stable hash and a real empty wire list", () => {
-  const batch = buildLocalDeviceIngestBatchRequest({ ...envelopeFixture, sourceInstanceId: fixtureSource, records: [] });
+  const batch = buildLocalDeviceIngestBatchRequest({
+    ...envelopeFixture,
+    records: [],
+    sourceInstanceId: fixtureSource,
+  });
   assert.deepEqual(batch.records, []);
   assert.equal(batch.body_hash, hashCanonicalJson([]));
   assert.equal(batch.source_instance_id, fixtureSource);
 });
 
 test("canonical JSON keeps array order and serializes undefined array slots as null", () => {
-  assert.equal(canonicalJson([undefined, { z: 1, a: 2 }, null]), '[null,{"a":2,"z":1},null]');
+  // Built from entries so the keys stay out of order; canonicalJson must sort them.
+  const unsorted = Object.fromEntries([
+    ["z", 1],
+    ["a", 2],
+  ]);
+  assert.equal(canonicalJson([undefined, unsorted, null]), '[null,{"a":2,"z":1},null]');
   assert.notEqual(hashCanonicalJson(["a", "b"]), hashCanonicalJson(["b", "a"]));
 });
