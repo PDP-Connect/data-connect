@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -260,8 +260,10 @@ test("unreadable or corrupt setup state refuses setup with a bounded error and i
   ]
   for (const state of [...states, null]) {
     await rm(path, { recursive: true, force: true })
-    if (state === null) await mkdir(path)
-    else await writeFile(path, state, { mode: 0o600 })
+    if (state === null) {
+      await mkdir(path)
+      await writeFile(join(path, "sentinel"), "kept", { mode: 0o600 })
+    } else await writeFile(path, state, { mode: 0o600 })
     for (const response of [await f.request("GET", "/catalog"), await f.discard()]) {
       assert.equal(response.status, 409)
       assert.equal(response.error.code, "internal_error")
@@ -270,6 +272,9 @@ test("unreadable or corrupt setup state refuses setup with a bounded error and i
       assert.equal(text.includes("schemaVersion"), false)
     }
     // A refusal must not repair the state by writing a fresh one over it.
-    if (state !== null) assert.equal(await readFile(path, "utf8"), state)
+    if (state === null) {
+      assert.equal((await lstat(path)).isDirectory(), true)
+      assert.equal(await readFile(join(path, "sentinel"), "utf8"), "kept")
+    } else assert.equal(await readFile(path, "utf8"), state)
   }
 })
