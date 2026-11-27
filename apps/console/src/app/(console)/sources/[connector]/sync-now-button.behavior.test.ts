@@ -113,7 +113,7 @@ test("a connector_not_installed refusal reads as plain copy with an Install acti
     await act(async () => button(container, "Refresh now").click());
     const prompt = container.querySelector('[data-testid="connector-not-installed-inline"]');
     assert.ok(prompt, "the inline install prompt renders after the refusal");
-    assert.match(prompt.textContent ?? "", /DataConnect needs to install Chase again before it can sync\./);
+    assert.match(prompt.textContent ?? "", /The Chase connection in DataConnect is no longer installed\. It must be installed again before Chase can sync\./);
     assert.doesNotMatch(container.textContent ?? "", /reference server rejected|reference fixture|verified install/);
     button(container, "Install again");
     assert.equal(installCalls.length, 0, "nothing installs until the owner presses Install");

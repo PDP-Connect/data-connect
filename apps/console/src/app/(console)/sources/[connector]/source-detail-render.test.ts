@@ -336,7 +336,7 @@ test("state-specific sections, counts and sentences do not contradict each other
   const unknown = (await renderDemo("unknown-count")).window.document;
   assert.doesNotMatch(unknown.querySelector("header")?.textContent ?? "", /records/);
   const install = (await renderDemo("status-4")).window.document.body.textContent ?? "";
-  assert.equal(install.split("DataConnect needs to install Claude Code again before it can sync.").length, 2);
+  assert.equal(install.split("The Claude Code connection in DataConnect is no longer installed. It must be installed again before Claude Code can sync.").length, 2);
   assert.equal([...((await renderDemo("status-10")).window.document.querySelectorAll("a, button"))].filter((node) => /Resume/.test(node.textContent ?? "")).length, 1);
 });
 

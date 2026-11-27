@@ -157,7 +157,7 @@ function refreshRow(source: RefConnectorSummary, name: string, when: string | nu
  * says just that and does not invent a cause.
  */
 export function connectorNotInstalledWords(name: string): string {
-  return `The part of DataConnect that reads ${name} is no longer installed. DataConnect needs to install ${name} again before it can sync.`;
+  return `The ${name} connection in DataConnect is no longer installed. It must be installed again before ${name} can sync.`;
 }
 
 function lifecycleRow(
