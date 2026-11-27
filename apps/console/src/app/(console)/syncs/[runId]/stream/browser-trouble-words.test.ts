@@ -32,3 +32,19 @@ test("the helper says what a lost browser means, offers Try again and hides Done
   assert.match(src, /title="More actions"/);
   assert.match(src, /visibleStatusLabel/);
 });
+
+// Closing judge, round 6 (F8, F10).
+test("a lost browser's card keeps no sign-in instruction, and the round buttons say what they do in words", async () => {
+  const src = await readFile(VIEWER, "utf8");
+  const dock = src.slice(src.indexOf("Finish signing in"));
+  assert.match(dock, /\{browserLost \? null : <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in<\/p>\}/);
+  assert.match(dock, /\{browserLost \? null : <p className="pdpp-caption text-foreground">\{message\}<\/p>\}/);
+  assert.match(src, /pdpp-stream-control-label">More</);
+  assert.match(src, /pdpp-stream-control-label">Stop</);
+});
+
+test("the helper keeps a one-line DataConnect bar with the way back to the source", async () => {
+  const src = await readFile(VIEWER, "utf8");
+  assert.match(src, /data-testid="stream-way-back"/);
+  assert.match(src, /← DataConnect/);
+});

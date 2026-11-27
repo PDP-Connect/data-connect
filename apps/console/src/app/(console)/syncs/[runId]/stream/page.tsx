@@ -228,6 +228,7 @@ export default async function RunInteractionStreamPage({
       )}
       interactionRequiresResponse={streamableAssistance.responseContract === "response_required"}
       runId={runId}
+      statusHref={setupStatusHref(connectorInstanceId, runId)}
     />
   );
 }

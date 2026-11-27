@@ -1484,6 +1484,7 @@ function LiveStreamSurface({
   pollForResolution = true,
   previewState,
   runId,
+  statusHref,
 }: StreamSurfaceProps) {
   const router = useRouter();
   const [open, setOpen] = useState(Boolean(previewState && !previewState.startsWith("card")));
@@ -1593,6 +1594,7 @@ function LiveStreamSurface({
       <StreamOverlay
         connector={connector}
         connectorName={connectorName}
+        wayBackHref={statusHref}
         initialSession={mintedSession}
         interactionId={interactionId}
         interactionKind={interactionKind}
@@ -1685,6 +1687,8 @@ function OrientationCard({
 interface StreamOverlayProps {
   connector: ConnectorContext | null;
   connectorName: string;
+  /** Where the one-line DataConnect bar leads back to (the source's setup status page). */
+  wayBackHref?: string;
   /**
    * The session minted by the orientation card's "Open browser" click.
    * `null` is only valid when `open === false` (the overlay isn't visible);
@@ -1707,6 +1711,7 @@ interface StreamOverlayProps {
 }
 
 function StreamOverlay({
+  wayBackHref,
   connector,
   connectorName,
   initialSession,
@@ -1746,6 +1751,7 @@ function StreamOverlay({
         <IcDialogPopup aria-label={`${connectorName} live browser`} className="pdpp-stream-dialog">
           {open && (initialSession || previewState) ? (
             <StreamStage
+              wayBackHref={wayBackHref}
               connector={connector}
               previewState={previewState}
               connectorName={connectorName}
@@ -1768,6 +1774,7 @@ function StreamOverlay({
 }
 
 interface StreamStageProps {
+  wayBackHref?: string;
   connector: ConnectorContext | null;
   previewState?: string;
   connectorName: string;
@@ -1803,6 +1810,7 @@ interface StreamStageProps {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This existing stage owns the stream/session state machine; the explicit backend gate is part of that same lifecycle boundary.
 function StreamStage({
+  wayBackHref,
   connector,
   previewState,
   connectorName,
@@ -3491,6 +3499,12 @@ function StreamStage({
 
   return (
     <div className="relative flex h-full w-full flex-col bg-black" data-pdpp-stream-debug={debugEnabled}>
+      {wayBackHref ? (
+        <div className="flex shrink-0 items-center gap-2 bg-background px-3 py-1.5 text-[13px] text-foreground" data-pdpp-stream-ui data-testid="stream-way-back">
+          <Link className="font-medium underline-offset-4 hover:underline" href={wayBackHref}>← DataConnect</Link>
+          <span className="text-muted-foreground">· signing in to {connectorName}</span>
+        </div>
+      ) : null}
       {nekoSession && (
         <NekoSurface
           adapterRef={nekoSurfaceAdapterRef}
@@ -5495,6 +5509,7 @@ function CornerControls({
             onClick={() => setExpanded((prev) => !prev)}
             type="button"
           >
+            <span aria-hidden className="pdpp-stream-control-label">More</span>
             <svg aria-hidden fill="none" height="16" viewBox="0 0 16 16" width="16">
               <title>More actions</title>
               <circle cx="3.25" cy="8" fill="currentColor" r="1.15" />
@@ -5635,6 +5650,7 @@ function CornerControls({
             <title>Stop signing in</title>
             <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
           </svg>
+          <span aria-hidden className="pdpp-stream-control-label">Stop</span>
         </button>
       </div>
     </div>
@@ -5895,8 +5911,8 @@ function StreamInteractionDock({
             Hide instructions
           </IcButton>
         </div>
-        <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>
-        <p className="pdpp-caption text-foreground">{message}</p>
+        {browserLost ? null : <p className="pdpp-caption text-muted-foreground">Step 1 of 2: sign in</p>}
+        {browserLost ? null : <p className="pdpp-caption text-foreground">{message}</p>}
         <div className="flex flex-wrap gap-2">{moveButton}</div>
         {interactionKind === "otp" && !browserLost ? (
           <label className="grid gap-1" htmlFor={`code-${interactionId}`}><span className="pdpp-caption">Code from {connectorName}</span><IcInput
