@@ -98,7 +98,7 @@ test("status page says the outcome and offers the data (design Page 3: worked)",
   assert.match(linksSrc, STATUS_SOURCE_RECORDS_HELPER);
   assert.match(linksSrc, STATUS_SOURCE_DETAIL_HELPER);
   assert.match(outcomeSrc, /sourceRecordsHref\(status\)/);
-  assert.match(outcomeSrc, /See your \$\{name\} data/);
+  assert.match(outcomeSrc, /See \$\{yourData\(name\)\}/);
   assert.match(bodySrc, /<LinkButton link=\{outcome\.primary\} primary \/>/);
   assert.doesNotMatch(src + outcomeSrc + bodySrc, CONNECTOR_LEVEL_STATUS_RECORDS_LINK);
 });

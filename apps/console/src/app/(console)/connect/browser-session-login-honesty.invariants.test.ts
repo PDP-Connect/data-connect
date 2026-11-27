@@ -32,8 +32,8 @@ const STATUS_PAGE_FILE = fileURLToPath(new URL("./status/[connectionId]/first-sy
 // The claim that must never return: any assertion that the login itself
 // succeeded, in any of the phrasings that read as a completed sign-in.
 const LOGIN_COMPLETE_CLAIM = /Login is complete|You(?:'re| are) (?:signed|logged) in|Already (?:signed|logged) in/i;
-const RUNNING_HEADLINE = /runningHeadline: \(name: string\) => `Copying your \$\{name\} data`/;
-const NEEDS_YOU_HEADLINE = /needsYouHeadline: \(name: string\) => `\$\{name\} needs you to finish signing in\.`/;
+const RUNNING_HEADLINE = /runningHeadline: \(name: string\) => `Copying \$\{yourData\(name\)\}`/;
+const NEEDS_YOU_HEADLINE = /needsYouHeadline: \(name: string\) =>\s*`\$\{atStart\(name\)\} needs you to finish signing in\.`/;
 
 function readStatusPage(): Promise<string> {
   return readFile(STATUS_PAGE_FILE, "utf8");
