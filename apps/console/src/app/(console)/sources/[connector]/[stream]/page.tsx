@@ -613,7 +613,7 @@ function streamTotalEvidenceLabel(totalHeld: number | null): string {
   if (totalHeld === null) {
     return "The retained total is still unknown; the records below are what this page received.";
   }
-  return "Retained records for this stream, from stream metadata or the source summary.";
+  return "The records DataConnect holds for this data.";
 }
 
 function exactFilterEvidenceLabel(filters: Record<string, string>): string {
