@@ -382,7 +382,8 @@ function makeHarness(
   runtime: RunExecutorRuntimeState,
   rsUrl: string,
   maxRunWallClockMs: number,
-  watchdogTimers?: WatchdogTimers
+  watchdogTimers?: WatchdogTimers,
+  overrides?: Pick<RunExecutorDeps, "schedulerStore" | "runConnectorImpl">
 ): ReturnType<typeof createRunExecutor>["launchRun"] {
   const deps: RunExecutorDeps = {
     admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId }) => ({
@@ -421,6 +422,7 @@ function makeHarness(
       // State persistence is out of scope for this oracle.
     },
     ...(watchdogTimers ? { watchdogTimers } : {}),
+    ...overrides,
   };
   return createRunExecutor(deps).launchRun;
 }
@@ -504,6 +506,47 @@ async function runHangingConnectorUntilWatchdogFires(
     await pending.catch(() => {});
   }
 }
+
+test(
+  "reservation storage failure is not contention and never starts a connector",
+  withServerAndTmpDir(async (ctx) => {
+    for (const rejectWrite of [true, false]) {
+      let starts = 0;
+      let reservations = 0;
+      const launchRun = makeHarness(freshRuntime(), ctx.rsUrl, WALL_CLOCK_BUDGET_MS, undefined, {
+        schedulerStore: {
+          appendRunHistory: async () => {},
+          deleteActiveRun: async () => {},
+          upsertActiveRun: async () => {
+            reservations += 1;
+            if (rejectWrite) {
+              throw new Error("synthetic disk failure");
+            }
+            return false;
+          },
+        },
+        runConnectorImpl: async () => {
+          starts += 1;
+          throw new Error("connector should not start without a reservation");
+        },
+      });
+      const record = await launchRun(
+        schedule(writeConnector(ctx.tmpDir, 0, false), ctx.ownerToken),
+        false,
+        SCHEDULED_POLICY
+      );
+      assert.equal(reservations, 1);
+      assert.equal(starts, 0);
+      if (rejectWrite) {
+        assert.equal(record.status, "failed");
+        assert.equal(record.failureReason, "store_unreadable");
+      } else {
+        assert.match(JSON.stringify(record), /run_already_active/);
+        assert.notEqual(record.failureReason, "store_unreadable");
+      }
+    }
+  })
+);
 
 test(
   "a run that durably emits N records before being killed by the wall-clock watchdog reports records_emitted: N, not 0",

@@ -966,11 +966,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       : null;
   }
 
-  // Reserves the durable active-run row for this attempt. Returns true
-  // (admitted) whenever there is no active-run store to reserve against —
-  // admission is only ever refused by an explicit `false` upsert result,
-  // never by the reservation attempt itself failing (log-and-continue,
-  // fail-open).
+  // An explicit contention refusal is separate from failure to read or write
+  // the reservation store. Neither permits an untracked connector to start.
   async function reserveActiveRunRow(
     activeRunStore: RunExecutorDeps["schedulerStore"] | null,
     connectorId: string,
@@ -979,12 +976,12 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     runId: string,
     startedAt: string,
     traceContext: SpineTraceContext
-  ): Promise<boolean> {
+  ): Promise<"admitted" | "contended" | "store_error"> {
     if (!activeRunStore) {
-      return true;
+      return "admitted";
     }
-    const upserted = await Promise.resolve(
-      activeRunStore.upsertActiveRun({
+    try {
+      const upserted = await activeRunStore.upsertActiveRun({
         connector_id: connectorId,
         connector_instance_id: connectorInstanceId,
         run_generation: attempt,
@@ -992,17 +989,17 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         scenario_id: traceContext.scenario_id,
         started_at: startedAt,
         trace_id: traceContext.trace_id,
-      })
-    ).catch((err: unknown) => {
+      });
+      return upserted === false ? "contended" : "admitted";
+    } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[scheduler] failed to reserve active run for ${connectorId}: ${message}`);
       createRunLogger(baseLogger, { connectorId, connectorInstanceId, runId }).error(
         `failed to reserve active run: ${message}`,
         { phase: "active_run_reserve" }
       );
-      return false;
-    });
-    return upserted !== false;
+      return "store_error";
+    }
   }
 
   // Wraps the caller's onStarted so it also registers this attempt's
@@ -1126,7 +1123,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     startedAt: string
   ): Promise<{
     call: RunConnectorCall;
-    admitted: boolean;
+    reservation: "admitted" | "contended" | "store_error";
     watchdog: ReturnType<typeof createAttemptWatchdog>;
     clear: () => Promise<void>;
   }> {
@@ -1142,7 +1139,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     // so this is a defensive fallback for direct callers of this function.
     const runId = call.runId || `run_${randomUUID()}`;
     const traceContext = call.traceContext ?? createTraceContext();
-    const admitted = await reserveActiveRunRow(
+    const reservation = await reserveActiveRunRow(
       activeRunStore,
       connectorId,
       connectorInstanceId,
@@ -1151,6 +1148,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       startedAt,
       traceContext
     );
+    const admitted = reservation === "admitted";
     const unregisterCancellationBox: { value: (() => void) | null } = { value: null };
 
     const leasedCall: RunConnectorCall = {
@@ -1209,7 +1207,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       }
     };
 
-    return { admitted, call: leasedCall, clear, watchdog };
+    return { reservation, call: leasedCall, clear, watchdog };
   }
 
   async function runSingleAttempt(
@@ -1223,7 +1221,16 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const { watchdog } = lease;
 
     try {
-      if (!lease.admitted) {
+      if (lease.reservation === "store_error") {
+        return {
+          kind: "give-up",
+          error: {
+            failure_reason: "store_unreadable",
+            message: "Failed to reserve active run in scheduler storage.",
+          },
+        };
+      }
+      if (lease.reservation === "contended") {
         return {
           kind: "done",
           record: recordAndNotify(
