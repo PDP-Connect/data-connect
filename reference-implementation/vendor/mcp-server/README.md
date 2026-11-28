@@ -21,10 +21,9 @@ read surface; event-subscription management is not part of the recommended MCP t
 
 ## Publication status
 
-Published to npm as [`@pdpp/mcp-server`](https://www.npmjs.com/package/@pdpp/mcp-server).
-Follow the [package release policy](../../docs/reference/package-release-policy.md) — a single
-release channel publishes 0.x versions to npm's default `latest` dist-tag.
-Matches the posture of `@pdpp/cli` and `@pdpp/local-collector`.
+Published to npm as [`@pdpp/mcp-server`](https://www.npmjs.com/package/@pdpp/mcp-server), in
+lockstep with `@pdpp/cli`, `@pdpp/read-core` and the collector packages, from this repository's
+`npm-release.yml` to npm's default `latest` dist-tag.
 
 ## Install (local agent harness)
 

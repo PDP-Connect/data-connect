@@ -29,6 +29,7 @@ import type {
 } from "../runtime/scheduler.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
+import { describeRunConfigFailure } from "./connector-run-config.ts";
 import { getConnectorManifest } from "./auth.ts";
 import { buildConnectionScopedRunEnvResolver } from "./connection-scoped-run-env.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
@@ -65,6 +66,7 @@ interface Logger {
 
 interface Controller {
   awaitRun: (runId: string) => Promise<string>;
+  blobUploadCredentialHooks?: SchedulerOptions["blobUploadCredentialHooks"];
   browserSurfaceLeaseManager?: {
     isManagedConnector: (connectorId: string) => boolean;
   };
@@ -449,7 +451,7 @@ function projectManagedControllerTerminalRun(
     typeof terminalData.terminal_reason === "string" ? (terminalData.terminal_reason as TerminalReason) : null;
   return {
     checkpoint_summary: checkpointSummary,
-    connector_error: connectorError,
+    connector_error: connectorError ?? describeRunConfigFailure(failureReason),
     failure_reason: failureReason,
     known_gaps: knownGaps,
     run_id: handle.run_id,
@@ -626,6 +628,7 @@ export function createReferenceSchedulerManager({
         : runtimeContext.referenceBaseUrl;
     const schedulerRsUrl = "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext.rsUrl;
     scheduler = createScheduler({
+      ...(controller.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: requestedOwnerSubjectId }) => {
         if (typeof requestedOwnerSubjectId !== "string" || requestedOwnerSubjectId.trim().length === 0) {
           throw new Error("scheduler ownerSubjectId is required for connection admission");

@@ -118,12 +118,17 @@ export default {
   // whole root suite -- `related: false`, and no `--testFiles` -- and that test
   // failed with ENOENT on `lstat` of the loader in the sandbox, which rejected
   // the baseline of PR #494 and made every mutant in the batch inconclusive.
+  //
+  // The vendored package manifests are the fourth. The release scripts read
+  // the `package.json` of every lockstep package `.releaserc.yaml` publishes,
+  // and some of those roots are under `reference-implementation/vendor/`.
   ignorePatterns: [
     "reference-implementation/**",
     "!reference-implementation/stryker.config.mjs",
     "!reference-implementation/test/**",
     "!reference-implementation/connector-dependency-loader.mjs",
     "!reference-implementation/connector-dependency-loader-bootstrap.mjs",
+    "!reference-implementation/vendor/*/package.json",
     "src-tauri/target",
     "packages/*/dist",
     "reports",

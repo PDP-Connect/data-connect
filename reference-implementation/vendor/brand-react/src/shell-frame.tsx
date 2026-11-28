@@ -42,7 +42,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -53,6 +53,7 @@ import {
   IcDialogTrigger,
 } from "./dialog.tsx";
 import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
+import { ShellThemeButton } from "./shell-theme.tsx";
 import "./shell.css";
 
 // SYNCS_NOTE: the owner-facing "Syncs" group item has no dedicated real route;
@@ -221,67 +222,18 @@ function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: 
 // ─── Footer host block ────────────────────────────────────────────
 
 function FootBlock({ host, build }: { build: string; host: string }) {
-  // Theme toggle lives here in the sidebar footer — a quiet utility, not a
-  // front-and-center header action. The hook flips <html> so any toggle
-  // instance stays in sync via the DOM.
-  const [theme, toggleTheme] = useThemeToggle();
-  const themeLabel = theme === "dark" ? "Dark" : "Light";
-  const themeTitle = theme === "dark" ? "Switch to light" : "Switch to dark";
+  // Use the same theme control in the sidebar and the portaled drawer.
   return (
     <div className="rr-side__foot">
       <span className="rr-side__host">
         {host} · {build}
       </span>
       <span className="rr-side__motto">your data, at home</span>
-      <button className="rr-side__theme rr-chrome-btn" onClick={toggleTheme} title={themeTitle} type="button">
-        {themeLabel}
-      </button>
+      <ShellThemeButton />
     </div>
   );
 }
 
-// ─── Theme toggle (flips <html> data-theme + dark class) ──────────
-
-type Theme = "dark" | "light";
-
-function readInitialTheme(): Theme {
-  if (typeof document === "undefined") {
-    return "dark";
-  }
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light") {
-    return "light";
-  }
-  if (attr === "dark") {
-    return "dark";
-  }
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
-}
-
-function applyTheme(theme: Theme) {
-  const root = document.documentElement;
-  root.setAttribute("data-theme", theme);
-  root.classList.toggle("dark", theme === "dark");
-}
-
-function useThemeToggle(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>("dark");
-
-  // Sync from the SSR-rendered <html> on mount (avoids a hydration flip).
-  useEffect(() => {
-    setTheme(readInitialTheme());
-  }, []);
-
-  const toggle = useCallback(() => {
-    setTheme((cur) => {
-      const next: Theme = cur === "dark" ? "light" : "dark";
-      applyTheme(next);
-      return next;
-    });
-  }, []);
-
-  return [theme, toggle];
-}
 
 // ─── RecordroomShell ──────────────────────────────────────────────
 

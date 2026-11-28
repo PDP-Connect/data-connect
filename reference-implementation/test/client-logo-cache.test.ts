@@ -70,8 +70,29 @@ test("an approved logo is fetched once and served from cache after that", async 
   assert.ok(first);
   assert.equal(first.mediaType, "image/png");
   assert.deepEqual([...first.bytes], [...PNG_BYTES]);
-  assert.deepEqual(second, first);
+  assert.equal(second, first);
+  assert.equal(second?.sourceUri, LOGO_URI);
   assert.equal(fetches, 1, "a consent render must not refetch the logo every time");
+});
+
+test("an updated logo source replaces the cached bytes for the same client", async () => {
+  const key = freshKey();
+  const firstUri = "https://logo.example.test/first.png";
+  const nextUri = "https://logo.example.test/next.png";
+  const nextBytes = new Uint8Array([...PNG_BYTES, 4]);
+  let fetches = 0;
+  const fetchImpl = (async () => imageResponse(++fetches === 1 ? PNG_BYTES : nextBytes)) as never;
+  const options = { dnsLookupImpl: publicDns, fetchImpl, nowMs: 1000 };
+
+  const first = await fetchAndCacheClientLogo(key, firstUri, options);
+  const next = await fetchAndCacheClientLogo(key, nextUri, options);
+  const cached = await fetchAndCacheClientLogo(key, nextUri, options);
+
+  assert.equal(first?.sourceUri, firstUri);
+  assert.equal(next?.sourceUri, nextUri);
+  assert.deepEqual(next?.bytes, nextBytes);
+  assert.equal(cached, next);
+  assert.equal(fetches, 2);
 });
 
 test("the cached record keeps the source URL for audit, not for rendering", async () => {

@@ -3,6 +3,7 @@
 
 import { brandMono, brandSans } from "@pdpp/brand/fonts";
 import { LAUNCH_COLORS } from "@pdpp/brand/launch-colors";
+import { ShellThemeProvider } from "@pdpp/brand-react";
 import { ThemeProvider } from "@pdpp/operator-ui/components/theme/theme-provider";
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
@@ -70,7 +71,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       suppressHydrationWarning
     >
       <body>
-        <ThemeProvider>
+        <ThemeProvider toggleBridge={ShellThemeProvider}>
           <DensityProvider initialDensity={density}>
             <TooltipProvider>{children}</TooltipProvider>
           </DensityProvider>

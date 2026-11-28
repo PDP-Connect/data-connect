@@ -117,6 +117,8 @@ export interface BackoffDecision {
 
 // ─── Reason-class classifier ────────────────────────────────────────────────
 
+export const RUN_CONFIG_STORE_FAILURE_CLASS = "failure:store_unreadable";
+
 /**
  * Map a run record to a stable reason-class string. Two consecutive failed
  * records with the same class are considered "the same failure pattern".
@@ -134,7 +136,9 @@ export interface BackoffDecision {
  * Skipped records aren't failures and never carry a class.
  */
 export function reasonClassOf(record: RunRecord): string | null {
-  if (record.status !== "failed") {
+  // The active-revision gate owns this pause. A previous invalid revision
+  // must never leave a replacement revision cooling off or blocked.
+  if (record.status !== "failed" || record.failureReason === "invalid_active_config") {
     return null;
   }
   if (record.terminalReason) {
@@ -328,7 +332,9 @@ export function computeNextRunWithBackoff(
   // failing daily for at least a week — it is not "cooling off", it is
   // broken. See brief §1.3.
   const recommendedHealthState: "blocked" | "cooling_off" =
-    consecutiveFailures >= BLOCKED_PROMOTION_THRESHOLD ? "blocked" : "cooling_off";
+    consecutiveFailures >= BLOCKED_PROMOTION_THRESHOLD && reasonClass !== RUN_CONFIG_STORE_FAILURE_CLASS
+      ? "blocked"
+      : "cooling_off";
 
   return {
     backoffApplied: true,

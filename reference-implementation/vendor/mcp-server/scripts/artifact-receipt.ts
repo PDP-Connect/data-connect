@@ -9,7 +9,9 @@ import { join, relative, sep } from "node:path";
 
 export const ARTIFACT_RECEIPT_SCHEMA = "pdpp.mcp-server.emitted-artifact/v1";
 export const SIBLING_CANDIDATE_SCHEMA = "pdpp.mcp-server.sibling-candidate/v1";
-export const BASELINE_SHA = "b121068ed5f7abfe0f60ed1a50b6de026990059a";
+// The merge that brought this package into this repository. A receipt binds
+// the merge-base of HEAD and this commit, so it needs full git history.
+export const BASELINE_SHA = "6bcadb889a24f9d5dae89a5d2f91e0544392a313";
 // The receipt's own package, keyed into `candidates` alongside its two real
 // siblings but with a distinct, narrower shape (SelfCandidateEvidence) since
 // it is verified by installed-tree hash rather than rebuilt sibling
@@ -69,7 +71,7 @@ export interface ArtifactReceipt {
   exports: unknown[];
   headGitSha: string;
   node: { execPath: string; version: string };
-  packageManager: { npmVersion: string; pnpmVersion: string };
+  packageManager: { npmVersion: string };
   schema: string;
   sourceClosureSha256: string;
   stdio: unknown;
@@ -225,7 +227,6 @@ export function assertArtifactReceipt(receipt: ArtifactReceipt, expected: Artifa
   assert.equal(typeof receipt.node.version, "string", "receipt must record Node version");
   assert.equal(typeof receipt.node.execPath, "string", "receipt must record Node executable");
   assert.equal(typeof receipt.packageManager.npmVersion, "string", "receipt must record npm version");
-  assert.equal(typeof receipt.packageManager.pnpmVersion, "string", "receipt must record pnpm version");
   assert.equal(typeof receipt.baseGitSha, "string", "receipt must record base SHA");
   assert.equal(typeof receipt.headGitSha, "string", "receipt must record head SHA");
   assert.equal(typeof receipt.sourceClosureSha256, "string", "receipt must record source closure hash");
@@ -291,10 +292,6 @@ export function assertReceiptFresh(
 
 export function readNpmVersion(): string {
   return execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
-}
-
-export function readPnpmVersion(executable = "pnpm"): string {
-  return execFileSync(executable, ["--version"], { encoding: "utf8" }).trim();
 }
 
 export function assertFileExists(path: string, label: string): void {

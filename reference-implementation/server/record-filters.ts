@@ -204,6 +204,22 @@ export function requireTimeConstraint(value: unknown): TimeConstraint | null {
   };
 }
 
+const LEADING_CALENDAR_DAY = /^\s*(\d{4}-\d{2}-\d{2})/;
+
+/**
+ * False when a value starts with a YYYY-MM-DD day that does not exist.
+ * Date.parse rolls such a day into the next month ("2023-02-29" parses as
+ * 1 March), so a range filter on it would silently match the wrong window.
+ */
+function hasRealCalendarDay(value: unknown): boolean {
+  const day = typeof value === "string" ? LEADING_CALENDAR_DAY.exec(value)?.[1] : undefined;
+  if (day === undefined) {
+    return true;
+  }
+  const midnight = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(midnight) && new Date(midnight).toISOString().startsWith(day);
+}
+
 export function coerceComparableValue(
   value: unknown,
   fieldSchema: Schema | null | undefined,
@@ -233,7 +249,7 @@ export function coerceComparableValue(
   }
 
   if (only === "string" && (fieldSchema?.format === "date" || fieldSchema?.format === "date-time")) {
-    const parsed = parseDateValue(value);
+    const parsed = strict && !hasRealCalendarDay(value) ? null : parseDateValue(value);
     if (parsed === null && strict) {
       throw invalidQueryError(`Invalid date value for '${String(value)}'`);
     }
@@ -333,6 +349,21 @@ export function compileRequestFilters(
   }
 
   return compiled;
+}
+
+/**
+ * A filtered changes feed would have to report records that leave the filtered
+ * set, and the wire format has no entry for that: a tombstone means deletion and
+ * the record still exists. Serving the feed without exits leaves a client mirror
+ * stale while the watermark advances, so reject the combination instead.
+ */
+export function rejectFiltersWithChangesFeed(filters: readonly CompiledFilter[]): void {
+  if (filters.length) {
+    throw invalidQueryError(
+      "filter is not supported with changes_since: a filtered feed cannot report records that leave the filter. " +
+        "Re-read the filtered set in full, or use changes_since without filter"
+    );
+  }
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.

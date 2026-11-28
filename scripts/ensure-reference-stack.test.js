@@ -21,6 +21,7 @@ import {
   buildManifest,
   installStagedDependencies,
   launchScript,
+  writeLaunchScript,
   manifestTarget,
   pruneForeignLibcPackages,
   pruneForeignPlatformPrebuilds,
@@ -251,7 +252,7 @@ describe("reference stack staging contract", () => {
     const second = fixtureRoot()
     for (const root of [first, second]) {
       writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-      writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+      writeLaunchScript(root)
     }
     const firstManifest = buildManifest({
       nodeBinary: process.execPath,
@@ -281,7 +282,7 @@ describe("reference stack staging contract", () => {
   it("records the Tauri target triple when beforeBuildCommand omits --target", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const previous = process.env.TAURI_ENV_TARGET_TRIPLE
     process.env.TAURI_ENV_TARGET_TRIPLE = "x86_64-unknown-linux-gnu"
     try {
@@ -303,7 +304,7 @@ describe("reference stack staging contract", () => {
   it("rejects a changed staged file", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -325,7 +326,8 @@ describe("reference stack staging contract", () => {
       'console.info("[reference-implementation] launch entry started")'
     )
     expect(source).toContain('NODE_ENV: "production"')
-    expect(source).toContain('process.execPath, [\n  "--import",\n  "tsx"')
+    expect(source).toContain('"--import",\n  "tsx"')
+    expect(source).toContain("parent-lifeline.mjs")
     expect(source).toContain("PDPP_DB_PATH")
     expect(source).toContain(
       'PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1"'
@@ -465,7 +467,7 @@ describe("reference stack staging contract", () => {
   it("reuses a valid staged root whose manifest matches the current build", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -550,7 +552,7 @@ describe("reference stack staging contract", () => {
     // reuse must reject it instead of trusting metadata alone.
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -645,7 +647,7 @@ describe("reference stack staging contract", () => {
     writeFileSync(join(project, "package-lock.json"), '{"lockfileVersion":3}\n')
     const stage = fixtureRoot()
     writeFileSync(join(stage, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(stage, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(stage)
 
     const manifest = buildManifest({
         nodeBinary: process.execPath,

@@ -70,6 +70,7 @@ interface RecordRejectionStore {
     cursor?: string | null;
     limit: number;
     ownerSubjectId: string;
+    runId: string | null;
   }) => Promise<RecordRejectionPage> | RecordRejectionPage;
 }
 
@@ -109,6 +110,13 @@ function parseCursor(raw: unknown): string | null {
     return null;
   }
   return typeof raw === "string" ? raw : "__invalid_cursor__";
+}
+
+function parseRunId(raw: unknown): string | null | "__invalid_run_id__" {
+  if (raw === undefined) {
+    return null;
+  }
+  return typeof raw === "string" && raw !== "" ? raw : "__invalid_run_id__";
 }
 
 function sendNotFound(ctx: MountRefRecordRejectionsContext, res: RouteResponse): unknown {
@@ -169,6 +177,12 @@ function noStore(res: RouteResponse): void {
   res.header?.("Cache-Control", "private, no-store");
 }
 
+// GET .../record-rejections lists receipts oldest first. `?run_id=` narrows the
+// list, in the query and ahead of paging, to receipts whose first or latest
+// run is that run. Receipts are deduplicated by payload per connection, so a
+// payload rejected again in a later run stays one receipt: it matches the run
+// that first stored it and the latest run that replayed it, not the runs in
+// between.
 export function mountRefRecordRejections(app: AppLike, ctx: MountRefRecordRejectionsContext): void {
   app.get(
     "/_ref/connections/:connectorInstanceId/record-rejections",
@@ -187,11 +201,16 @@ export function mountRefRecordRejections(app: AppLike, ctx: MountRefRecordReject
         if (cursor === "__invalid_cursor__") {
           return sendInvalidCursor(ctx, res);
         }
+        const runId = parseRunId(req.query.run_id);
+        if (runId === "__invalid_run_id__") {
+          return ctx.pdppError(res, 400, "invalid_request", "run_id must be a non-empty string", "run_id");
+        }
         const page = await ctx.createRequestRecordRejectionStore().list({
           connectorInstanceId: owned.connectorInstanceId,
           cursor,
           limit,
           ownerSubjectId: owned.ownerSubjectId,
+          runId,
         });
         return res.json({
           data: page.items.map(projectMetadata),

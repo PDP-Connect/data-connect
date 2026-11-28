@@ -206,6 +206,31 @@ function mapRevisionRow(row: RevisionRow): ConfigRevision {
   };
 }
 
+export class InvalidActiveConfigJsonError extends Error {
+  readonly revision: number;
+
+  constructor(revision: number) {
+    super("Active connector configuration is not valid JSON.");
+    this.name = "InvalidActiveConfigJsonError";
+    this.revision = revision;
+  }
+}
+
+function mapActiveRevision(row: RevisionRow | null | undefined): ConfigRevision | null {
+  if (row?.status !== "active") {
+    return null;
+  }
+  try {
+    return mapRevisionRow(row);
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      // biome-ignore lint/style/useErrorCause: JSON parse errors can contain configuration values.
+      throw new InvalidActiveConfigJsonError(Number(row.revision));
+    }
+    throw err;
+  }
+}
+
 function mapPointerRow(row: PointerRow): CurrentPointer {
   return {
     activeRevision: Number(row.active_revision),
@@ -373,7 +398,7 @@ export function createSqliteConnectorInstanceConfigStore(): ConnectorInstanceCon
         connectorInstanceId,
         pointer.activeRevision,
       ]);
-      return row?.status === "active" ? mapRevisionRow(row) : null;
+      return mapActiveRevision(row);
     },
 
     async getCurrentPointer(connectorInstanceId) {
@@ -581,7 +606,7 @@ export function createPostgresConnectorInstanceConfigStore(): ConnectorInstanceC
         return null;
       }
       const row = await readRevisionPostgres(connectorInstanceId, pointer.activeRevision);
-      return row?.status === "active" ? mapRevisionRow(row) : null;
+      return mapActiveRevision(row);
     },
 
     async getCurrentPointer(connectorInstanceId) {

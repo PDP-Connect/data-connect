@@ -16,6 +16,7 @@ import {
   type CoverageReport,
   coveredRequiredKeys,
   decideCheckpointCommits,
+  streamsCheckpointedBy,
 } from "../runtime/checkpoint-commit-decision.ts";
 import { capCoveredCount } from "../runtime/connector-gap-bounding.ts";
 
@@ -342,4 +343,23 @@ test("capCoveredCount never raises a declared count, caps it at the provable cei
   assert.equal(capCoveredCount(2, 2, 1), 1);
   assert.equal(capCoveredCount(1, 5, 1), 1);
   assert.equal(capCoveredCount(3, 2, 5), 0);
+});
+
+test("a STATE vouches for its own stream and every stream it owns, in manifest order", () => {
+  const ownership = {
+    detailParentsByStream: new Map([
+      ["line_items", new Set(["orders"])],
+      ["shared_detail", new Set(["orders", "returns"])],
+    ]),
+    stateStreamByStream: new Map([["order_notes", "orders"]]),
+  };
+  const manifestStreams = ["orders", "order_notes", "line_items", "shared_detail", "returns", "items"];
+  assert.deepEqual(streamsCheckpointedBy("orders", manifestStreams, ownership), [
+    "orders",
+    "order_notes",
+    "line_items",
+    "shared_detail",
+  ]);
+  assert.deepEqual(streamsCheckpointedBy("returns", manifestStreams, ownership), ["returns", "shared_detail"]);
+  assert.deepEqual(streamsCheckpointedBy("items", manifestStreams, ownership), ["items"]);
 });

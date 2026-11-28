@@ -213,6 +213,7 @@ where
     let state_path = root.join(AUTOSTART_STATE_FILE);
     let previous = load_observed_state(&state_path);
     let mut error = previous.as_ref().and_then(|state| state.error.clone());
+    let mut last_enabled = previous.as_ref().map(|state| state.enabled);
     for (_, command, result_path) in pending {
         let started_at = iso(chrono::Utc::now());
         let mutation_error = if command.desired_enabled {
@@ -221,23 +222,44 @@ where
             disable().err()
         };
         // Report OS truth from a fresh read, not the assumed outcome.
-        let enabled = is_enabled()?;
-        let succeeded = mutation_error.is_none() && enabled == command.desired_enabled;
+        let (enabled, command_error) = match is_enabled() {
+            Ok(enabled) => {
+                last_enabled = Some(enabled);
+                (enabled, mutation_error)
+            }
+            Err(error) => (
+                // Failed result records require a bool even before the first observation.
+                last_enabled.unwrap_or(false),
+                Some(format!("Failed to observe autostart state: {error}")),
+            ),
+        };
+        let succeeded = command_error.is_none() && enabled == command.desired_enabled;
         let result = AutostartResult {
             command_id: command.command_id,
             kind: AUTOSTART_COMMAND_KIND.to_string(),
             desired_enabled: command.desired_enabled,
             status: if succeeded { "succeeded" } else { "failed" }.to_string(),
             enabled,
-            error: mutation_error.clone(),
+            error: command_error.clone(),
             started_at,
             finished_at: iso(chrono::Utc::now()),
         };
         write_protocol_json(&result_path, &result, "Failed to write autostart result")?;
-        error = mutation_error;
+        error = command_error;
     }
 
-    let enabled = is_enabled()?;
+    let enabled = match is_enabled() {
+        Ok(enabled) => enabled,
+        Err(observation_error) => {
+            // Without a prior observation, leave the state unseeded rather than
+            // publishing a guessed OS state. Any command already has its result.
+            let Some(enabled) = last_enabled else {
+                return Ok(());
+            };
+            error = Some(format!("Failed to observe autostart state: {observation_error}"));
+            enabled
+        }
+    };
     let changed = previous
         .as_ref()
         .is_none_or(|state| state.enabled != enabled || state.error != error);
@@ -498,6 +520,62 @@ mod tests {
         assert_eq!(result["error"], "permission denied");
         let state = read_json(&dir.path().join("autostart-state.json"));
         assert_eq!(state["error"], "permission denied");
+    }
+
+    #[test]
+    fn observation_error_writes_one_failed_result_and_preserves_observed_value() {
+        let dir = tempdir().expect("tempdir");
+        tick_autostart_protocol(dir.path(), now(), || Ok(true), || Ok(()), || Ok(()))
+            .expect("seed enabled state");
+        write_server_command(dir.path(), COMMAND_ID, false, now());
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Err("permission denied".to_string()),
+            || panic!("the command should only disable"),
+            || Ok(()),
+        )
+        .expect("tick with unreadable OS state");
+
+        let results = dir.path().join(AUTOSTART_RESULTS_DIR);
+        assert_eq!(fs::read_dir(&results).expect("results").count(), 1);
+        let result = read_json(&results.join(format!("{COMMAND_ID}.json")));
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["enabled"], true);
+        assert_eq!(
+            result["error"],
+            "Failed to observe autostart state: permission denied"
+        );
+        let state = read_json(&dir.path().join(AUTOSTART_STATE_FILE));
+        assert_eq!(state["enabled"], true);
+        assert_eq!(state["error"], result["error"]);
+    }
+
+    #[test]
+    fn failed_observation_result_prevents_mutation_on_next_tick() {
+        let dir = tempdir().expect("tempdir");
+        let calls = Cell::new(0);
+        write_server_command(dir.path(), COMMAND_ID, true, now());
+
+        let enable = || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let unreadable = || Err("permission denied".to_string());
+        tick_autostart_protocol(dir.path(), now(), unreadable, enable, || Ok(()))
+            .expect("first tick");
+        let path = dir.path()
+            .join(AUTOSTART_RESULTS_DIR)
+            .join(format!("{COMMAND_ID}.json"));
+        let before = read_json(&path);
+        assert_eq!(before["status"], "failed");
+        assert!(!dir.path().join(AUTOSTART_STATE_FILE).exists());
+
+        tick_autostart_protocol(dir.path(), now(), unreadable, enable, || Ok(()))
+            .expect("second tick");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(read_json(&path), before);
     }
 
     #[test]

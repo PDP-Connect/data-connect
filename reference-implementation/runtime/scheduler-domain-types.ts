@@ -490,6 +490,13 @@ export interface SchedulerOptions {
    * remain unaffected.
    */
   runManagedConnectorViaController?: RunManagedConnectorViaController | null;
+  /**
+   * Mints a run-scoped blob upload credential for each attempt that
+   * `runConnector` launches directly (non-managed scheduled runs). The child
+   * gets it as `PDPP_BLOB_UPLOAD_TOKEN`; it is revoked when the attempt ends.
+   * Absent: the child gets no blob upload credential.
+   */
+  blobUploadCredentialHooks?: import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks | null;
   schedulerStore?: Pick<
     SchedulerStore,
     | "appendRunHistory"

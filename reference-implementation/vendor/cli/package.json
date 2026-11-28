@@ -28,12 +28,12 @@
     "build": "rm -rf dist && node --import tsx scripts/generate-list-envelope.ts && tsc -p tsconfig.build.json && node --import tsx scripts/postbuild.ts",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "test": "pnpm build && node --import tsx ../../scripts/test-scratch/run-command.ts -- node --import tsx scripts/run-tests.ts",
-    "validate:package": "pnpm build && node --import tsx scripts/validate-package.ts",
-    "pack-install-run": "pnpm build && node --import tsx scripts/pack-install-run.ts",
+    "test": "npm run build && node --import tsx ../../../scripts/test-scratch/run-command.ts -- node --import tsx scripts/run-tests.ts",
+    "validate:package": "npm run build && node --import tsx scripts/validate-package.ts",
+    "pack-install-run": "npm run build && node --import tsx scripts/pack-install-run.ts",
     "pack-install-run:node-22.14": "node --import tsx scripts/verify-node-22-14-artifact.ts",
-    "verify": "pnpm test && pnpm validate:package && pnpm pack-install-run",
-    "pack:dry-run": "pnpm build && npm pack --dry-run --ignore-scripts"
+    "verify": "npm test && npm run validate:package && npm run pack-install-run",
+    "pack:dry-run": "npm run build && npm pack --dry-run --ignore-scripts"
   },
   "keywords": [
     "pdpp",
@@ -47,19 +47,19 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PDP-Connect/pdpp.git",
-    "directory": "packages/cli"
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
+    "directory": "reference-implementation/vendor/cli"
   },
   "bugs": {
-    "url": "https://github.com/PDP-Connect/pdpp/issues"
+    "url": "https://github.com/PDP-Connect/data-connect/issues"
   },
-  "homepage": "https://github.com/PDP-Connect/pdpp#readme",
+  "homepage": "https://github.com/PDP-Connect/data-connect/tree/main/reference-implementation/vendor/cli#readme",
   "engines": {
     "node": ">=22.14.0"
   },
   "publishConfig": {
     "access": "public",
-    "provenance": false,
+    "provenance": true,
     "registry": "https://registry.npmjs.org/",
     "tag": "latest"
   }

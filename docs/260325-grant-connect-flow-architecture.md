@@ -38,7 +38,7 @@ This document does not cover:
 contract: MCP/CIMD client setup (issuing `claude mcp add` / `codex mcp add`
 commands and CIMD client identities), not a grant-entry route. It does not
 parse `sessionId`/`secret`, does not claim a Session Relay session, and is
-not reachable from the `vana://connect` deep link this document describes.
+not reachable from the grant entry route this document describes.
 The two `/connect` routes are intentionally distinct products; do not merge
 or route between them.
 
@@ -163,7 +163,7 @@ Notes:
 
 Current behavior:
 
-- `vana://connect?...` deep links are normalized into `/connect` or `/grant`
+- grant query params on any route are normalized into `/connect` or `/grant`
 - when `masterKeySig` is present, the app derives the wallet address and restores
   auth state
 - special auth-only session IDs may redirect to a dedicated route such as

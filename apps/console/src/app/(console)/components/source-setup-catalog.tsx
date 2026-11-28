@@ -735,8 +735,11 @@ export function SourceSetupCatalog({
         </div>
       ) : (
         <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
-          No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or
-          connector key.
+          {query.trim() ? (
+            <>No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or connector key.</>
+          ) : (
+            "No connectors are available to add."
+          )}
         </p>
       )}
     </Section>

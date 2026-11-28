@@ -21,6 +21,7 @@ import {
   invalidQueryError,
   normalizePrimaryKey,
   parseIntegerValue,
+  normalizeExpandRequest,
 } from "../server/record-expand-helpers.ts";
 
 interface QueryError extends Error {
@@ -122,4 +123,52 @@ test("assertNonEmptyJsonField accepts literal top-level JSON keys", () => {
 test("assertNonEmptyJsonField rejects absent field names", () => {
   assert.throws(() => assertNonEmptyJsonField("", "field"));
   assert.throws(() => assertNonEmptyJsonField(null, "field"));
+});
+
+test("configured expansion limits preserve valid defaults and explicit bounds", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  const manifest: Manifest = {
+    relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+    query: { expand: [{ name: "fixture", default_limit: 2, max_limit: 4 }] },
+  };
+  assert.equal(normalizeExpandRequest({ expand: "fixture" }, "parent", grant, manifest, null)[0]?.limit, 2);
+  for (const limit of [1, 4]) {
+    assert.equal(normalizeExpandRequest({
+      expand: "fixture", expand_limit: { fixture: limit },
+    }, "parent", grant, manifest, null)[0]?.limit, limit);
+  }
+});
+
+test("configured expansion limits that are invalid reject the request", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  for (const limits of [
+    { default_limit: 5, max_limit: 4 },
+    { default_limit: 0 },
+    { max_limit: "many" },
+    { default_limit: 1.5 },
+  ]) {
+    const manifest = {
+      relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+      query: { expand: [{ name: "fixture", ...limits }] },
+    } as unknown as Manifest;
+    assert.throws(() => normalizeExpandRequest({ expand: "fixture" }, "parent", grant, manifest, null), {
+      code: "invalid_expand",
+    });
+  }
+});
+
+test("an omitted expansion limit follows the declared one", () => {
+  type Manifest = Parameters<typeof normalizeExpandRequest>[3];
+  const grant = { streams: [{ name: "fixture_child" }] };
+  const read = (limits: Record<string, number>, request: Record<string, unknown> = {}) =>
+    normalizeExpandRequest({ expand: "fixture", ...request }, "parent", grant, {
+      relationships: [{ name: "fixture", stream: "fixture_child", cardinality: "has_many" }],
+      query: { expand: [{ name: "fixture", ...limits }] },
+    } as unknown as Manifest, null)[0]?.limit;
+  assert.equal(read({ max_limit: 5 }), 5, "a declared max below the built-in default caps the default");
+  assert.equal(read({ max_limit: 20 }), 10, "a declared max above the built-in default keeps it");
+  assert.equal(read({ default_limit: 60 }), 60, "a declared default above the built-in max raises the max");
+  assert.equal(read({ default_limit: 60 }, { expand_limit: { fixture: 60 } }), 60);
 });

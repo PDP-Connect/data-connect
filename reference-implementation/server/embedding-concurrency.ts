@@ -102,6 +102,10 @@ function concurrencyStepFor(cpuBudget: number): number {
   return selected;
 }
 
+function normalizeCpuBudget(cpuCount: number): number {
+  return Number.isFinite(cpuCount) && cpuCount > 0 ? Math.max(1, Math.floor(cpuCount)) : 1;
+}
+
 /**
  * `intraOpNumThreads` for a GIVEN `workLimit` (which may be an explicit
  * operator override of either PDPP_SEMANTIC_WORK_LIMIT or
@@ -114,7 +118,7 @@ function concurrencyStepFor(cpuBudget: number): number {
  * not to this module's own unused default.
  */
 export function intraOpNumThreadsForWorkLimit(workLimit: number, cpuCount: number = effectiveCpuCount()): number {
-  const cpuBudget = Math.max(1, Math.floor(cpuCount));
+  const cpuBudget = normalizeCpuBudget(cpuCount);
   const safeWorkLimit = Math.max(1, Math.floor(workLimit) || 1);
   return Math.max(1, Math.floor(cpuBudget / safeWorkLimit));
 }
@@ -145,7 +149,7 @@ export function resolveEmbeddingConcurrency(
   // both call sites individually reasoning about which one wins.
   const memoryAllowedWorkers = concurrencyStepFor(rawMemoryAllowedWorkers);
 
-  const cpuBudget = Math.max(1, Math.floor(cpuCount));
+  const cpuBudget = normalizeCpuBudget(cpuCount);
   const cpuAllowedWorkers = concurrencyStepFor(cpuBudget);
 
   const workLimit = Math.max(1, Math.min(cpuAllowedWorkers, memoryAllowedWorkers));

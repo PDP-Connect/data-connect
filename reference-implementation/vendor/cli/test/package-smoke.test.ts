@@ -25,7 +25,7 @@ test("package manifest stays intentionally narrow", () => {
   assert.equal(manifest.exports["."].import, "./dist/src/index.js");
   assert.equal(manifest.exports["."].types, "./dist/src/index.d.ts");
   assert.equal(manifest.publishConfig.tag, "latest");
-  assert.equal(manifest.publishConfig.provenance, false);
+  assert.equal(manifest.publishConfig.provenance, true);
   assert.equal(Object.hasOwn(manifest, "dependencies"), false);
   assert.equal(Object.hasOwn(manifest, "main"), false);
   assert.equal(Object.hasOwn(manifest, "directories"), false);

@@ -403,7 +403,7 @@ test("DataConnect PDPP interoperability: grant-scoped GitHub records survive res
         await restartedPorts.GrantScopedRecordsRepository.readAfterRevocation(
           redeemed.token
         )
-      assert.equal(read.status, 403)
+      assert.equal(read.status, 401)
       assert.equal(read.body.error.code, "grant_revoked")
     }
   )

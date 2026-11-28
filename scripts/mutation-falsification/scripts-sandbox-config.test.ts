@@ -20,6 +20,7 @@ import { readdir } from "node:fs/promises"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
+import { lockstepPackages } from "../lockstep-packages.ts"
 
 async function scriptsSandboxInputs(): Promise<string[]> {
   // The package entry initialises modules the reader depends on; importing the
@@ -54,7 +55,13 @@ describe("scripts cohort sandbox", () => {
     "reference-implementation/connector-dependency-loader-bootstrap.mjs",
   ]
 
-  it("holds the reference configuration, test tree and loader files that scripts tests read, and nothing else of the reference implementation", async () => {
+  // The release scripts read each lockstep package's manifest.
+  const VENDORED_MANIFEST = /^reference-implementation\/vendor\/[^/]+\/package\.json$/
+  const lockstepManifests = lockstepPackages()
+    .map(({ root }) => `${root}/package.json`)
+    .filter((manifest) => manifest.startsWith("reference-implementation/"))
+
+  it("holds the reference configuration, test tree, loader files and vendored manifests that scripts tests read, and nothing else of the reference implementation", async () => {
     const reference = (await scriptsSandboxInputs()).filter((file) =>
       file.startsWith("reference-implementation/")
     )
@@ -63,10 +70,15 @@ describe("scripts cohort sandbox", () => {
     for (const loader of LOADER_FILES) {
       expect(reference).toContain(loader)
     }
+    expect(lockstepManifests.length).toBeGreaterThan(0)
+    for (const manifest of lockstepManifests) {
+      expect(reference).toContain(manifest)
+    }
     const outside = reference.filter(
       (file) =>
         file !== "reference-implementation/stryker.config.mjs" &&
         !LOADER_FILES.includes(file) &&
+        !VENDORED_MANIFEST.test(file) &&
         !file.startsWith("reference-implementation/test/")
     )
     expect(outside).toEqual([])

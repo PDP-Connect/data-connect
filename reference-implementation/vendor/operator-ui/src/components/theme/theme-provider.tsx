@@ -5,7 +5,7 @@
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome does not resolve this package's conditional exports; TypeScript does.
 import { ThemeProvider as NextThemesProvider, useTheme as useNextTheme } from "next-themes";
-import { type ReactNode, useEffect } from "react";
+import { type ComponentType, type ReactNode, useEffect } from "react";
 import { type ResolvedTheme, THEME_KEY, type ThemeChoice } from "./theme-state.ts";
 
 interface ThemeContextValue {
@@ -16,7 +16,9 @@ interface ThemeContextValue {
   theme: ThemeChoice;
 }
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
+type ToggleBridge = ComponentType<{ children: ReactNode; setTheme: (next: ResolvedTheme) => void }>;
+
+export function ThemeProvider({ children, toggleBridge }: { children: ReactNode; toggleBridge?: ToggleBridge }) {
   return (
     <NextThemesProvider
       attribute={["data-theme", "class"]}
@@ -26,9 +28,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       storageKey="pdpp-theme"
     >
       <ThemeCookieBridge />
-      {children}
+      {toggleBridge ? <ThemeToggleBridge bridge={toggleBridge}>{children}</ThemeToggleBridge> : children}
     </NextThemesProvider>
   );
+}
+
+function ThemeToggleBridge({ bridge: Bridge, children }: { bridge: ToggleBridge; children: ReactNode }) {
+  const { setTheme } = useTheme();
+  return <Bridge setTheme={setTheme}>{children}</Bridge>;
 }
 
 /** Keep server-rendered reference pages on the same theme as the console. */

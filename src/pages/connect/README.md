@@ -42,8 +42,6 @@
 - Localhost (dev): hit `/connect` directly with query params.
   - Example: `http://localhost:5173/connect?sessionId=ext-123&secret=test-secret&scopes=chatgpt.conversations`
   - JSON `scopes` also works: `scopes=["read:chatgpt-conversations"]`
-- Production: use deep linking with the same params.
-  - Example: `vana://connect?sessionId=ext-123&secret=test-secret&scopes=chatgpt.conversations`
 
 ## Notes
 

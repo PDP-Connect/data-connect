@@ -4,10 +4,35 @@
 import { ConnectError, normalizeProviderUrl, readStoredCredential } from "../connect/flow.ts";
 import { type ParsedFlags, parseArgs, requirePositional } from "../ref/args.ts";
 import type { CommandIo } from "../ref/commands/call.ts";
-import { PdppHttpError, PdppUsageError } from "../ref/errors.ts";
-import { resolveFormat, writeData, writeEnvelopeWarnings } from "../ref/output.ts";
+import { PdppCliError, PdppHttpError, PdppUsageError } from "../ref/errors.ts";
+import { extractEnvelopeWarnings, resolveFormat, writeData, writeEnvelopeWarnings } from "../ref/output.ts";
 
-const COMMANDS = new Set(["schema", "streams", "query-records", "fetch", "field-window", "search", "aggregate"]);
+// Search endpoints select sources by connection only; they reject connector_id.
+const SOURCE_FLAGS = ["connector-id", "connection-id"];
+const COMMON_FLAGS = ["connection-id", "cache-root", "format", "data", "allow-partial"];
+const BOOLEAN_FLAGS = ["data", "allow-partial"];
+const COMMAND_FLAGS: Record<string, string[]> = {
+  schema: ["connector-id", "stream", "view"],
+  streams: ["connector-id", "connector-instance-id"],
+  "query-records": ["connector-id", "connector-instance-id", "cursor", "limit", "order", "sort", "count", "changes-since", "fields", "filter", "filter-json"],
+  fetch: ["connector-id", "connector-instance-id", "fields"],
+  "field-window": ["connector-id", "field", "cursor", "offset-chars", "limit-chars", "q", "before-chars", "after-chars"],
+  search: ["connector-instance-id", "cursor", "limit", "streams", "mode"],
+  aggregate: ["connector-id", "connector-instance-id", "field", "granularity", "limit", "metric", "time-zone", "group-by", "group-by-time"],
+};
+// How many arguments each command takes after <provider-url>. A surplus one
+// is refused, not ignored: it is usually a value typed after a switch
+// (`--allow-partial false`) or an unquoted search query, and dropping it
+// would run a different read than the one asked for.
+const COMMAND_ARGUMENTS: Record<string, number> = {
+  schema: 0,
+  streams: 0,
+  "query-records": 1,
+  fetch: 2,
+  "field-window": 2,
+  search: 1,
+  aggregate: 1,
+};
 const SEARCH_MODE_PATHS: Record<string, string> = {
   semantic: "/v1/search/semantic",
   hybrid: "/v1/search/hybrid",
@@ -15,6 +40,7 @@ const SEARCH_MODE_PATHS: Record<string, string> = {
 
 export function readHelp(binName = "pdpp"): string {
   return `Grant-scoped reads (uses pdpp connect/token cache, never owner credentials):
+  All commands accept --connection-id <cin> and --allow-partial; all but search accept --connector-id <id>.
   ${binName} read schema <provider-url> [--view compact] [--stream <name>] [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read streams <provider-url> [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read query-records <provider-url> <stream> [--connection-id <cin>] [--limit <n>] [--cursor <cursor>] [--fields a,b] [--sort <spec>] [--count none|estimated|exact] [--filter-json <json>] [--format json|jsonl|table]
@@ -38,33 +64,96 @@ export async function runRead(
     return 0;
   }
 
-  if (!COMMANDS.has(command)) {
-    throw new PdppUsageError(`Unknown read command: ${command}`);
-  }
-
-  const { flags, positionals } = parseArgs(rest);
-  const providerUrl = requirePositional(positionals, 0, "provider-url");
-  let credential: { access_token: string };
-  let normalizedProviderUrl: string;
+  let flags: ParsedFlags = {};
   try {
-    const stored = await readStoredCredential(providerUrl, {
-      cacheRoot: typeof flags["cache-root"] === "string" ? flags["cache-root"] : undefined,
-    });
-    credential = stored.credential as { access_token: string };
-    normalizedProviderUrl = stored.providerUrl;
-  } catch (error) {
-    if (error instanceof ConnectError) {
-      // biome-ignore lint/style/useErrorCause: PdppUsageError's constructor (message, details) has no cause param; the ConnectError's message is folded into the thrown message instead.
-      throw new PdppUsageError(error.message);
+    const parsedArgs = parseArgs(rest, { booleanFlags: BOOLEAN_FLAGS });
+    flags = parsedArgs.flags;
+    if (!Object.hasOwn(COMMAND_FLAGS, command)) {
+      throw new PdppUsageError(`Unknown read command: ${command}`);
     }
-    throw error;
-  }
 
-  const request = buildReadRequest(command, positionals.slice(1), flags, normalizedProviderUrl);
-  const body = await fetchReadJson(request, credential.access_token, fetchImpl);
-  writeData(projectOutput(body, flags), resolveFormat(flags, "json", "json"), out);
-  writeEnvelopeWarnings(body, err);
-  return 0;
+    const { positionals } = parsedArgs;
+    validateInvocation(command, positionals.slice(1), flags);
+    const format = resolveFormat(flags, "json", "json");
+    if (!["json", "jsonl", "table"].includes(format)) {
+      throw new PdppUsageError(`Unsupported format: ${format}`, { param: "format" });
+    }
+    const providerUrl = requirePositional(positionals, 0, "provider-url");
+    let credential: { access_token: string };
+    let normalizedProviderUrl: string;
+    try {
+      const stored = await readStoredCredential(providerUrl, {
+        cacheRoot: typeof flags["cache-root"] === "string" ? flags["cache-root"] : undefined,
+      });
+      credential = stored.credential as { access_token: string };
+      normalizedProviderUrl = stored.providerUrl;
+    } catch (error) {
+      if (error instanceof ConnectError) {
+        // biome-ignore lint/style/useErrorCause: PdppUsageError's constructor (message, details) has no cause param; the ConnectError's message is folded into the thrown message instead.
+        throw new PdppUsageError(error.message);
+      }
+      throw error;
+    }
+
+    const request = buildReadRequest(command, positionals.slice(1), flags, normalizedProviderUrl);
+    const { body, requestId, status } = await fetchReadJson(request, credential.access_token, fetchImpl);
+    writeData(projectOutput(body, flags), format, out);
+    const envelope = body as { has_more?: unknown; next_cursor?: unknown } | null;
+    const usableCursor = typeof envelope?.next_cursor === "string" && envelope.next_cursor.trim() !== "";
+    const partialWarning = extractEnvelopeWarnings(body).some((warning) => warning.code === "partial_results");
+    const incomplete = partialWarning || (envelope?.has_more === true && !usableCursor);
+    if (incomplete && flags["allow-partial"] !== true) {
+      throw new PdppCliError("Returned rows are incomplete. Select a connection or use --allow-partial to accept them.", 7,
+        { code: "incomplete_results", request_id: requestId, status });
+    }
+    writeEnvelopeWarnings(body, err);
+    if (incomplete && !partialWarning) {
+      err.write("warning: incomplete_results: has_more without a usable next_cursor\n");
+    }
+    return 0;
+  } catch (error) {
+    if (!(error instanceof PdppCliError)) throw error;
+    const details = (error.details ?? {}) as Record<string, unknown>;
+    const http = error instanceof PdppHttpError ? error : null;
+    const server = (http?.body as ReadErrorBody | null)?.error;
+    const diagnostic = {
+      code: server?.code ?? details.code ?? (error instanceof PdppUsageError ? "invalid_argument" : "http_error"),
+      message: error.message,
+      status: http?.status ?? details.status ?? null,
+      param: server?.param ?? details.param ?? null,
+      request_id: http?.requestId ?? details.request_id ?? null,
+      retryable: details.code === "network_error" || http?.status === 429 || (http?.status ?? 0) >= 500,
+      ...(server?.available_connections ? { available_connections: server.available_connections } : {}),
+    };
+    if (!flags.format || flags.format === "json") {
+      err.write(`${JSON.stringify(diagnostic)}\n`);
+    } else {
+      const choices = diagnostic.available_connections ? ` Choices: ${JSON.stringify(diagnostic.available_connections)}` : "";
+      const requestId = diagnostic.request_id ? ` (Request-Id: ${diagnostic.request_id})` : "";
+      err.write(`${diagnostic.code}: ${error.message.replaceAll(/\s+/g, " ")}${choices}${requestId}\n`);
+    }
+    return error.exitCode;
+  }
+}
+
+/** `args` are the positional arguments after <provider-url>. */
+function validateInvocation(command: string, args: string[], flags: ParsedFlags): void {
+  const valid = [...COMMON_FLAGS, ...(COMMAND_FLAGS[command] ?? [])];
+  for (const [flag, value] of Object.entries(flags)) {
+    if (!valid.includes(flag)) {
+      throw new PdppUsageError(`Unknown flag: --${flag}. Valid flags: ${valid.map((name) => `--${name}`).join(", ")}`,
+        { param: flag });
+    }
+    // An empty value (`--connection-id=`) would be dropped from the request
+    // and read with the server's default instead of the selection asked for.
+    if ((value === true && !BOOLEAN_FLAGS.includes(flag)) || (typeof value === "string" && value.trim() === "")) {
+      throw new PdppUsageError(`Missing value for --${flag}`, { param: flag });
+    }
+  }
+  const surplus = args[COMMAND_ARGUMENTS[command] ?? 0];
+  if (surplus !== undefined) {
+    throw new PdppUsageError(`Unexpected argument: ${surplus}`);
+  }
 }
 
 interface ReadRequest {
@@ -82,6 +171,7 @@ export function buildReadRequest(
   flags: ParsedFlags,
   providerUrl: string
 ): ReadRequest {
+  validateInvocation(command, positionals, flags);
   const origin = normalizeProviderUrl(providerUrl);
   if (!origin) {
     throw new PdppUsageError(`Invalid provider URL: ${providerUrl}`);
@@ -90,14 +180,14 @@ export function buildReadRequest(
   if (command === "schema") {
     return {
       method: "GET",
-      url: buildUrl(origin, "/v1/schema", pickQuery(flags, ["connector-id", "connection-id", "stream", "view"])),
+      url: buildUrl(origin, "/v1/schema", pickQuery(flags, [...SOURCE_FLAGS, "stream", "view"])),
     };
   }
 
   if (command === "streams") {
     return {
       method: "GET",
-      url: buildUrl(origin, "/v1/streams", pickQuery(flags, ["connection-id", "connector-instance-id"])),
+      url: buildUrl(origin, "/v1/streams", pickQuery(flags, [...SOURCE_FLAGS, "connector-instance-id"])),
     };
   }
 
@@ -105,7 +195,7 @@ export function buildReadRequest(
     const stream = requirePositional(positionals, 0, "stream");
     const query: QueryRecord = {
       ...pickQuery(flags, [
-        "connection-id",
+        ...SOURCE_FLAGS,
         "connector-instance-id",
         "cursor",
         "limit",
@@ -124,7 +214,7 @@ export function buildReadRequest(
     const stream = requirePositional(positionals, 0, "stream");
     const recordId = requirePositional(positionals, 1, "record-id");
     const query: QueryRecord = {
-      ...pickQuery(flags, ["connection-id", "connector-instance-id"]),
+      ...pickQuery(flags, [...SOURCE_FLAGS, "connector-instance-id"]),
       ...csvQuery(flags, "fields"),
     };
     return {
@@ -140,7 +230,7 @@ export function buildReadRequest(
       throw new PdppUsageError("Missing required flag: --field");
     }
     const query = pickQuery(flags, [
-      "connection-id",
+      ...SOURCE_FLAGS,
       "field",
       "cursor",
       "offset-chars",
@@ -180,7 +270,7 @@ export function buildReadRequest(
       throw new PdppUsageError("Use only one of --group-by or --group-by-time.");
     }
     const query: QueryRecord = pickQuery(flags, [
-      "connection-id",
+      ...SOURCE_FLAGS,
       "connector-instance-id",
       "field",
       "granularity",
@@ -201,13 +291,14 @@ export function buildReadRequest(
 }
 
 interface ReadErrorBody {
-  error?: { message?: string };
+  error?: { message?: string; code?: string; param?: string; available_connections?: unknown[] };
   error_description?: string;
   message?: string;
 }
 
-async function fetchReadJson(request: ReadRequest, token: string, fetchImpl: typeof fetch): Promise<unknown> {
+async function fetchReadJson(request: ReadRequest, token: string, fetchImpl: typeof fetch): Promise<{ body: unknown; requestId: string | null; status: number }> {
   let resp: Response;
+  let text: string;
   try {
     resp = await fetchImpl(request.url, {
       method: request.method,
@@ -216,12 +307,12 @@ async function fetchReadJson(request: ReadRequest, token: string, fetchImpl: typ
         Authorization: `Bearer ${token}`,
       },
     });
+    text = typeof resp.text === "function" ? await resp.text() : "";
   } catch (error) {
-    // biome-ignore lint/style/useErrorCause: PdppUsageError's constructor (message, details) has no cause param; the original error's message is interpolated into the thrown message instead.
-    throw new PdppUsageError(`Network request failed: ${(error as Error).message}`);
+    // biome-ignore lint/style/useErrorCause: PdppCliError's constructor (message, details) has no cause param; the original error's message is interpolated into the thrown message instead.
+    throw new PdppCliError(`Network request failed: ${(error as Error).message}`, 6, { code: "network_error" });
   }
 
-  const text = typeof resp.text === "function" ? await resp.text() : "";
   let parsed: unknown = null;
   if (text) {
     try {
@@ -239,11 +330,11 @@ async function fetchReadJson(request: ReadRequest, token: string, fetchImpl: typ
       errBody?.message ||
       `HTTP ${resp.status} ${resp.statusText || ""}`.trim();
     throw new PdppHttpError(String(message), resp.status, parsed, {
-      request_id: resp.headers?.get?.("x-request-id") ?? null,
+      request_id: resp.headers?.get?.("Request-Id") ?? null,
     });
   }
 
-  return parsed;
+  return { body: parsed, requestId: resp.headers?.get?.("Request-Id") ?? null, status: resp.status };
 }
 
 function buildUrl(origin: string, path: string, query: QueryRecord = {}): string {
@@ -329,7 +420,7 @@ function jsonFilterQuery(flags: ParsedFlags): QueryRecord {
 }
 
 function projectOutput(body: unknown, flags: ParsedFlags): unknown {
-  if (!flags.data) {
+  if (flags.data !== true) {
     return body;
   }
   const typed = body as { data?: unknown; records?: unknown };

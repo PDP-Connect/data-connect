@@ -660,6 +660,47 @@ export async function postgresGetRunStartedEvent(runId: string | null): Promise<
   return result.rows[0] ?? null;
 }
 
+// Postgres mirror of `queries/spine/get-run-record-outcomes.sql`: whole-run
+// record outcomes summed in the database over every event of the run, so the
+// answer never depends on a timeline page window.
+export interface RunRecordOutcomesRow {
+  readonly rejected_in_batches: number | string;
+  readonly unaccounted_json: string | null;
+  readonly unreported_batches: number | string;
+}
+
+export async function postgresGetRunRecordOutcomes(runId: string): Promise<RunRecordOutcomesRow | null> {
+  const result = await postgresQuery<RunRecordOutcomesRow>(
+    `WITH batches AS (
+       SELECT
+         COALESCE(SUM((data_json->>'records_permanently_rejected')::numeric)
+                  FILTER (WHERE jsonb_typeof(data_json->'records_permanently_rejected') = 'number'), 0)::text
+           AS rejected_in_batches,
+         COUNT(*) FILTER (WHERE jsonb_typeof(data_json->'records_permanently_rejected') IS DISTINCT FROM 'number')::text
+           AS unreported_batches
+       FROM spine_events
+       WHERE run_id = $1 AND event_type = 'run.batch_ingested'
+     ),
+     evidence AS (
+       SELECT stream_id,
+              SUM((data_json#>>'{outcomes,unaccounted}')::numeric)
+                FILTER (WHERE jsonb_typeof(data_json#>'{outcomes,unaccounted}') = 'number') AS unaccounted
+       FROM spine_events
+       WHERE run_id = $1 AND event_type = 'run.stream_evidence_declared' AND stream_id IS NOT NULL
+       GROUP BY stream_id
+       HAVING SUM((data_json#>>'{outcomes,unaccounted}')::numeric)
+                FILTER (WHERE jsonb_typeof(data_json#>'{outcomes,unaccounted}') = 'number') > 0
+     )
+     SELECT rejected_in_batches,
+            unreported_batches,
+            (SELECT COALESCE(jsonb_object_agg(stream_id, unaccounted), '{}'::jsonb)::text FROM evidence)
+              AS unaccounted_json
+     FROM batches`,
+    [runId]
+  );
+  return result.rows[0] ?? null;
+}
+
 interface SummaryEventFields {
   readonly failureEvent: SpineEventRecord | undefined;
   readonly first: SpineEventRecord | null;

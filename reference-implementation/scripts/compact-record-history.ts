@@ -91,6 +91,13 @@
  *     as the operator's rollback handle.
  *   - Insert/delete row counts are asserted equal before commit; any
  *     mismatch rolls the transaction back.
+ *   - The transaction takes the connector instance's write lock, then the
+ *     stream's version_counter row (the order ingest uses), and raises
+ *     version_counter.changes_floor to the newest version that superseded a
+ *     removed row, so changes_since tokens that needed a removed row expire
+ *     with 410 instead of getting a silently wrong delta. A stream with no
+ *     counter row has nowhere to record that floor, so apply refuses it.
+ *   - Run plan and apply back to back: apply does not re-validate the plan.
  *
  * Usage:
  *   node reference-implementation/scripts/compact-record-history.mjs \
@@ -112,6 +119,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  connectorInstanceAdvisoryLockKey,
+  connectorInstanceLockWaitMs,
+} from "../server/connector-instance-write-coordinator.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -972,11 +983,39 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
   const client = await pool.connect();
   let inserted = 0;
   let deleted = 0;
+  // Newest version that superseded a removed row. A removed row (k, v) is the
+  // snapshot a changes_since token s needs when v <= s < next(k), so tokens
+  // below this version can no longer be answered exactly.
+  let changesFloor = 0;
   try {
     await client.query("BEGIN");
+    // Same lock ingest and stream resets take (bounded wait), then the counter row.
+    await client.query(`SET LOCAL lock_timeout = '${connectorInstanceLockWaitMs()}ms'`);
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
+      connectorInstanceAdvisoryLockKey(plan.connectorInstanceId),
+    ]);
+    const counter = await client.query(
+      "SELECT 1 FROM version_counter WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE",
+      [plan.connectorInstanceId, plan.stream]
+    );
+    if (counter.rowCount === 0) {
+      throw new Error(
+        `cannot compact ${plan.connectorInstanceId}/${plan.stream}: no version_counter row to record the changes floor`
+      );
+    }
 
     for (const [recordKey, versions] of plan.removableByKey) {
       const versionsAsNumbers = versions.map(Number);
+      const successors = await client.query<{ floor: string | null }>(
+        `SELECT MAX((SELECT MIN(n.version) FROM record_changes n
+                      WHERE n.connector_instance_id = rc.connector_instance_id AND n.stream = rc.stream
+                        AND n.record_key = rc.record_key AND n.version > rc.version))::bigint AS floor
+           FROM record_changes rc
+          WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.record_key = $3
+            AND rc.version = ANY($4::bigint[])`,
+        [plan.connectorInstanceId, plan.stream, recordKey, versionsAsNumbers]
+      );
+      changesFloor = Math.max(changesFloor, Number(successors.rows[0]?.floor ?? 0));
       // biome-ignore lint/performance/noAwaitInLoops: every insert/delete pair in this loop shares ONE pg.PoolClient inside a single BEGIN/COMMIT transaction -- a pg client serializes queries on one connection regardless, and parallelizing here would not overlap I/O, only reorder statements inside the transaction non-deterministically.
       const insertRes = await client.query(
         `INSERT INTO ${quoteIdent(backupTable)}
@@ -1008,6 +1047,12 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
       inserted += insertRes.rowCount || 0;
       deleted += deleteRes.rowCount || 0;
     }
+
+    await client.query(
+      `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
+        WHERE connector_instance_id = $1 AND stream = $2`,
+      [plan.connectorInstanceId, plan.stream, changesFloor]
+    );
 
     await client.query("COMMIT");
   } catch (err) {

@@ -255,8 +255,9 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // OS reauth handoff state, never connector/provider policy.
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
   'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
-  // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
-  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
+  // readConfinedFile(file, limit) in local-source.ts: readSync on the
+  // descriptor of file.path. Its only caller, readManifest(root), passes
+  // checkConfinedFile(root, MANIFEST_PATH, ...) --
   // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
   // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
   // developer-supplied absolute directory path given to the public
@@ -265,7 +266,13 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // caller-supplied, the filename component is an RI-owned generic literal,
   // and this feature is explicitly unsigned/unregistered developer tooling
   // (see this file's own module doc comment), not connector catalog data.
-  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath, "utf8")',
+  'reference-implementation/server/connector-install/local-source.ts::readConfinedFile::readSync(fd, buffer, length, buffer.length - length, null)',
+  // SQLite file checks: readSync compares the 16-byte SQLite header or
+  // streams the file into a SHA-256 digest. The bytes never reach a parser,
+  // so they cannot carry connector or provider identity.
+  'reference-implementation/scripts/migrate-storage/sqlite-source.ts::hasPlaintextSqliteHeader::readSync(descriptor, header, 0, header.length, 0)',
+  'reference-implementation/server/sqlite-encryption.ts::hasPlaintextSqliteHeader::readSync(descriptor, header, 0, header.length, 0)',
+  'reference-implementation/server/sqlite-encryption.ts::digestFile::readSync(descriptor, buffer, 0, buffer.length, null)',
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-dir>, entryName), where the dir is
   // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
@@ -1440,6 +1447,16 @@ export function scanFileDataLoads(
       declaratorNameByInit.set(n.init as Node, nId.name as string);
     }
   });
+  // `JSON.parse(bytes.toString(...))`: a Buffer read decoded before parsing.
+  function isDecodedBinding(node: Node, boundName: string): boolean {
+    const callee = node.callee as Node | undefined;
+    return (
+      node.type === "CallExpression" &&
+      callee?.type === "MemberExpression" &&
+      isIdentifier(callee.object as Node, boundName) &&
+      isIdentifier(callee.property as Node, "toString")
+    );
+  }
   function flowsIntoJsonParse(callNode: Node, parent: Node | null): boolean {
     if (
       parent?.type === "CallExpression" &&
@@ -1468,7 +1485,7 @@ export function scanFileDataLoads(
         isIdentifier((n.callee as Node).property as Node, "parse")
       ) {
         const [arg] = nodeArrayField(n, "arguments");
-        if (arg && isIdentifier(arg, boundName)) {
+        if (arg && (isIdentifier(arg, boundName) || isDecodedBinding(arg, boundName))) {
           found = true;
         }
       }
@@ -1664,6 +1681,14 @@ export function scanFileDataLoads(
     ancestors: Node[]
   ): boolean {
     const name = node.type === "CallExpression" ? calleeName(callee) : null;
+    if (node.type === "CallExpression" && name === "readSync") {
+      // readSync reads through a descriptor, so its target never resolves
+      // statically. Fail closed: only a reviewed call site may use it.
+      if (!isSanctionedSite(node, ancestors)) {
+        report(node, "unresolvable-data-resource-load");
+      }
+      return true;
+    }
     if (!(node.type === "CallExpression" && (name === "readFileSync" || name === "readFile"))) {
       return false;
     }

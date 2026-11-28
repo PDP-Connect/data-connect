@@ -109,6 +109,16 @@ tauri-plugin-mcp-bridge = "0.13.0"
 libc = "0.2"
 signal-hook = "0.4.4"
 
+# Job Object that kills the sidecar tree when the app dies (process_supervisor).
+# 0.61 is already in the tree through tauri, so this adds no new crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
 # gtk is already in the tree via tauri; it is named here so the
 # wayland_titlebar module can call GtkWindowExt on the window tauri returns.
 [target.'cfg(target_os = "linux")'.dependencies]

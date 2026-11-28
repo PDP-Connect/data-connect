@@ -49,7 +49,6 @@ const declarationKeep = new Set(
     "collector-runtime/src/local-device-client.d.ts",
     "collector-runtime/src/local-device-envelope.d.ts",
     "collector-runtime/src/local-device-outbox.d.ts",
-    "collector-runtime/src/local-device-queue.d.ts",
     "collector-runtime/src/runtime-capabilities.d.ts",
     "connector-protocol/src/collector-definition.d.ts",
     "connector-protocol/src/connector-runtime-protocol.d.ts",
