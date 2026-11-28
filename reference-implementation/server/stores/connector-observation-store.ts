@@ -15,7 +15,7 @@
  *
  * Bounds:
  * - At most CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR records per connector_id,
- *   counted across all of its connector_instance_id values. Surplus records are
+ *   counted across its retired spellings and all connector_instance_id values. Surplus records are
  *   pruned in the same transaction as the write that creates them.
  * - A record's serialized payload is at most CONNECTOR_OBSERVATION_RECORD_MAX_BYTES.
  *   A larger record is rejected before any database access. Total payload per
@@ -41,6 +41,7 @@ import {
   type ObservationSnapshot,
   validateDiagnosticDescriptors,
 } from "../../runtime/observations.ts";
+import { connectorObservationSpellings } from "../connector-id-rename-migration.ts";
 import {
   getStorageBackendKind,
   isPostgresStorageBackend,
@@ -125,38 +126,40 @@ interface NextSequenceRow {
   next_seq: number | string;
 }
 
+// nextSequence stays exact-id: its UNIQUE key includes connector_id. Reads and
+// retention merge spellings, with connector_id breaking any sequence ties.
 // Static SQL per backend. Both statements bind every value; the only literal
 // is the fixed record version, which is a column constant.
 const SQLITE_SQL = {
   existing:
     "SELECT payload_json FROM connector_observation_runs WHERE connector_id = ? AND connector_instance_id = ? AND run_id = ?",
-  get: "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ? AND connector_instance_id = ? AND run_id = ?",
+  get: "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) AND connector_instance_id = ? AND run_id = ? ORDER BY recorded_seq DESC, connector_id ASC LIMIT 1",
   insert:
     "INSERT INTO connector_observation_runs (connector_id, connector_instance_id, run_id, recorded_seq, record_version, recorded_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
   listAllInstances:
-    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ? ORDER BY recorded_seq DESC LIMIT ?",
+    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) ORDER BY recorded_seq DESC, connector_id ASC LIMIT ?",
   listOneInstance:
-    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ? AND connector_instance_id = ? ORDER BY recorded_seq DESC LIMIT ?",
+    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) AND connector_instance_id = ? ORDER BY recorded_seq DESC, connector_id ASC LIMIT ?",
   nextSequence:
     "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id = ?",
   prune:
-    "DELETE FROM connector_observation_runs WHERE connector_id = ? AND recorded_seq NOT IN (SELECT recorded_seq FROM connector_observation_runs WHERE connector_id = ? ORDER BY recorded_seq DESC LIMIT ?)",
+    "DELETE FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) AND (connector_id, recorded_seq) NOT IN (SELECT connector_id, recorded_seq FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) ORDER BY recorded_seq DESC, connector_id ASC LIMIT ?)",
 } as const;
 
 const POSTGRES_SQL = {
   existing:
     "SELECT payload_json FROM connector_observation_runs WHERE connector_id = $1 AND connector_instance_id = $2 AND run_id = $3",
-  get: "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = $1 AND connector_instance_id = $2 AND run_id = $3",
+  get: "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) AND connector_instance_id = $2 AND run_id = $3 ORDER BY recorded_seq DESC, connector_id ASC LIMIT 1",
   insert:
     "INSERT INTO connector_observation_runs (connector_id, connector_instance_id, run_id, recorded_seq, record_version, recorded_at, payload_json) VALUES ($1, $2, $3, $4, $5, $6, $7)",
   listAllInstances:
-    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = $1 ORDER BY recorded_seq DESC LIMIT $2",
+    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) ORDER BY recorded_seq DESC, connector_id ASC LIMIT $2",
   listOneInstance:
-    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = $1 AND connector_instance_id = $2 ORDER BY recorded_seq DESC LIMIT $3",
+    "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) AND connector_instance_id = $2 ORDER BY recorded_seq DESC, connector_id ASC LIMIT $3",
   nextSequence:
     "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id = $1",
   prune:
-    "DELETE FROM connector_observation_runs WHERE connector_id = $1 AND recorded_seq NOT IN (SELECT recorded_seq FROM connector_observation_runs WHERE connector_id = $2 ORDER BY recorded_seq DESC LIMIT $3)",
+    "DELETE FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) AND (connector_id, recorded_seq) NOT IN (SELECT connector_id, recorded_seq FROM connector_observation_runs WHERE connector_id = ANY($2::text[]) ORDER BY recorded_seq DESC, connector_id ASC LIMIT $3)",
 } as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -347,7 +350,7 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
         const key = requireKey(input);
         const [row] = [
           ...iterateDynamicSqlAcknowledged<RunRow>(SQLITE_SQL.get, [
-            key.connectorId,
+            JSON.stringify(connectorObservationSpellings(key.connectorId)),
             key.connectorInstanceId,
             key.runId,
           ]),
@@ -361,10 +364,10 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
         const limit = boundedLimit(input.limit);
         const rows =
           input.connectorInstanceId === undefined
-            ? [...iterateDynamicSqlAcknowledged<RunRow>(SQLITE_SQL.listAllInstances, [connectorId, limit])]
+            ? [...iterateDynamicSqlAcknowledged<RunRow>(SQLITE_SQL.listAllInstances, [JSON.stringify(connectorObservationSpellings(connectorId)), limit])]
             : [
                 ...iterateDynamicSqlAcknowledged<RunRow>(SQLITE_SQL.listOneInstance, [
-                  connectorId,
+                  JSON.stringify(connectorObservationSpellings(connectorId)),
                   requireIdentity("connectorInstanceId", input.connectorInstanceId),
                   limit,
                 ]),
@@ -401,10 +404,10 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
             recordedAt,
             payload,
           ]);
-          // REVIEWED-DYNAMIC: fixed static statement; retention is per connector_id across instances.
+          // REVIEWED-DYNAMIC: fixed static statement; retention spans spellings and instances.
           execDynamicSqlAcknowledged(SQLITE_SQL.prune, [
-            key.connectorId,
-            key.connectorId,
+            JSON.stringify(connectorObservationSpellings(key.connectorId)),
+            JSON.stringify(connectorObservationSpellings(key.connectorId)),
             CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR,
           ]);
         });
@@ -418,7 +421,7 @@ function createPostgresConnectorObservationRunStore(writeTimeoutMs: number): Con
     async get(input: ConnectorObservationRunKey): Promise<ConnectorObservationRunRecord | null> {
       const key = requireKey(input);
       const result = await postgresQuery<RunRow>(POSTGRES_SQL.get, [
-        key.connectorId,
+        connectorObservationSpellings(key.connectorId),
         key.connectorInstanceId,
         key.runId,
       ]);
@@ -430,9 +433,9 @@ function createPostgresConnectorObservationRunStore(writeTimeoutMs: number): Con
       const limit = boundedLimit(input.limit);
       const result =
         input.connectorInstanceId === undefined
-          ? await postgresQuery<RunRow>(POSTGRES_SQL.listAllInstances, [connectorId, limit])
+          ? await postgresQuery<RunRow>(POSTGRES_SQL.listAllInstances, [connectorObservationSpellings(connectorId), limit])
           : await postgresQuery<RunRow>(POSTGRES_SQL.listOneInstance, [
-              connectorId,
+              connectorObservationSpellings(connectorId),
               requireIdentity("connectorInstanceId", input.connectorInstanceId),
               limit,
             ]);
@@ -476,8 +479,8 @@ function createPostgresConnectorObservationRunStore(writeTimeoutMs: number): Con
           payload,
         ]);
         await client.query(POSTGRES_SQL.prune, [
-          key.connectorId,
-          key.connectorId,
+          connectorObservationSpellings(key.connectorId),
+          connectorObservationSpellings(key.connectorId),
           CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR,
         ]);
       });

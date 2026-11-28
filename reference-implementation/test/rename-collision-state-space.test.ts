@@ -8,7 +8,7 @@ import test from "node:test";
 import { consumePendingCode } from "./helpers/rename-enrollment-fixture.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { bootstrapPostgresSchema, closePostgresStorage, getPostgresPool, initPostgresStorage } from "../server/postgres-storage.ts";
-import { CONNECTOR_ID_RENAME_MIGRATION_ID, migrateRenamedConnectorIdsSqlite, migrateRenamedConnectorIdsPostgres } from "../server/connector-id-rename-migration.ts";
+import { CONNECTOR_ID_RENAME_MIGRATION_ID, migrateRenamedConnectorIdsSqlite, migrateRenamedConnectorIdsPostgres, type SqliteLike } from "../server/connector-id-rename-migration.ts";
 import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 import { assertCollision, assertObservationScenario, assertLegacyLocalDevice, bindingScenarios, collisionTables, key, legacyConnectors, observationScenarios, seedLegacyLocalDevice, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
@@ -27,6 +27,56 @@ const shapes = [
   ...Array.from({ length: 12 }, (_, i) => ({ name: `seed-7701128-${i}`, masks: Array.from({ length: 10 }, () => next() % 3 + 1) })),
 ];
 const json = (value: unknown): Record<string, unknown> => typeof value === "string" ? JSON.parse(value) : value as Record<string, unknown>;
+
+async function seedEmptySyntheticPairs(query: Query, count: number) {
+  await query("INSERT INTO connectors (connector_id, manifest, created_at) VALUES ('claude_code', '{}', '2026-11-14'), ('unrelated', '{}', '2026-11-14')");
+  await query("INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('empty-device', 'owner_local', 'device', '2026-11-14', '2026-11-14')");
+  for (let i = 0; i < count; i++) await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, local_binding_id, created_at, updated_at) VALUES ('empty-${i}', 'empty-device', 'claude_code', 'empty-${i}', '2026-11-14', '2026-11-14')`);
+  await query("INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('unrelated-instance', 'owner_local', 'unrelated', 'x', 'active', 'account', 'unrelated', '{}', '2026-11-14', '2026-11-14')");
+  await query("INSERT INTO connector_observation_runs (connector_id, connector_instance_id, run_id, recorded_seq, record_version, recorded_at, payload_json) VALUES ('unrelated', 'unrelated-instance', 'unrelated-run', 1, 1, '2026-11-14', '{}')");
+}
+
+test("empty synthetic pairs have bounded planner table reads", async t => {
+  const plannerRead = /^SELECT \* FROM "/;
+  const counts: { sqlite: number[]; postgres: number[] } = { sqlite: [], postgres: [] };
+  for (const count of [0, 1, 200]) {
+    const db = initDb(":memory:");
+    try {
+      await seedEmptySyntheticPairs(async sql => (db.exec(sql), []), count);
+      let reads = 0;
+      const raw: SqliteLike = {
+        exec: sql => db.exec(sql),
+        prepare: sql => { if (plannerRead.test(sql)) reads++; return db.prepare(sql); },
+        transaction: fn => db.transaction(fn),
+      };
+      migrateRenamedConnectorIdsSqlite(raw);
+      counts.sqlite.push(reads);
+    } finally { closeDb(); }
+  }
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  if (url) await withTemporaryPostgresDatabase({ connectionString: url, databaseName: `rename_cost_${process.pid}`, closeConnections: closePostgresStorage }, async databaseUrl => {
+    await initPostgresStorage({ backend: "postgres", databaseUrl });
+    const client = await getPostgresPool().connect();
+    try {
+      for (const count of [0, 1, 200]) {
+        await client.query("TRUNCATE connectors, device_exporters, connector_instances, connector_observation_runs CASCADE");
+        await seedEmptySyntheticPairs(async sql => (await client.query(sql)).rows, count);
+        let reads = 0;
+        const counted = new Proxy(client, { get(target, prop) {
+          if (prop === "query") return (sql: string, params?: unknown[]) => { if (plannerRead.test(sql)) reads++; return target.query(sql, params); };
+          return Reflect.get(target, prop);
+        } });
+        await migrateRenamedConnectorIdsPostgres(counted);
+        counts.postgres.push(reads);
+      }
+    } finally { client.release(); }
+  });
+  t.diagnostic(`planner reads for 0/1/200 sources: ${JSON.stringify(counts)}`);
+  assert.equal(counts.sqlite[0], 0);
+  assert.equal(counts.sqlite[1], counts.sqlite[2]);
+  assert.ok(counts.sqlite[2]! <= 32);
+  if (url) { assert.equal(counts.postgres[0], 0); assert.equal(counts.postgres[1], counts.postgres[2]); assert.ok(counts.postgres[2]! <= 32); }
+});
 
 // Exercise every planned UNIQUE-key policy under synthetic ids as well as bare ids.
 const syntheticShapes = [...collisionTables, ...observationScenarios, "bindings"];

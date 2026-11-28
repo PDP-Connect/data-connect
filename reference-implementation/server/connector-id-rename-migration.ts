@@ -6,10 +6,9 @@
  * spelled with underscores (`claude_code`) to their manifest keys
  * (`claude-code`) in every stored row.
  *
- * The four old -> new pairs live here and nowhere else. Nothing at runtime
- * reads them: identity resolution has no rename step, and an old id sent by a
- * stale client is an unknown connector like any other. The pairs are data for
- * this migration only, which is why this module, and no other, names them.
+ * The four old -> new pairs live here and nowhere else. Observation history
+ * reads also use them to include conflicting rows retained under an old id.
+ * Identity resolution still has no rename step.
  */
 
 import type { PoolClient } from "pg";
@@ -21,6 +20,11 @@ const RENAMES: readonly (readonly [oldId: string, newId: string])[] = Object.fre
   ["google_messages", "google-messages"],
   ["google_takeout", "google-takeout"],
 ]);
+
+/** Preserve stored provenance while reading a canonical connector's history. */
+export function connectorObservationSpellings(connectorId: string): string[] {
+  return [connectorId, ...RENAMES.filter(([, current]) => current === connectorId).map(([old]) => old)];
+}
 
 /** Postgres migration receipt id. Versioned: a behavior change ships as a new id. */
 export const CONNECTOR_ID_RENAME_MIGRATION_ID = "renamed_connector_ids_v2";
@@ -488,12 +492,19 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     const legacy = legacyLocalDeviceEntries(raw.prepare("SELECT * FROM device_source_instances").all());
     const entries = [...renameEntries(), ...legacy];
     const allOlds = entries.map(([oldId]) => oldId);
+    const plannerIds = new Set<string>();
+    for (const table of COLLISION_TABLES) {
+      if (columns.some(c => c.table === table)) {
+        for (const row of raw.prepare(`SELECT DISTINCT connector_id FROM ${quote(table)}`).all()) plannerIds.add(String(row.connector_id));
+      }
+    }
     for (const [oldId, newId] of entries) {
       if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
         supersededParents.add(oldId);
       }
       const data: Record<string, Row[]> = {};
       for (const table of [...COLLISION_TABLES, "device_exporters"]) {
+        if (!plannerIds.has(oldId) && !plannerIds.has(newId)) continue;
         if (columns.some(c => c.table === table) || table === "device_exporters") {
           data[table] = raw.prepare(`SELECT * FROM ${quote(table)}`).all();
         }
@@ -668,12 +679,19 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     const legacy = legacyLocalDeviceEntries((await client.query("SELECT * FROM device_source_instances")).rows);
     const entries = [...renameEntries(), ...legacy];
     const allOlds = entries.map(([oldId]) => oldId);
+    const plannerIds = new Set<string>();
+    for (const table of COLLISION_TABLES) {
+      if (columns.some(c => c.table === table)) {
+        for (const row of (await client.query(`SELECT DISTINCT connector_id FROM ${quote(table)}`)).rows) plannerIds.add(String(row.connector_id));
+      }
+    }
     for (const [oldId, newId] of entries) {
       if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
         supersededParents.add(oldId);
       }
       const data: Record<string, Row[]> = {};
       for (const table of [...COLLISION_TABLES, "device_exporters"]) {
+        if (!plannerIds.has(oldId) && !plannerIds.has(newId)) continue;
         if (columns.some(c => c.table === table) || table === "device_exporters") {
           data[table] = (await client.query(`SELECT * FROM ${quote(table)}`)).rows;
         }
