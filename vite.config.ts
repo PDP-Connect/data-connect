@@ -74,6 +74,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/npm-release-signer-workflow.test.ts",
       "scripts/core-headed-patchright-runtime-oracle.test.ts",
       "scripts/docker-core-first-boot.test.ts",
+      "deploy/railway/core-supervisor.test.ts",
       "scripts/forced-release.test.ts",
       "scripts/release-atomicity.test.ts",
       "scripts/release-checkout-history.test.ts",
