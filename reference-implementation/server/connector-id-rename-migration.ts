@@ -108,6 +108,7 @@ export const HANDLED_CONNECTOR_UNIQUE_KEYS = [
 ] as const;
 
 const COLLISION_TABLES = [
+  "device_enrollment_codes",
   "connector_instances",
   "device_source_instances",
   "connector_instance_tombstones",
@@ -160,12 +161,16 @@ function collisionWrites(
       ? JSON.parse(instance.source_binding_json)
       : (instance.source_binding_json as Row);
   const originalTombstones = old("connector_instance_tombstones").map(row => ({ ...row }));
+  const originalCodes = old("device_enrollment_codes").map(row => ({ ...row }));
+  const movedCodes = new Set<unknown>();
+  const currentCodeHolds = (subject: unknown, binding: unknown) => current("device_enrollment_codes").some(code => code.owner_subject_id === subject && sourceKey(code.local_binding_id) === binding);
   // Reserve original and planned bindings together, including deleted bindings.
   // Device bindings use the same owner/hash namespace as local-device instances.
   const occupancyKey = (subject: unknown, kind: unknown, key: unknown) => JSON.stringify([subject, kind, key]);
   const occupied = new Set([
     ...instances, ...rows("connector_instance_tombstones"),
     ...sources.map(source => ({ owner_subject_id: owner(source), source_kind: "local_device", source_binding_key: sourceKey(source.local_binding_id) })),
+    ...rows("device_enrollment_codes").map(code => ({ owner_subject_id: code.owner_subject_id, source_kind: "local_device", source_binding_key: sourceKey(code.local_binding_id) })),
   ].map(row => occupancyKey(row.owner_subject_id, row.source_kind, row.source_binding_key)));
   const reserveName = (base: string, subject: unknown, kind: unknown) => {
     const key = (candidate: string) => occupancyKey(subject, kind, kind === "local_device" ? sourceKey(candidate) : candidate);
@@ -180,6 +185,14 @@ function collisionWrites(
         const row = rows("connector_instance_tombstones").find(row => row.connector_instance_id === tombstone.connector_instance_id)!;
         update("connector_instance_tombstones", "connector_instance_id", row, { source_binding_key: to });
       }
+    }
+  };
+  const moveCodes = (subject: unknown, from: unknown, to: string) => {
+    for (const code of originalCodes) {
+      if (code.owner_subject_id !== subject || sourceKey(code.local_binding_id) !== from) continue;
+      const row = rows("device_enrollment_codes").find(row => row.enrollment_code_id === code.enrollment_code_id)!;
+      update("device_enrollment_codes", "enrollment_code_id", row, { local_binding_id: to });
+      movedCodes.add(code.enrollment_code_id);
     }
   };
   // Recover an absent pointer while the old connector and binding still identify its instance.
@@ -201,7 +214,7 @@ function collisionWrites(
       (source) =>
         source.connector_instance_id === instance.connector_instance_id && source.connector_id === oldId,
     );
-    const bindingCollision = current("connector_instances").some((n) =>
+    const bindingCollision = (instance.source_kind === "local_device" && currentCodeHolds(instance.owner_subject_id, instance.source_binding_key)) || current("connector_instances").some((n) =>
       equal(n, instance, ["owner_subject_id", "source_kind", "source_binding_key"]),
     );
     const deviceCollision = associated.some((source) =>
@@ -214,7 +227,10 @@ function collisionWrites(
     const name = reserveName(base, instance.owner_subject_id, instance.source_kind);
     // The name suffix lives in local_binding_id; the instance stores its canonical hash.
     // Set both here, since Postgres may have already completed its canonicalization receipt.
-    if (local) moveTombstones(instance.owner_subject_id, instance.source_binding_key, sourceKey(name));
+    if (local) {
+      moveCodes(instance.owner_subject_id, instance.source_binding_key, name);
+      moveTombstones(instance.owner_subject_id, instance.source_binding_key, sourceKey(name));
+    }
     update("connector_instances", "connector_instance_id", instance, {
       source_binding_key: local ? sourceKey(name) : name,
       ...(local ? { source_binding_json: JSON.stringify({ ...binding, kind: "local_device", local_binding_name: name }) } : {}),
@@ -225,12 +241,13 @@ function collisionWrites(
   for (const source of old("device_source_instances")) {
     const tombstoned = !source.connector_instance_id && originalTombstones.some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id));
     const deletedBindingCollision = tombstoned &&
-      current("connector_instances").some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id));
+      (currentCodeHolds(owner(source), sourceKey(source.local_binding_id)) || current("connector_instances").some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id)));
     if (!deletedBindingCollision && !current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])))
       continue;
     const name = reserveName(String(source.local_binding_id), owner(source), "local_device");
     const associated = tombstoned ? old("device_source_instances").filter(n => !n.connector_instance_id && owner(n) === owner(source) && n.local_binding_id === source.local_binding_id) : [source];
     moveTombstones(owner(source), sourceKey(source.local_binding_id), sourceKey(name));
+    moveCodes(owner(source), sourceKey(source.local_binding_id), name);
     for (const deleted of associated)
       update("device_source_instances", "source_instance_id", deleted, { local_binding_id: name });
   }
@@ -239,11 +256,22 @@ function collisionWrites(
   for (const tombstone of old("connector_instance_tombstones")) {
     const live = current("connector_instances").find((n) =>
       equal(n, tombstone, ["owner_subject_id", "source_kind", "source_binding_key"]));
-    if (!live || live.source_kind !== "local_device") continue;
-    const binding = bindingJson(live);
+    const code = current("device_enrollment_codes").find(code => code.owner_subject_id === tombstone.owner_subject_id && sourceKey(code.local_binding_id) === tombstone.source_binding_key);
+    if (tombstone.source_kind !== "local_device" || (!live && !code)) continue;
+    const binding = live ? bindingJson(live) : { local_binding_name: code!.local_binding_id };
     if (typeof binding?.local_binding_name !== "string") continue;
     const name = reserveName(binding.local_binding_name, tombstone.owner_subject_id, "local_device");
+    moveCodes(tombstone.owner_subject_id, tombstone.source_binding_key, name);
     update("connector_instance_tombstones", "connector_instance_id", tombstone, { source_binding_key: sourceKey(name) });
+  }
+  // A code can precede the first source/instance. Preserve that unclaimed
+  // old-id intent when the current spelling already owns its name.
+  for (const code of originalCodes) {
+    if (movedCodes.has(code.enrollment_code_id)) continue;
+    const binding = sourceKey(code.local_binding_id);
+    if (!currentCodeHolds(code.owner_subject_id, binding) &&
+        ![...current("connector_instances"), ...current("connector_instance_tombstones")].some(row => row.owner_subject_id === code.owner_subject_id && row.source_kind === "local_device" && row.source_binding_key === binding)) continue;
+    moveCodes(code.owner_subject_id, binding, reserveName(String(code.local_binding_id), code.owner_subject_id, "local_device"));
   }
   for (const table of ["connector_instance_tombstones", "browser_surface_leases"]) {
     for (const row of old(table)) {

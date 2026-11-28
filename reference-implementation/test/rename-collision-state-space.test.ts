@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { consumePendingCode } from "./helpers/rename-enrollment-fixture.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { bootstrapPostgresSchema, closePostgresStorage, getPostgresPool, initPostgresStorage } from "../server/postgres-storage.ts";
 import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
@@ -18,6 +19,7 @@ let randomState = 0x7701128;
 const next = () => (randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0);
 const tombstoneShapes = (["zero", "shared", "per-device"] as const).flatMap(tombstones => [1, 2].flatMap(devices => [false, true].map(occupied => ({ name: `tombstones-${tombstones}-devices-${devices}-occupied-${occupied}`, tombstones, devices, occupied, masks: null }))));
 const shapes = [
+  ...["claude_code", "claude-code"].flatMap(connector => ["shared", "distinct-old", "distinct-current", "suffix", "deleted", "deleted-orphan"].map(codeBinding => ({ name: `code-${connector}-${codeBinding}`, connector, codeBinding, masks: null }))),
   ...tombstoneShapes,
   ...[...bindingScenarios, ...collisionTables, ...observationScenarios].map(name => ({ name, masks: null as number[] | null })),
   ...Array.from({ length: 12 }, (_, i) => ({ name: `seed-7701128-${i}`, masks: Array.from({ length: 10 }, () => next() % 3 + 1) })),
@@ -25,7 +27,15 @@ const shapes = [
 const json = (value: unknown): Record<string, unknown> => typeof value === "string" ? JSON.parse(value) : value as Record<string, unknown>;
 
 async function seed(query: Query, shape: typeof shapes[number], postgres: boolean) {
-  if ("tombstones" in shape) {
+  if ("codeBinding" in shape) {
+    await seedBindingScenario(query, shape.codeBinding.startsWith("deleted") ? (shape.codeBinding === "deleted-orphan" ? "tombstone-without-source" : "deleted-null-pointer") : "null-pointer", postgres);
+    if (shape.codeBinding.startsWith("distinct")) {
+      await query(`UPDATE connector_instances SET source_binding_key = '${key("binding-b")}', source_binding_json = '{"kind":"local_device","local_binding_name":"binding-b"}' WHERE connector_instance_id = 'inst_new'`);
+      await query("UPDATE device_source_instances SET local_binding_id = 'binding-b' WHERE source_instance_id = 'src_new'");
+    }
+    const binding = shape.codeBinding === "suffix" ? "binding-a#renamed-from:claude_code" : shape.codeBinding === "distinct-current" ? "binding-b" : "binding-a";
+    await query(`INSERT INTO device_enrollment_codes (enrollment_code_id, code_hash, owner_subject_id, connector_id, local_binding_id, created_at, expires_at) VALUES ('pending-code', 'fixture-code', 'owner_local', '${shape.connector}', '${binding}', '2026-11-14T00:00:00.000Z', '2999-01-01T00:00:00.000Z')`);
+  } else if ("tombstones" in shape) {
     await seedTombstoneShape(query, shape.tombstones, shape.devices, shape.occupied, postgres);
   } else if (!shape.masks) {
     if ((collisionTables as readonly string[]).includes(shape.name)) {
@@ -130,10 +140,11 @@ test("bounded rename state space: two boots, binding invariants and backend pari
       await assertDeletedSources(query, deleted);
       assert.deepEqual(await records(query), original, `${shape.name}: records unchanged`);
       expected.set(shape.name, await state(query));
-      const all = async () => Promise.all([state(query), records(query), ...collisionTables.map(table => query(`SELECT * FROM ${table} ORDER BY 1, 2, 3`))]);
+      const all = async () => Promise.all([state(query), records(query), query("SELECT * FROM device_enrollment_codes ORDER BY enrollment_code_id"), ...collisionTables.map(table => query(`SELECT * FROM ${table} ORDER BY 1, 2, 3`))]);
       const first = await all();
       closeDb(); db = initDb(path);
       assert.deepEqual(await all(), first, `${shape.name}: second SQLite boot is a no-op`);
+      if ("codeBinding" in shape) await consumePendingCode(query, shape, false);
     } catch (error) { failures.push(`SQLite ${shape.name}: ${error instanceof Error ? error.message : error}`); }
     finally { closeDb(); rmSync(dir, { recursive: true, force: true }); }
   }
@@ -146,7 +157,7 @@ test("bounded rename state space: two boots, binding invariants and backend pari
     const query: Query = async sql => (await pool.query(sql)).rows;
     for (const complete of [false, true]) for (const shape of shapes) {
       try {
-        await query("TRUNCATE records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");
+        await query("TRUNCATE device_enrollment_codes, device_ingest_credentials, records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");
         await seed(query, shape, true);
         const original = await records(query);
         const deleted = await deletedSources(query);
@@ -157,10 +168,11 @@ test("bounded rename state space: two boots, binding invariants and backend pari
         assert.deepEqual(await records(query), original);
         const identityRows = (value: unknown) => JSON.parse(JSON.stringify(value, (k, v) => k === "source_revision" || k === "updated_at" ? undefined : v));
         assert.deepEqual(identityRows(await state(query)), identityRows(expected.get(shape.name)), "SQLite/Postgres identity and binding parity (driver revision counters and sweep timestamps excluded)");
-        const all = async () => Promise.all([state(query), records(query), ...collisionTables.map(table => query(`SELECT * FROM ${table} ORDER BY 1, 2, 3`))]);
+        const all = async () => Promise.all([state(query), records(query), query("SELECT * FROM device_enrollment_codes ORDER BY enrollment_code_id"), ...collisionTables.map(table => query(`SELECT * FROM ${table} ORDER BY 1, 2, 3`))]);
         const first = await all();
         await bootstrapPostgresSchema();
         assert.deepEqual(await all(), first, "second Postgres boot is a no-op");
+        if ("codeBinding" in shape) await consumePendingCode(query, shape, true);
       } catch (error) { failures.push(`Postgres ${shape.name}, receipt complete=${complete}: ${error instanceof Error ? error.message : error}`); }
     }
   });
