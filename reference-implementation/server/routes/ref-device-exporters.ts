@@ -2653,7 +2653,13 @@ async function processDeviceIngestBatch(
     // device/batch reservation owns conflict precedence.
     if (!sourceConnectorMatches) {
       await observeRefusedBatch(connectorInstanceId);
-      ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
+      ctx.pdppError(
+        res,
+        400,
+        "invalid_request",
+        "connector_id does not match source_instance_id. If you updated the desktop app, update the local collector: npm i -g @pdpp/local-collector@latest",
+        "connector_id"
+      );
       return;
     }
 
@@ -3103,7 +3109,13 @@ function parseGapBodyBase(
   }
   const connectorId = requireNonEmptyString(body.connector_id, "connector_id");
   if (!sameConnectorType(ctx, sourceInstance.connectorId, connectorId)) {
-    ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
+    ctx.pdppError(
+      res,
+      400,
+      "invalid_request",
+      "connector_id does not match source_instance_id. If you updated the desktop app, update the local collector: npm i -g @pdpp/local-collector@latest",
+      "connector_id"
+    );
     return null;
   }
   const reason = requireNonEmptyString(body.reason, "reason");

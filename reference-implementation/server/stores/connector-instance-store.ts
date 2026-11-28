@@ -2025,7 +2025,9 @@ export function createSqliteConnectorInstanceStore() {
           normalized.revokedAt,
           normalized.connectorId,
         ]);
-        return this.get(normalized.connectorInstanceId);
+        // A rename preserves the stored id while changing the binding tuple.
+        // ON CONFLICT may therefore update a row with a different derived id.
+        return this.getByBinding(normalized);
       } catch (err) {
         if ((err as { code?: string } | null)?.code !== "SQLITE_CONSTRAINT_PRIMARYKEY") {
           throw err;
@@ -2995,7 +2997,7 @@ export function createPostgresConnectorInstanceStore() {
             // `record_identity_generation` is seeded from the connector's
             // currently persisted manifest, not left at the column default —
             // see the identical rationale in the SQLite arm's `insert.sql`.
-            await client.query(
+            const inserted = await client.query<{ connector_instance_id: string }>(
               `INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at, record_identity_generation)
                VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
                  COALESCE(
@@ -3008,7 +3010,8 @@ export function createPostgresConnectorInstanceStore() {
                  status = excluded.status,
                  source_binding_json = excluded.source_binding_json,
                  updated_at = excluded.updated_at,
-                 revoked_at = excluded.revoked_at`,
+                 revoked_at = excluded.revoked_at
+               RETURNING connector_instance_id`,
               [
                 normalized.connectorInstanceId,
                 normalized.ownerSubjectId,
@@ -3024,7 +3027,7 @@ export function createPostgresConnectorInstanceStore() {
               ]
             );
             await client.query("RELEASE SAVEPOINT upsert_insert_attempt");
-            return normalized.connectorInstanceId;
+            return inserted.rows[0]!.connector_instance_id;
           } catch (err) {
             if ((err as { code?: string } | null)?.code !== "23505") {
               throw err;

@@ -334,6 +334,7 @@ export function createSqliteAcquisitionBatchStore(): SqliteAcquisitionBatchStore
           WHERE owner_subject_id = ?
             AND connector_id = ?
             AND artifact_sha256 = ?
+            AND superseded_by_batch_id IS NULL
           ORDER BY created_at ASC
           LIMIT 1`,
         [ownerSubjectId, connectorId, artifactSha256]
@@ -493,6 +494,7 @@ export function createPostgresAcquisitionBatchStore(): PostgresAcquisitionBatchS
           WHERE owner_subject_id = $1
             AND connector_id = $2
             AND artifact_sha256 = $3
+            AND superseded_by_batch_id IS NULL
           ORDER BY created_at ASC
           LIMIT 1`,
         [ownerSubjectId, connectorId, artifactSha256]

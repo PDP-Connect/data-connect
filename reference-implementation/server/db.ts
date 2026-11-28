@@ -25,7 +25,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { describeConnectorIdRename, migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
+import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  describeConnectorIdRename,
+  migrateRenamedConnectorIdsSqlite,
+} from "./connector-id-rename-migration.ts";
 import {
   makeConnectorInstanceId as canonicalConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
@@ -4283,7 +4287,14 @@ function migrateLocalDeviceConnectorInstances(raw: SqliteDatabase, opts: Migrati
          updated_at = CASE
            WHEN excluded.updated_at > connector_instances.updated_at THEN excluded.updated_at
            ELSE connector_instances.updated_at
-         END`
+         END
+       WHERE connector_instances.owner_subject_id IS NOT excluded.owner_subject_id
+          OR connector_instances.connector_id IS NOT excluded.connector_id
+          OR connector_instances.display_name IS NOT excluded.display_name
+          OR connector_instances.source_kind IS NOT excluded.source_kind
+          OR connector_instances.source_binding_key IS NOT excluded.source_binding_key
+          OR connector_instances.source_binding_json IS NOT excluded.source_binding_json
+          OR excluded.updated_at > connector_instances.updated_at`
     );
     const updateSourceInstance = raw.prepare(
       `UPDATE device_source_instances
@@ -6838,6 +6849,14 @@ function buildSqliteSchemaInTransaction(raw: SqliteDatabase, opts: InitDbOptions
   migrateLexicalSearchInstanceColumns(raw, opts);
   // Rename ids that older collectors spelled with underscores before any
   // migration below derives identity from a connector id.
+  addColumnIfMissing(raw, "acquisition_batches", "superseded_by_batch_id", "TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL");
+  const batchIndex = raw.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_acquisition_batches_owner_connector_artifact'").get<{ sql: string }>();
+  if (!batchIndex?.sql.includes("superseded_by_batch_id")) {
+    raw.exec(`DROP INDEX IF EXISTS idx_acquisition_batches_owner_connector_artifact;
+      CREATE UNIQUE INDEX idx_acquisition_batches_owner_connector_artifact
+      ON acquisition_batches(owner_subject_id, connector_id, artifact_sha256)
+      WHERE artifact_sha256 IS NOT NULL AND superseded_by_batch_id IS NULL`);
+  }
   const connectorIdRename = migrateRenamedConnectorIdsSqlite(raw);
   const connectorIdRenameSummary = describeConnectorIdRename(connectorIdRename);
   if (connectorIdRenameSummary) {
@@ -7214,6 +7233,9 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
       raw.close();
     } catch {
       /* best-effort: report the bootstrap error, not the close error */
+    }
+    if (error instanceof Error && error.message.startsWith(`Migration ${CONNECTOR_ID_RENAME_MIGRATION_ID} failed`)) {
+      throw new Error(`Failed to initialize store ${path}: ${error.message}`, { cause: error });
     }
     throw error;
   }

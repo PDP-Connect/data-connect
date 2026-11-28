@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { observationScenarios, seedObservationScenario, assertObservationScenario, collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
+import { createSqliteAcquisitionBatchStore } from "../server/stores/acquisition-batch-store.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +11,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { gunzipSync } from "node:zlib";
 import {
+  HANDLED_CONNECTOR_UNIQUE_KEYS,
   describeConnectorIdRename,
   migrateRenamedConnectorIdsSqlite,
 } from "../server/connector-id-rename-migration.ts";
@@ -190,17 +193,71 @@ test(
   })
 );
 
+function seedBindingCollisions(db: Db): void {
+  seedConnector(db, "claude_code");
+  seedConnector(db, "claude-code");
+  db.prepare(`INSERT INTO device_exporters
+      (device_id, owner_subject_id, display_name, created_at, updated_at)
+      VALUES ('dev', 'owner_local', 'device', ?, ?)`).run(NOW, NOW);
+  for (const [id, connector] of [
+    ["old", "claude_code"],
+    ["new", "claude-code"],
+  ] as const) {
+    seedInstance(db, `inst_${id}`, connector, key("binding-a"));
+    db.prepare(`INSERT INTO records
+        (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at)
+        VALUES (?, ?, 'sessions', 'record', ?, ?)`).run(connector, `inst_${id}`, JSON.stringify({ id }), NOW);
+    db.prepare(`INSERT INTO device_source_instances
+        (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
+        VALUES (?, 'dev', ?, ?, 'binding-a', ?, ?)`).run(`src_${id}`, connector, `inst_${id}`, NOW, NOW);
+  }
+}
+
 test(
-  "a collision that cannot be resolved aborts and leaves every row as it was",
+  "binding collisions preserve both instances, records and source identities",
   withDb((db) => {
-    seedConnector(db, "claude_code");
-    seedConnector(db, "claude-code");
-    // Same owner and binding under both ids: renaming one onto the other would merge two connections.
-    seedInstance(db, "inst_old", "claude_code", "binding-a");
-    seedInstance(db, "inst_new", "claude-code", "binding-a");
-    assert.throws(() => migrateRenamedConnectorIdsSqlite(db), /UNIQUE/i);
-    assert.deepEqual(ids(db, "connectors"), ["claude-code", "claude_code"]);
-    assert.deepEqual(ids(db, "connector_instances"), ["claude-code", "claude_code"]);
+    seedBindingCollisions(db);
+    const currentInstance = db
+      .prepare("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")
+      .get();
+    const currentSource = db
+      .prepare("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")
+      .get();
+    const result = migrateRenamedConnectorIdsSqlite(db);
+    assert.deepEqual(result.disambiguatedRows, { connector_instances: 1, device_source_instances: 1 });
+    assert.match(
+      describeConnectorIdRename(result)!,
+      /binding collisions disambiguated \(connector_instances: 1, device_source_instances: 1\)/
+    );
+    assert.deepEqual(
+      db.prepare("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'").get(),
+      currentInstance
+    );
+    assert.deepEqual(
+      db.prepare("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'").get(),
+      currentSource
+    );
+    assert.equal(
+      db.prepare("SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'").get()
+        ?.source_binding_key,
+      key("binding-a#renamed-from:claude_code")
+    );
+    assert.equal(
+      db.prepare("SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'").get()
+        ?.local_binding_id,
+      "binding-a#renamed-from:claude_code"
+    );
+    for (const id of ["old", "new"]) {
+      assert.equal(
+        db.prepare("SELECT record_json FROM records WHERE connector_instance_id = ?").get(`inst_${id}`)?.record_json,
+        JSON.stringify({ id })
+      );
+    }
+    assert.deepEqual(ids(db, "connector_instances"), ["claude-code", "claude-code"]);
+    assert.deepEqual(ids(db, "device_source_instances"), ["claude-code", "claude-code"]);
+    const before = Number(db.prepare("SELECT total_changes() AS n").get()?.n);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
+    assert.equal(Number(db.prepare("SELECT total_changes() AS n").get()?.n), before);
   })
 );
 
@@ -247,6 +304,66 @@ test("initDb renames retired ids stored in an existing database file", () => {
     assert.deepEqual(ids(db, "connector_instances"), ["apple-photos"]);
     closeDb();
   } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("startup preserves collided source bindings and records across two restarts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-binding-collision-"));
+  const path = join(dir, "pdpp.sqlite");
+  try {
+    seedBindingCollisions(initDb(path));
+    closeDb();
+    for (let boot = 0; boot < 2; boot += 1) {
+      const db = initDb(path);
+      for (const id of ["old", "new"]) {
+        assert.equal(
+          db.prepare("SELECT record_json FROM records WHERE connector_instance_id = ?").get(`inst_${id}`)?.record_json,
+          JSON.stringify({ id })
+        );
+        assert.equal(
+          db
+            .prepare("SELECT connector_instance_id FROM device_source_instances WHERE source_instance_id = ?")
+            .get(`src_${id}`)?.connector_instance_id,
+          `inst_${id}`
+        );
+      }
+      assert.equal(
+        db.prepare("SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'").get()
+          ?.local_binding_id,
+        "binding-a#renamed-from:claude_code"
+      );
+      assert.equal(db.prepare("SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'").get()?.source_binding_key, key("binding-a#renamed-from:claude_code"));
+      assert.notEqual(key("binding-a#renamed-from:claude_code"), db.prepare("SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_new'").get()?.source_binding_key);
+      closeDb();
+    }
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("unexpected unique collisions roll back and identify the migration, table and store", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-unknown-collision-"));
+  const path = join(dir, "pdpp.sqlite");
+  try {
+    const db = initDb(path);
+    db.exec("CREATE TABLE unexpected_bindings (id TEXT PRIMARY KEY, connector_id TEXT UNIQUE)");
+    db.exec("INSERT INTO unexpected_bindings VALUES ('old', 'claude_code'), ('new', 'claude-code')");
+    assert.throws(() => migrateRenamedConnectorIdsSqlite(db), /renamed_connector_ids_v2.*unexpected_bindings/);
+    assert.deepEqual(ids(db, "unexpected_bindings"), ["claude-code", "claude_code"]);
+    closeDb();
+    assert.throws(
+      () => initDb(path),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes(path));
+        assert.match(error.message, /renamed_connector_ids_v2.*unexpected_bindings/);
+        return true;
+      }
+    );
+  } finally {
+    closeDb();
     rmSync(dir, { force: true, recursive: true });
   }
 });
@@ -426,3 +543,43 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
     rmSync(dir, { force: true, recursive: true });
   }
 });
+
+for (const scenario of [...collisionTables, ...bindingScenarios, ...observationScenarios]) {
+  test(`startup collision: ${scenario}`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pdpp-rename-collision-"));
+    const path = join(dir, "fixture.sqlite");
+    let db = initDb(path);
+    const query = async (sql: string) => /^SELECT/i.test(sql) ? db.prepare(sql).all() as Record<string, unknown>[] : (db.exec(sql), []);
+    try {
+      if ((collisionTables as readonly string[]).includes(scenario)) await seedCollision(query, scenario);
+      else if ((observationScenarios as readonly string[]).includes(scenario)) await seedObservationScenario(query, scenario);
+      else await seedBindingScenario(query, scenario);
+      closeDb();
+      let snapshot: string | undefined;
+      for (let boot = 0; boot < 2; boot++) {
+        db = initDb(path);
+        if ((collisionTables as readonly string[]).includes(scenario)) await assertCollision(query, scenario);
+        else if ((observationScenarios as readonly string[]).includes(scenario)) await assertObservationScenario(query, scenario);
+        else await assertBindingScenario(query, scenario);
+        if (scenario === "acquisition_batches") assert.equal(createSqliteAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest")?.batchId, "batch_new");
+        const state = JSON.stringify(await query(`SELECT * FROM ${(observationScenarios as readonly string[]).includes(scenario) ? "connector_observation_runs" : (collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"} ORDER BY 1, 2, 3`));
+        if (snapshot) assert.equal(state, snapshot);
+        snapshot = state;
+        closeDb();
+      }
+    } finally { closeDb(); rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+test("every non-primary UNIQUE index containing connector_id has a collision policy", withDb(db => {
+  const found: string[] = [];
+  for (const table of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all()) {
+    const name = String(table.name).replaceAll('"', '""');
+    for (const index of db.prepare(`PRAGMA index_list("${name}")`).all()) {
+      if (!index.unique || index.origin === "pk") continue;
+      const cols = db.prepare(`PRAGMA index_info("${String(index.name).replaceAll('"', '""')}")`).all().map(row => String(row.name ?? ""));
+      if (cols.includes("connector_id")) found.push(`${name}:${cols.sort().join(",")}`);
+    }
+  }
+  assert.deepEqual(found.sort(), [...HANDLED_CONNECTOR_UNIQUE_KEYS].sort());
+}));

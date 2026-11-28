@@ -9,11 +9,15 @@
  * skipped, when unset.
  */
 
+import { observationScenarios, seedObservationScenario, assertObservationScenario, collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
+import { createPostgresAcquisitionBatchStore } from "../server/stores/acquisition-batch-store.ts";
+import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
   CONNECTOR_ID_RENAME_MIGRATION_ID,
+  describeConnectorIdRename,
   migrateRenamedConnectorIdsPostgres,
 } from "../server/connector-id-rename-migration.ts";
 import {
@@ -77,6 +81,60 @@ async function rearm(pool: Pool): Promise<void> {
 }
 
 if (POSTGRES_URL) {
+  for (const scenario of [...collisionTables, ...bindingScenarios, ...observationScenarios]) {
+    test(`startup collision: ${scenario}`, async () => {
+      await withTempDb(POSTGRES_URL, async (url) => {
+        await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+        const pool = getPostgresPool();
+        const query = async (sql: string) => (await pool.query(sql)).rows;
+        if ((collisionTables as readonly string[]).includes(scenario)) await seedCollision(query, scenario);
+        else if ((observationScenarios as readonly string[]).includes(scenario)) await seedObservationScenario(query, scenario);
+        else await seedBindingScenario(query, scenario, true);
+        await rearm(pool);
+        let snapshot: string | undefined;
+        for (let boot = 0; boot < 2; boot++) {
+          await bootstrapPostgresSchema();
+          if ((collisionTables as readonly string[]).includes(scenario)) await assertCollision(query, scenario);
+          else if ((observationScenarios as readonly string[]).includes(scenario)) await assertObservationScenario(query, scenario);
+          else await assertBindingScenario(query, scenario);
+          if (scenario === "acquisition_batches") assert.equal((await createPostgresAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest"))?.batchId, "batch_new");
+          const state = JSON.stringify(await query(`SELECT * FROM ${(observationScenarios as readonly string[]).includes(scenario) ? "connector_observation_runs" : (collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"} ORDER BY 1, 2, 3`));
+          if (snapshot) assert.equal(state, snapshot);
+          snapshot = state;
+        }
+      });
+    });
+  }
+  test("binding recovery also survives a pending canonicalization sweep", async () => {
+    await withTempDb(POSTGRES_URL, async url => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      const query = async (sql: string) => (await pool.query(sql)).rows;
+      await seedBindingScenario(query, "null-pointer", true);
+      await rearm(pool);
+      await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID]);
+      await bootstrapPostgresSchema();
+      await assertBindingScenario(query, "null-pointer");
+      await bootstrapPostgresSchema();
+      await assertBindingScenario(query, "null-pointer");
+    });
+  });
+
+  test("unexpected unique collisions roll back and block the receipt", async () => {
+    await withTempDb(POSTGRES_URL, async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      await pool.query("CREATE TABLE unexpected_bindings (id TEXT PRIMARY KEY, connector_id TEXT UNIQUE)");
+      await pool.query("INSERT INTO unexpected_bindings VALUES ($1, $2), ($3, $4)", ["old", "claude_code", "new", "claude-code"]);
+      await seedConnector(pool, "claude_code");
+      await rearm(pool);
+      await assert.rejects(bootstrapPostgresSchema(), /renamed_connector_ids_v2.*unexpected_bindings/);
+      assert.equal(await receiptStatus(pool), "blocked");
+      assert.deepEqual(await ids(pool, "unexpected_bindings"), ["claude-code", "claude_code"]);
+      assert.deepEqual(await ids(pool, "connectors"), ["claude_code"]);
+    });
+  });
+
   test("boot renames retired ids across tables, parents first, and records a complete receipt", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });
@@ -158,26 +216,82 @@ if (POSTGRES_URL) {
     });
   });
 
-  test("an unresolvable collision aborts, keeps every row, and blocks the receipt until it is fixed", async () => {
+  test("binding collisions preserve instance identities and complete the receipt", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });
       const pool = getPostgresPool();
-      await seedConnector(pool, "claude_code");
-      await seedConnector(pool, "claude-code");
-      await seedInstance(pool, "inst_old", "claude_code", "binding-a");
-      await seedInstance(pool, "inst_new", "claude-code", "binding-a");
+      await pool.query(
+        `INSERT INTO device_exporters
+        (device_id, owner_subject_id, display_name, created_at, updated_at)
+        VALUES ('dev', 'owner_local', 'device', $1, $1)`,
+        [NOW]
+      );
+      for (const [id, connector] of [
+        ["old", "claude_code"],
+        ["new", "claude-code"],
+      ] as const) {
+        await seedConnector(pool, connector);
+        await seedInstance(pool, `inst_${id}`, connector, key("binding-a"));
+        await pool.query(
+          `INSERT INTO records
+          (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, primary_key_text)
+          VALUES ($1, $2, 'sessions', 'record', $3, $4, 'record')`,
+          [connector, `inst_${id}`, JSON.stringify({ id }), NOW]
+        );
+        await pool.query(
+          `INSERT INTO device_source_instances
+          (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
+          VALUES ($1, 'dev', $2, $3, 'binding-a', $4, $4)`,
+          [`src_${id}`, connector, `inst_${id}`, NOW]
+        );
+      }
+      const currentInstance = (
+        await pool.query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")
+      ).rows;
+      const currentSource = (
+        await pool.query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")
+      ).rows;
+      const client = await pool.connect();
+      try {
+        const result = await migrateRenamedConnectorIdsPostgres(client);
+        assert.deepEqual(result.disambiguatedRows, { connector_instances: 1, device_source_instances: 1 });
+        assert.match(describeConnectorIdRename(result)!, /binding collisions disambiguated/);
+        assert.deepEqual(
+          (await pool.query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")).rows,
+          currentInstance
+        );
+        assert.deepEqual(
+          (await pool.query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")).rows,
+          currentSource
+        );
+        assert.equal(
+          (
+            await pool.query(
+              "SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'"
+            )
+          ).rows[0].source_binding_key,
+          key("binding-a#renamed-from:claude_code")
+        );
+        assert.equal(
+          (
+            await pool.query(
+              "SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'"
+            )
+          ).rows[0].local_binding_id,
+          "binding-a#renamed-from:claude_code"
+        );
+        assert.deepEqual(
+          (await pool.query("SELECT connector_instance_id FROM records ORDER BY connector_instance_id")).rows,
+          [{ connector_instance_id: "inst_new" }, { connector_instance_id: "inst_old" }]
+        );
+        assert.deepEqual(await ids(pool, "device_source_instances"), ["claude-code", "claude-code"]);
+        assert.equal((await migrateRenamedConnectorIdsPostgres(client)).changedRows, 0);
+      } finally {
+        client.release();
+      }
       await rearm(pool);
-
-      await assert.rejects(bootstrapPostgresSchema(), /unique|duplicate/i);
-      assert.equal(await receiptStatus(pool), "blocked");
-      assert.deepEqual(await ids(pool, "connectors"), ["claude-code", "claude_code"]);
-      assert.deepEqual(await ids(pool, "connector_instances"), ["claude-code", "claude_code"]);
-
-      await pool.query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_new'");
       await bootstrapPostgresSchema();
       assert.equal(await receiptStatus(pool), "complete");
-      assert.deepEqual(await ids(pool, "connector_instances"), ["claude-code"]);
-      assert.deepEqual(await ids(pool, "connectors"), ["claude-code"]);
     });
   });
 } else {

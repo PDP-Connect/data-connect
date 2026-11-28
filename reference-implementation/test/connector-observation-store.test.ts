@@ -42,6 +42,7 @@ import {
   resetDefaultConnectorObservationStoreCache,
 } from "../server/stores/connector-observation-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
 
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const NOW = "2026-11-02T00:00:00.000Z";
@@ -856,6 +857,85 @@ async function contractListSkipsCorruptRows(harness: Harness): Promise<void> {
     "an unparseable payload is skipped the same way"
   );
 }
+
+async function retainedRenameHistory(harness: Harness, postgres: boolean): Promise<void> {
+  const instance = uniq("rename-history");
+  await harness.seedConnection("claude-code", instance);
+  await harness.seedConnection("claude_code", instance);
+  const current = runInput("claude-code", instance, "shared");
+  const retired = { ...runInput("claude_code", instance, "shared"), doneBasis: [] };
+  await storeOf().put(retired);
+  await storeOf().put(current);
+  await storeOf().put(runInput("claude_code", instance, "old-only"));
+  const unrelatedInstance = uniq("unrelated");
+  const unrelated = runInput("unrelated-history", unrelatedInstance, uniq("untouched"));
+  await harness.seedConnection("unrelated-history", unrelatedInstance);
+  await storeOf().put(unrelated);
+  if (postgres) await postgresQuery("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [CONNECTOR_ID_RENAME_MIGRATION_ID]);
+  await harness.reopen();
+  const history = await storeOf().list({ connectorId: "claude-code" });
+  assert.deepEqual(history.map(row => [row.connectorId, row.runId]), [
+    ["claude-code", "shared"], ["claude-code", "old-only"], ["claude_code", "shared"],
+  ]);
+  assert.deepEqual(await storeOf().list({ connectorId: "claude-code", connectorInstanceId: instance }), history);
+  assert.deepEqual((await storeOf().get({ connectorId: "claude-code", connectorInstanceId: instance, runId: "shared" }))?.doneBasis, current.doneBasis);
+  // Removing the current row exposes the retained conflicting row through get.
+  if (postgres) await postgresQuery("DELETE FROM connector_observation_runs WHERE connector_id = 'claude-code' AND run_id = 'shared'");
+  else getDb().prepare("DELETE FROM connector_observation_runs WHERE connector_id = 'claude-code' AND run_id = 'shared'").run();
+  assert.equal((await storeOf().get({ connectorId: "claude-code", connectorInstanceId: instance, runId: "shared" }))?.connectorId, "claude_code");
+  for (let i = 0; i < CAP; i++) {
+    await storeOf().put(runInput("claude-code", instance, `later-${i}`));
+    if (i === CAP - 3) {
+      assert.equal(await harness.rowCount("claude_code"), 1, "retired row survives while inside merged latest eight");
+      assert.equal(await harness.rowCount("claude-code"), CAP - 1);
+    }
+  }
+  assert.equal(await harness.rowCount("claude_code"), 0, "prune removes the retired row outside merged latest eight");
+  assert.deepEqual((await storeOf().list({ connectorId: "claude-code" })).map(row => row.runId), Array.from({ length: CAP }, (_, i) => `later-${CAP - 1 - i}`));
+  assert.equal(await harness.rowCount("claude-code"), CAP);
+  assert.ok(await storeOf().get(unrelated), "merged prune leaves unrelated connectors alone");
+  await harness.deleteConnection(instance);
+  await harness.deleteConnection(unrelatedInstance);
+}
+
+test("SQLite connector observation store: retained rename history reads and prunes across spellings", () => withSqlite(h => retainedRenameHistory(h, false)));
+test("Postgres connector observation store: retained rename history reads and prunes across spellings", { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, () => withPostgres(h => retainedRenameHistory(h, true)));
+
+async function highRetiredRenameHistory(harness: Harness, postgres: boolean, migrate = true): Promise<void> {
+  const instance = uniq("high-retired-history");
+  await harness.seedConnection("claude-code", instance);
+  await harness.seedConnection("claude_code", instance);
+  for (let i = 1; i <= CAP; i++) {
+    for (const connectorId of ["claude_code", "claude-code"]) {
+      const input = runInput(connectorId, instance, `shared-${i}`);
+      const payload = JSON.stringify({ descriptors: input.descriptors, snapshot: input.snapshot, doneBasis: connectorId === "claude_code" ? [] : input.doneBasis });
+      const params = [connectorId, instance, input.runId, connectorId === "claude_code" ? 100 + i : i, NOW, payload];
+      if (postgres) await postgresQuery("INSERT INTO connector_observation_runs VALUES ($1, $2, $3, $4, 1, $5, $6)", params);
+      else getDb().prepare("INSERT INTO connector_observation_runs VALUES (?, ?, ?, ?, 1, ?, ?)").run(...params);
+    }
+  }
+  if (migrate) {
+    if (postgres) await postgresQuery("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [CONNECTOR_ID_RENAME_MIGRATION_ID]);
+    await harness.reopen();
+    for (let i = 1; i <= CAP; i++) {
+      const current = runInput("claude-code", instance, `shared-${i}`);
+      assert.deepEqual((await storeOf().get(current))?.doneBasis, current.doneBasis, "current payload wins over high retired history");
+    }
+    assert.deepEqual(await harness.retainedSequences("claude_code"), [-7, -6, -5, -4, -3, -2, -1, 0], "retired order fits below current minimum 1");
+  }
+  const fresh = runInput("claude-code", instance, "fresh");
+  await storeOf().put(fresh);
+  assert.ok(await storeOf().get(fresh), "new canonical run survives its prune");
+  assert.deepEqual((await storeOf().list({ connectorId: "claude-code" })).map(row => row.runId), ["fresh", "shared-8", "shared-7", "shared-6", "shared-5", "shared-4", "shared-3", "shared-2"]);
+  assert.equal(await harness.rowCount("claude_code"), migrate ? 0 : 7);
+  assert.deepEqual(await harness.retainedSequences("claude-code"), migrate ? [2, 3, 4, 5, 6, 7, 8, 9] : [109], "allocation follows the group maximum even without migration");
+  await harness.deleteConnection(instance);
+}
+
+test("SQLite connector observation store: high retired history stays older after rename", () => withSqlite(h => highRetiredRenameHistory(h, false)));
+test("Postgres connector observation store: high retired history stays older after rename", { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, () => withPostgres(h => highRetiredRenameHistory(h, true)));
+test("SQLite connector observation store: allocation follows high retired history without migration", () => withSqlite(h => highRetiredRenameHistory(h, false, false)));
+test("Postgres connector observation store: allocation follows high retired history without migration", { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, () => withPostgres(h => highRetiredRenameHistory(h, true, false)));
 
 test("SQLite connector observation store: persists, reopens and reads back the exact snapshot", async () => {
   await withSqlite(contractPersistsExactSnapshot);
