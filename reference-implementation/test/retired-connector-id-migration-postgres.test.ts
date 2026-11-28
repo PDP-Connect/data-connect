@@ -9,7 +9,7 @@
  * skipped, when unset.
  */
 
-import { collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
+import { observationScenarios, seedObservationScenario, assertObservationScenario, collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
 import { createPostgresAcquisitionBatchStore } from "../server/stores/acquisition-batch-store.ts";
 import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import assert from "node:assert/strict";
@@ -81,22 +81,24 @@ async function rearm(pool: Pool): Promise<void> {
 }
 
 if (POSTGRES_URL) {
-  for (const scenario of [...collisionTables, ...bindingScenarios]) {
+  for (const scenario of [...collisionTables, ...bindingScenarios, ...observationScenarios]) {
     test(`startup collision: ${scenario}`, async () => {
       await withTempDb(POSTGRES_URL, async (url) => {
         await initPostgresStorage({ backend: "postgres", databaseUrl: url });
         const pool = getPostgresPool();
         const query = async (sql: string) => (await pool.query(sql)).rows;
         if ((collisionTables as readonly string[]).includes(scenario)) await seedCollision(query, scenario);
+        else if ((observationScenarios as readonly string[]).includes(scenario)) await seedObservationScenario(query, scenario);
         else await seedBindingScenario(query, scenario, true);
         await rearm(pool);
         let snapshot: string | undefined;
         for (let boot = 0; boot < 2; boot++) {
           await bootstrapPostgresSchema();
           if ((collisionTables as readonly string[]).includes(scenario)) await assertCollision(query, scenario);
+          else if ((observationScenarios as readonly string[]).includes(scenario)) await assertObservationScenario(query, scenario);
           else await assertBindingScenario(query, scenario);
           if (scenario === "acquisition_batches") assert.equal((await createPostgresAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest"))?.batchId, "batch_new");
-          const state = JSON.stringify(await query(`SELECT * FROM ${scenario.includes("-") ? "device_source_instances" : scenario}`));
+          const state = JSON.stringify(await query(`SELECT * FROM ${(collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"}`));
           if (snapshot) assert.equal(state, snapshot);
           snapshot = state;
         }

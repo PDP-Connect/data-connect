@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
+import { observationScenarios, seedObservationScenario, assertObservationScenario, collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
 import { createSqliteAcquisitionBatchStore } from "../server/stores/acquisition-batch-store.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -544,7 +544,7 @@ test("first start upgrades a v0.9.9 store that holds the retired ids, losing onl
   }
 });
 
-for (const scenario of [...collisionTables, ...bindingScenarios]) {
+for (const scenario of [...collisionTables, ...bindingScenarios, ...observationScenarios]) {
   test(`startup collision: ${scenario}`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pdpp-rename-collision-"));
     const path = join(dir, "fixture.sqlite");
@@ -552,15 +552,17 @@ for (const scenario of [...collisionTables, ...bindingScenarios]) {
     const query = async (sql: string) => /^SELECT/i.test(sql) ? db.prepare(sql).all() as Record<string, unknown>[] : (db.exec(sql), []);
     try {
       if ((collisionTables as readonly string[]).includes(scenario)) await seedCollision(query, scenario);
+      else if ((observationScenarios as readonly string[]).includes(scenario)) await seedObservationScenario(query, scenario);
       else await seedBindingScenario(query, scenario);
       closeDb();
       let snapshot: string | undefined;
       for (let boot = 0; boot < 2; boot++) {
         db = initDb(path);
         if ((collisionTables as readonly string[]).includes(scenario)) await assertCollision(query, scenario);
+        else if ((observationScenarios as readonly string[]).includes(scenario)) await assertObservationScenario(query, scenario);
         else await assertBindingScenario(query, scenario);
         if (scenario === "acquisition_batches") assert.equal(createSqliteAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest")?.batchId, "batch_new");
-        const state = JSON.stringify(await query(`SELECT * FROM ${scenario.includes("-") ? "device_source_instances" : scenario}`));
+        const state = JSON.stringify(await query(`SELECT * FROM ${(collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"}`));
         if (snapshot) assert.equal(state, snapshot);
         snapshot = state;
         closeDb();

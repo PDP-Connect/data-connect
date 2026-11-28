@@ -81,7 +81,7 @@ const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""
  * restored or imported store can break that. The tables this applies to
  * hold connector metadata and bookkeeping, not owner records
  * (records are keyed by instance, stream and record key). Observation history
- * is excluded: an unresolved primary-key collision must roll back, never delete it. A test in
+ * is handled separately: only byte-equivalent replays may be deleted. A test in
  * retired-connector-id-migration.test.ts lists them, so a new table keyed by
  * connector id fails it until its precedence is decided here. Each deletion
  * is counted in {@link ConnectorIdRenameResult.supersededRows} and logged.
@@ -155,6 +155,18 @@ function collisionWrites(
     data.device_exporters?.find((device) => device.device_id === source.device_id)?.owner_subject_id;
   const sourceKey = (name: unknown) =>
     makeConnectorInstanceSourceBindingKey({ kind: "local_device", local_binding_name: name });
+  const bindingJson = (instance: Row): Row =>
+    typeof instance.source_binding_json === "string"
+      ? JSON.parse(instance.source_binding_json)
+      : (instance.source_binding_json as Row);
+  const moveTombstones = (subject: unknown, from: unknown, to: string) => {
+    for (const tombstone of old("connector_instance_tombstones")) {
+      if (tombstone.owner_subject_id === subject && tombstone.source_kind === "local_device" &&
+          tombstone.source_binding_key === from) {
+        update("connector_instance_tombstones", "connector_instance_id", tombstone, { source_binding_key: to });
+      }
+    }
+  };
   // Recover an absent pointer while the old connector and binding still identify its instance.
   for (const source of old("device_source_instances")) {
     if (source.connector_instance_id) continue;
@@ -181,8 +193,9 @@ function collisionWrites(
       current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])),
     );
     if (!bindingCollision && !deviceCollision) continue;
-    const base = String(associated[0]?.local_binding_id ?? instance.source_binding_key);
-    const local = instance.source_kind === "local_device" && associated.length > 0;
+    const local = instance.source_kind === "local_device";
+    const binding = bindingJson(instance);
+    const base = String(associated[0]?.local_binding_id ?? binding?.local_binding_name ?? instance.source_binding_key);
     const name = free(
       base,
       (candidate) =>
@@ -201,19 +214,39 @@ function collisionWrites(
     );
     // The name suffix lives in local_binding_id; the instance stores its canonical hash.
     // Set both here, since Postgres may have already completed its canonicalization receipt.
+    if (local) moveTombstones(instance.owner_subject_id, instance.source_binding_key, sourceKey(name));
     update("connector_instances", "connector_instance_id", instance, {
       source_binding_key: local ? sourceKey(name) : name,
+      ...(local ? { source_binding_json: JSON.stringify({ ...binding, kind: "local_device", local_binding_name: name }) } : {}),
     });
     for (const source of associated)
       update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
   }
   for (const source of old("device_source_instances")) {
-    if (!current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])))
+    const deletedBindingCollision = !source.connector_instance_id &&
+      old("connector_instance_tombstones").some(n => n.owner_subject_id === owner(source) && n.source_binding_key === sourceKey(source.local_binding_id)) &&
+      current("connector_instances").some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id));
+    if (!deletedBindingCollision && !current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])))
       continue;
     const name = free(String(source.local_binding_id), (candidate) =>
-      sources.some((n) => n.device_id === source.device_id && n.local_binding_id === candidate),
+      sources.some((n) => n.device_id === source.device_id && n.local_binding_id === candidate) ||
+      instances.some((n) => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(candidate)),
     );
+    moveTombstones(owner(source), sourceKey(source.local_binding_id), sourceKey(name));
     update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
+  }
+  // An owner deletion can outlive its source row. Keep that historical marker
+  // distinct from a live current binding even when there is no source to remap.
+  for (const tombstone of old("connector_instance_tombstones")) {
+    const live = current("connector_instances").find((n) =>
+      equal(n, tombstone, ["owner_subject_id", "source_kind", "source_binding_key"]));
+    if (!live || live.source_kind !== "local_device") continue;
+    const binding = bindingJson(live);
+    if (typeof binding?.local_binding_name !== "string") continue;
+    const name = free(binding.local_binding_name, candidate =>
+      [...instances, ...rows("connector_instance_tombstones")].some(n =>
+        n.owner_subject_id === tombstone.owner_subject_id && n.source_kind === "local_device" && n.source_binding_key === sourceKey(candidate)));
+    update("connector_instance_tombstones", "connector_instance_id", tombstone, { source_binding_key: sourceKey(name) });
   }
   for (const table of ["connector_instance_tombstones", "browser_surface_leases"]) {
     for (const row of old(table)) {
@@ -243,6 +276,15 @@ function collisionWrites(
     (a, b) => Number(a.recorded_seq) - Number(b.recorded_seq),
   );
   const newRuns = current("connector_observation_runs");
+  for (const row of runs) {
+    const replay = newRuns.find((n) => equal(n, row, ["connector_instance_id", "run_id", "record_version", "recorded_at", "payload_json"]));
+    if (replay) writes.push({
+      table: "connector_observation_runs",
+      sql: "DELETE FROM connector_observation_runs WHERE connector_id = ? AND connector_instance_id = ? AND run_id = ?",
+      params: [oldId, row.connector_instance_id, row.run_id],
+      superseded: true,
+    });
+  }
   if (runs.some((row) => newRuns.some((n) => n.recorded_seq === row.recorded_seq))) {
     const min = Math.min(...rows("connector_observation_runs").map((row) => Number(row.recorded_seq)));
     // Sequences have no external references. Keep each history's order, with retired history
@@ -285,6 +327,15 @@ function renameCaseSql(column: string, placeholder: (n: number) => string): { pa
   const params = entries.flatMap(([oldId, newId]) => [oldId, newId]);
   const whens = entries.map((_, i) => `WHEN ${placeholder(2 * i + 1)} THEN ${placeholder(2 * i + 2)}`).join(" ");
   return { params, sql: `CASE ${quote(column)} ${whens} ELSE ${quote(column)} END` };
+}
+
+/** Conflicting observations keep their original connector/instance/run provenance. */
+function observationRenameGuard(c: IdColumn): string {
+  if (c.table !== "connector_observation_runs") return "";
+  return ` AND NOT EXISTS (SELECT 1 FROM connector_observation_runs n
+    WHERE n.connector_id = CASE connector_observation_runs.connector_id ${renameEntries().map(([oldId, newId]) => `WHEN '${oldId}' THEN '${newId}'`).join(" ")} END
+      AND n.connector_instance_id = connector_observation_runs.connector_instance_id
+      AND n.run_id = connector_observation_runs.run_id)`;
 }
 
 /** Placeholders for the old ids, numbered after `offset` earlier parameters. */
@@ -421,7 +472,7 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
         changed += sqliteChanges(
           raw
             .prepare(
-              `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})`
+              `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})${observationRenameGuard(c)}`
             )
             .run(...rename.params, ...olds)
         );
@@ -599,7 +650,7 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
       try {
         const result = await client.query(
           `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql}
-          WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, rename.params.length)})`,
+          WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, rename.params.length)})${observationRenameGuard(c)}`,
           [...rename.params, ...olds]
         );
         changed += result.rowCount ?? 0;

@@ -4287,7 +4287,14 @@ function migrateLocalDeviceConnectorInstances(raw: SqliteDatabase, opts: Migrati
          updated_at = CASE
            WHEN excluded.updated_at > connector_instances.updated_at THEN excluded.updated_at
            ELSE connector_instances.updated_at
-         END`
+         END
+       WHERE connector_instances.owner_subject_id IS NOT excluded.owner_subject_id
+          OR connector_instances.connector_id IS NOT excluded.connector_id
+          OR connector_instances.display_name IS NOT excluded.display_name
+          OR connector_instances.source_kind IS NOT excluded.source_kind
+          OR connector_instances.source_binding_key IS NOT excluded.source_binding_key
+          OR connector_instances.source_binding_json IS NOT excluded.source_binding_json
+          OR excluded.updated_at > connector_instances.updated_at`
     );
     const updateSourceInstance = raw.prepare(
       `UPDATE device_source_instances

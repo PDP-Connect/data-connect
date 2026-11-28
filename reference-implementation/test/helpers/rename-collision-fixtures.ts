@@ -46,7 +46,7 @@ export async function assertCollision(query: Query, table: string): Promise<void
   }
 }
 
-export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix"] as const;
+export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix", "deleted-null-pointer", "owned-binding-json", "orphan", "occupied-instance-suffix", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance"] as const;
 export async function seedBindingScenario(query: Query, scenario: string, postgres = false): Promise<void> {
   for (const device of ["d1", "d2"]) {
     await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('${device}', 'owner_local', '${device}', '${now}', '${now}')`);
@@ -57,27 +57,79 @@ export async function seedBindingScenario(query: Query, scenario: string, postgr
       VALUES ('inst_${id}', 'owner_local', '${connector}', 'device', 'local_device', '${key("binding-a")}', '${now}', '${now}')`);
     await query(`INSERT INTO records (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at${postgres ? ", primary_key_text" : ""})
       VALUES ('${connector}', 'inst_${id}', 'sessions', 'record', '{}', '${now}'${postgres ? ", 'record'" : ""})`);
-    const device = scenario === "cross-device" && id === "new" ? "d2" : "d1";
+    const device = scenario.includes("cross-device") && id === "new" ? "d2" : "d1";
     const pointer = scenario === "null-pointer" && id === "old" ? "NULL" : `'inst_${id}'`;
     await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
       VALUES ('src_${id}', '${device}', '${connector}', ${pointer}, 'binding-a', '${now}', '${now}')`);
   }
-  if (scenario === "occupied-suffix") {
+  await query(`UPDATE connector_instances SET source_binding_json = '{"kind":"local_device","local_binding_name":"binding-a"}'`);
+  if (scenario === "orphan") await query("DELETE FROM device_source_instances WHERE source_instance_id = 'src_old'");
+  if (["deleted-null-pointer", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance"].includes(scenario)) {
+    await query("UPDATE device_source_instances SET connector_instance_id = NULL WHERE source_instance_id = 'src_old'");
+    await query("DELETE FROM records WHERE connector_instance_id = 'inst_old'");
+    await query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_old'");
+    await query(`INSERT INTO connector_instance_tombstones VALUES ('inst_old', 'owner_local', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
+  }
+  if (scenario === "tombstone-without-source") await query("DELETE FROM device_source_instances WHERE source_instance_id = 'src_old'");
+  if (scenario === "owned-binding-json") {
+    await query(`UPDATE connector_instances SET source_binding_json = '{"kind":"local_device","local_binding_name":"binding-a"}'`);
+    for (const id of ["old", "new"]) await query(`INSERT INTO connector_state (connector_id, connector_instance_id, stream, state_json, updated_at) VALUES ('${id === "old" ? "claude_code" : "claude-code"}', 'inst_${id}', 'sessions', '{}', '${now}')`);
+  }
+
+  if (scenario.includes("occupied")) {
     await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, created_at, updated_at)
       VALUES ('occupied', 'owner_local', 'claude-code', 'device', 'local_device', '${key("binding-a#renamed-from:claude_code")}', '${now}', '${now}')`);
     await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
       VALUES ('occupied', 'd1', 'claude-code', 'occupied', 'binding-a#renamed-from:claude_code', '${now}', '${now}')`);
+    await query(`UPDATE connector_instances SET source_binding_json = '{"kind":"local_device","local_binding_name":"binding-a#renamed-from:claude_code"}' WHERE connector_instance_id = 'occupied'`);
+    if (scenario === "occupied-instance-suffix" || scenario === "deleted-occupied-instance") await query("DELETE FROM device_source_instances WHERE source_instance_id = 'occupied'");
   }
 }
 
 export async function assertBindingScenario(query: Query, scenario: string): Promise<void> {
   const rows = await query("SELECT * FROM device_source_instances WHERE source_instance_id IN ('src_old', 'src_new') ORDER BY source_instance_id");
+  if (scenario === "tombstone-without-source") {
+    assert.equal((await query("SELECT * FROM connector_instances")).length, 1);
+    assert.equal((await query("SELECT * FROM connector_instance_tombstones"))[0]!.source_binding_key, key("binding-a#renamed-from:claude_code"));
+    return;
+  }
+  if (scenario === "orphan") {
+    const instance = (await query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_old'"))[0]!;
+    const binding = typeof instance.source_binding_json === "string" ? JSON.parse(instance.source_binding_json) : instance.source_binding_json as Record<string, unknown>;
+    assert.equal(binding.local_binding_name, "binding-a#renamed-from:claude_code");
+    assert.equal(instance.source_binding_key, key(binding.local_binding_name));
+    return;
+  }
+  if (scenario === "deleted-null-pointer" || scenario === "deleted-cross-device" || scenario === "deleted-occupied-instance") {
+    assert.equal(rows[1]!.connector_instance_id, null, "deleted source stays unlinked");
+    const tombstone = (await query("SELECT * FROM connector_instance_tombstones"))[0]!;
+    assert.equal(tombstone.source_binding_key, key(String(rows[1]!.local_binding_id)));
+    assert.equal((await query("SELECT * FROM connector_instances")).length, scenario === "deleted-occupied-instance" ? 2 : 1);
+    return;
+  }
+
   assert.deepEqual(rows.map(row => row.connector_instance_id), ["inst_new", "inst_old"]);
   const oldName = String(rows[1]!.local_binding_id);
-  assert.equal(oldName, `binding-a#renamed-from:claude_code${scenario === "occupied-suffix" ? ":2" : ""}`);
+  assert.equal(oldName, `binding-a#renamed-from:claude_code${scenario.startsWith("occupied-") ? ":2" : ""}`);
   const instances = await query("SELECT * FROM connector_instances ORDER BY connector_instance_id");
-  assert.equal(instances.length, scenario === "occupied-suffix" ? 3 : 2);
+  assert.equal(instances.length, scenario.startsWith("occupied-") ? 3 : 2);
   assert.equal(instances.find(row => row.connector_instance_id === "inst_old")?.source_binding_key, key(oldName));
   assert.notEqual(key(oldName), key("binding-a"));
   assert.deepEqual((await query("SELECT connector_instance_id FROM records ORDER BY connector_instance_id")).map(row => row.connector_instance_id), ["inst_new", "inst_old"]);
+}
+
+export const observationScenarios = ["observation-replay", "observation-conflict"] as const;
+export async function seedObservationScenario(query: Query, scenario: string): Promise<void> {
+  await seedCollision(query, "connector_observation_runs");
+  await query("UPDATE connector_observation_runs SET connector_instance_id = 'inst_old', run_id = 'same-run'");
+  if (scenario === "observation-conflict") await query("UPDATE connector_observation_runs SET payload_json = '{\"different\":true}' WHERE connector_id = 'claude_code'");
+}
+export async function assertObservationScenario(query: Query, scenario: string): Promise<void> {
+  const rows = await query("SELECT * FROM connector_observation_runs ORDER BY connector_id");
+  assert.equal(rows.length, scenario === "observation-replay" ? 1 : 2);
+  if (scenario === "observation-conflict") {
+    assert.equal(rows[1]!.connector_id, "claude_code");
+    assert.equal(rows[1]!.run_id, "same-run");
+    assert.equal(rows[1]!.payload_json, '{"different":true}');
+  }
 }
