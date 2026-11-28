@@ -899,7 +899,7 @@ async function retainedRenameHistory(harness: Harness, postgres: boolean): Promi
 }
 
 test("SQLite connector observation store: retained rename history reads and prunes across spellings", () => withSqlite(h => retainedRenameHistory(h, false)));
-test("Postgres connector observation store: retained rename history reads and prunes across spellings", { skip: !POSTGRES_URL }, () => withPostgres(h => retainedRenameHistory(h, true)));
+test("Postgres connector observation store: retained rename history reads and prunes across spellings", { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset" }, () => withPostgres(h => retainedRenameHistory(h, true)));
 
 test("SQLite connector observation store: persists, reopens and reads back the exact snapshot", async () => {
   await withSqlite(contractPersistsExactSnapshot);
