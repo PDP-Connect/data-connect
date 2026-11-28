@@ -47,7 +47,15 @@ function start(name: string, command: string, args: string[], options: SpawnOpti
     stdio: "inherit",
   });
   children.set(name, child);
-  child.on("exit", (code, signal) => {
+  // A child ends once: by exiting, or by failing to spawn, which emits "error"
+  // and may never emit "exit". Both paths share this handler, and the guard
+  // keeps a later duplicate event from counting the child twice.
+  let ended = false;
+  const onEnd = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (ended) {
+      return;
+    }
+    ended = true;
     children.delete(name);
     if (code !== 0 || signal) {
       exitCode = code ?? 1;
@@ -65,6 +73,15 @@ function start(name: string, command: string, args: string[], options: SpawnOpti
     }
     if (children.size === 0) {
       process.exit(exitCode);
+    }
+  };
+  child.on("exit", onEnd);
+  child.on("error", (error) => {
+    console.error(`[core] ${name} error: ${error.message}`);
+    // "error" also reports a failed kill or IPC send on a running child; only a
+    // child that never got a pid has ended here. A running child ends on "exit".
+    if (child.pid === undefined) {
+      onEnd(1, null);
     }
   });
   return child;
