@@ -6355,11 +6355,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefStaticSecretDraftConnection>[1]);
 
-  const connectorInstallService =
-    opts.connectorInstallService ??
-    createConnectorInstallService({
-      ...installedConnectorManifestRegistration,
-    });
+  const connectorInstallService = opts.connectorInstallService ?? createOwnerConnectorInstallService();
 
   {
     const resolvedDbPath = opts.dbPath || DB_PATH;
@@ -6959,6 +6955,48 @@ function buildOwnerAgentOnboardingMetadata({
     warning:
       "Owner-level local automation. This profile yields an owner bearer that authorizes owner-visible REST/control-plane access — not a grant-scoped external client. Use grant-scoped MCP for ordinary third-party agents.",
   };
+}
+
+/**
+ * The install service every production server uses. Its uninstall hooks remove
+ * the connector's activation and refuse while a run is active or a source still
+ * uses the connector; without them uninstall answers "Connector uninstall is
+ * unavailable.", so every server path builds the service here.
+ */
+function createOwnerConnectorInstallService(): ReturnType<typeof createConnectorInstallService> {
+  return createConnectorInstallService({
+    ...installedConnectorManifestRegistration,
+    removeActivation: removeConnectorActivation,
+    assertUninstallAllowed: async (connectorId) => {
+      const activeRun = isPostgresStorageBackend()
+        ? (await postgresQuery<{ run_id: string }>(
+            "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+            [connectorId]
+          )).rows[0]
+        : getDb()
+            .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+            .get<{ run_id: string }>(connectorId);
+      if (activeRun) {
+        throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+          code: "connector_run_active",
+        });
+      }
+      const ids = isPostgresStorageBackend()
+        ? (await postgresQuery<{ connector_instance_id: string }>(
+            "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+            [connectorId]
+          )).rows.map((row) => row.connector_instance_id)
+        : getDb().prepare(
+            "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+          ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+      if (ids.length) {
+        const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+        error.code = "connector_in_use";
+        error.connection_ids = ids;
+        throw error;
+      }
+    },
+  });
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
@@ -7985,41 +8023,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionIntent>[1]);
 
-  const ownerConnectorInstallService =
-    opts.connectorInstallService ??
-    createConnectorInstallService({
-      ...installedConnectorManifestRegistration,
-      removeActivation: removeConnectorActivation,
-      assertUninstallAllowed: async (connectorId) => {
-        const activeRun = isPostgresStorageBackend()
-          ? (await postgresQuery<{ run_id: string }>(
-              "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
-              [connectorId]
-            )).rows[0]
-          : getDb()
-              .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
-              .get<{ run_id: string }>(connectorId);
-        if (activeRun) {
-          throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
-            code: "connector_run_active",
-          });
-        }
-        const ids = isPostgresStorageBackend()
-          ? (await postgresQuery<{ connector_instance_id: string }>(
-              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
-              [connectorId]
-            )).rows.map((row) => row.connector_instance_id)
-          : getDb().prepare(
-              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
-            ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
-        if (ids.length) {
-          const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
-          error.code = "connector_in_use";
-          error.connection_ids = ids;
-          throw error;
-        }
-      },
-    });
+  const ownerConnectorInstallService = opts.connectorInstallService ?? createOwnerConnectorInstallService();
 
   const ownerConnectorReadinessResolver = createBrowserEnrollmentReadinessResolver({
     installService: ownerConnectorInstallService,
@@ -8959,11 +8963,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const providerAuthExchanger =
     opts.providerAuthExchanger ?? buildGenericProviderAuthExchanger(createRequestConnectorInstanceCredentialStore);
 
-  const connectorInstallService =
-    opts.connectorInstallService ??
-    createConnectorInstallService({
-      ...installedConnectorManifestRegistration,
-    });
+  const connectorInstallService = opts.connectorInstallService ?? createOwnerConnectorInstallService();
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
     acceptedProviderNativeRevision: opts.acceptedProviderNativeRevision,
