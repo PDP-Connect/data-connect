@@ -190,17 +190,71 @@ test(
   })
 );
 
+function seedBindingCollisions(db: Db): void {
+  seedConnector(db, "claude_code");
+  seedConnector(db, "claude-code");
+  db.prepare(`INSERT INTO device_exporters
+      (device_id, owner_subject_id, display_name, created_at, updated_at)
+      VALUES ('dev', 'owner_local', 'device', ?, ?)`).run(NOW, NOW);
+  for (const [id, connector] of [
+    ["old", "claude_code"],
+    ["new", "claude-code"],
+  ] as const) {
+    seedInstance(db, `inst_${id}`, connector, "binding-a");
+    db.prepare(`INSERT INTO records
+        (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at)
+        VALUES (?, ?, 'sessions', 'record', ?, ?)`).run(connector, `inst_${id}`, JSON.stringify({ id }), NOW);
+    db.prepare(`INSERT INTO device_source_instances
+        (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
+        VALUES (?, 'dev', ?, ?, 'binding-a', ?, ?)`).run(`src_${id}`, connector, `inst_${id}`, NOW, NOW);
+  }
+}
+
 test(
-  "a collision that cannot be resolved aborts and leaves every row as it was",
+  "binding collisions preserve both instances, records and source identities",
   withDb((db) => {
-    seedConnector(db, "claude_code");
-    seedConnector(db, "claude-code");
-    // Same owner and binding under both ids: renaming one onto the other would merge two connections.
-    seedInstance(db, "inst_old", "claude_code", "binding-a");
-    seedInstance(db, "inst_new", "claude-code", "binding-a");
-    assert.throws(() => migrateRenamedConnectorIdsSqlite(db), /UNIQUE/i);
-    assert.deepEqual(ids(db, "connectors"), ["claude-code", "claude_code"]);
-    assert.deepEqual(ids(db, "connector_instances"), ["claude-code", "claude_code"]);
+    seedBindingCollisions(db);
+    const currentInstance = db
+      .prepare("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")
+      .get();
+    const currentSource = db
+      .prepare("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")
+      .get();
+    const result = migrateRenamedConnectorIdsSqlite(db);
+    assert.deepEqual(result.disambiguatedRows, { connector_instances: 1, device_source_instances: 1 });
+    assert.match(
+      describeConnectorIdRename(result)!,
+      /binding collisions disambiguated \(connector_instances: 1, device_source_instances: 1\)/
+    );
+    assert.deepEqual(
+      db.prepare("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'").get(),
+      currentInstance
+    );
+    assert.deepEqual(
+      db.prepare("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'").get(),
+      currentSource
+    );
+    assert.equal(
+      db.prepare("SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'").get()
+        ?.source_binding_key,
+      "binding-a#renamed-from:claude_code"
+    );
+    assert.equal(
+      db.prepare("SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'").get()
+        ?.local_binding_id,
+      "binding-a#renamed-from:claude_code"
+    );
+    for (const id of ["old", "new"]) {
+      assert.equal(
+        db.prepare("SELECT record_json FROM records WHERE connector_instance_id = ?").get(`inst_${id}`)?.record_json,
+        JSON.stringify({ id })
+      );
+    }
+    assert.deepEqual(ids(db, "connector_instances"), ["claude-code", "claude-code"]);
+    assert.deepEqual(ids(db, "device_source_instances"), ["claude-code", "claude-code"]);
+    const before = Number(db.prepare("SELECT total_changes() AS n").get()?.n);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
+    assert.equal(Number(db.prepare("SELECT total_changes() AS n").get()?.n), before);
   })
 );
 
@@ -247,6 +301,64 @@ test("initDb renames retired ids stored in an existing database file", () => {
     assert.deepEqual(ids(db, "connector_instances"), ["apple-photos"]);
     closeDb();
   } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("startup preserves collided source bindings and records across two restarts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-binding-collision-"));
+  const path = join(dir, "pdpp.sqlite");
+  try {
+    seedBindingCollisions(initDb(path));
+    closeDb();
+    for (let boot = 0; boot < 2; boot += 1) {
+      const db = initDb(path);
+      for (const id of ["old", "new"]) {
+        assert.equal(
+          db.prepare("SELECT record_json FROM records WHERE connector_instance_id = ?").get(`inst_${id}`)?.record_json,
+          JSON.stringify({ id })
+        );
+        assert.equal(
+          db
+            .prepare("SELECT connector_instance_id FROM device_source_instances WHERE source_instance_id = ?")
+            .get(`src_${id}`)?.connector_instance_id,
+          `inst_${id}`
+        );
+      }
+      assert.equal(
+        db.prepare("SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'").get()
+          ?.local_binding_id,
+        "binding-a#renamed-from:claude_code"
+      );
+      closeDb();
+    }
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("unexpected unique collisions roll back and identify the migration, table and store", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-unknown-collision-"));
+  const path = join(dir, "pdpp.sqlite");
+  try {
+    const db = initDb(path);
+    db.exec("CREATE TABLE unexpected_bindings (id TEXT PRIMARY KEY, connector_id TEXT UNIQUE)");
+    db.exec("INSERT INTO unexpected_bindings VALUES ('old', 'claude_code'), ('new', 'claude-code')");
+    assert.throws(() => migrateRenamedConnectorIdsSqlite(db), /renamed_connector_ids_v2.*unexpected_bindings/);
+    assert.deepEqual(ids(db, "unexpected_bindings"), ["claude-code", "claude_code"]);
+    closeDb();
+    assert.throws(
+      () => initDb(path),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes(path));
+        assert.match(error.message, /renamed_connector_ids_v2.*unexpected_bindings/);
+        return true;
+      }
+    );
+  } finally {
+    closeDb();
     rmSync(dir, { force: true, recursive: true });
   }
 });

@@ -14,6 +14,7 @@ import test from "node:test";
 
 import {
   CONNECTOR_ID_RENAME_MIGRATION_ID,
+  describeConnectorIdRename,
   migrateRenamedConnectorIdsPostgres,
 } from "../server/connector-id-rename-migration.ts";
 import {
@@ -158,26 +159,82 @@ if (POSTGRES_URL) {
     });
   });
 
-  test("an unresolvable collision aborts, keeps every row, and blocks the receipt until it is fixed", async () => {
+  test("binding collisions preserve instance identities and complete the receipt", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });
       const pool = getPostgresPool();
-      await seedConnector(pool, "claude_code");
-      await seedConnector(pool, "claude-code");
-      await seedInstance(pool, "inst_old", "claude_code", "binding-a");
-      await seedInstance(pool, "inst_new", "claude-code", "binding-a");
+      await pool.query(
+        `INSERT INTO device_exporters
+        (device_id, owner_subject_id, display_name, created_at, updated_at)
+        VALUES ('dev', 'owner_local', 'device', $1, $1)`,
+        [NOW]
+      );
+      for (const [id, connector] of [
+        ["old", "claude_code"],
+        ["new", "claude-code"],
+      ] as const) {
+        await seedConnector(pool, connector);
+        await seedInstance(pool, `inst_${id}`, connector, "binding-a");
+        await pool.query(
+          `INSERT INTO records
+          (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, primary_key_text)
+          VALUES ($1, $2, 'sessions', 'record', $3, $4, 'record')`,
+          [connector, `inst_${id}`, JSON.stringify({ id }), NOW]
+        );
+        await pool.query(
+          `INSERT INTO device_source_instances
+          (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at)
+          VALUES ($1, 'dev', $2, $3, 'binding-a', $4, $4)`,
+          [`src_${id}`, connector, `inst_${id}`, NOW]
+        );
+      }
+      const currentInstance = (
+        await pool.query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")
+      ).rows;
+      const currentSource = (
+        await pool.query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")
+      ).rows;
+      const client = await pool.connect();
+      try {
+        const result = await migrateRenamedConnectorIdsPostgres(client);
+        assert.deepEqual(result.disambiguatedRows, { connector_instances: 1, device_source_instances: 1 });
+        assert.match(describeConnectorIdRename(result)!, /binding collisions disambiguated/);
+        assert.deepEqual(
+          (await pool.query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_new'")).rows,
+          currentInstance
+        );
+        assert.deepEqual(
+          (await pool.query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_new'")).rows,
+          currentSource
+        );
+        assert.equal(
+          (
+            await pool.query(
+              "SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'"
+            )
+          ).rows[0].source_binding_key,
+          "binding-a#renamed-from:claude_code"
+        );
+        assert.equal(
+          (
+            await pool.query(
+              "SELECT local_binding_id FROM device_source_instances WHERE source_instance_id = 'src_old'"
+            )
+          ).rows[0].local_binding_id,
+          "binding-a#renamed-from:claude_code"
+        );
+        assert.deepEqual(
+          (await pool.query("SELECT connector_instance_id FROM records ORDER BY connector_instance_id")).rows,
+          [{ connector_instance_id: "inst_new" }, { connector_instance_id: "inst_old" }]
+        );
+        assert.deepEqual(await ids(pool, "device_source_instances"), ["claude-code", "claude-code"]);
+        assert.equal((await migrateRenamedConnectorIdsPostgres(client)).changedRows, 0);
+      } finally {
+        client.release();
+      }
       await rearm(pool);
-
-      await assert.rejects(bootstrapPostgresSchema(), /unique|duplicate/i);
-      assert.equal(await receiptStatus(pool), "blocked");
-      assert.deepEqual(await ids(pool, "connectors"), ["claude-code", "claude_code"]);
-      assert.deepEqual(await ids(pool, "connector_instances"), ["claude-code", "claude_code"]);
-
-      await pool.query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_new'");
       await bootstrapPostgresSchema();
       assert.equal(await receiptStatus(pool), "complete");
-      assert.deepEqual(await ids(pool, "connector_instances"), ["claude-code"]);
-      assert.deepEqual(await ids(pool, "connectors"), ["claude-code"]);
     });
   });
 } else {

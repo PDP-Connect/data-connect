@@ -25,7 +25,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { describeConnectorIdRename, migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
+import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  describeConnectorIdRename,
+  migrateRenamedConnectorIdsSqlite,
+} from "./connector-id-rename-migration.ts";
 import {
   makeConnectorInstanceId as canonicalConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
@@ -7214,6 +7218,9 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
       raw.close();
     } catch {
       /* best-effort: report the bootstrap error, not the close error */
+    }
+    if (error instanceof Error && error.message.startsWith(`Migration ${CONNECTOR_ID_RENAME_MIGRATION_ID} failed`)) {
+      throw new Error(`Failed to initialize store ${path}: ${error.message}`, { cause: error });
     }
     throw error;
   }

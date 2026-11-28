@@ -22,7 +22,7 @@ const RENAMES: readonly (readonly [oldId: string, newId: string])[] = Object.fre
 ]);
 
 /** Postgres migration receipt id. Versioned: a behavior change ships as a new id. */
-export const CONNECTOR_ID_RENAME_MIGRATION_ID = "renamed_connector_ids_v1";
+export const CONNECTOR_ID_RENAME_MIGRATION_ID = "renamed_connector_ids_v2";
 
 const ID_COLUMN_NAMES = ["connector_id", "connector_key"] as const;
 
@@ -34,9 +34,15 @@ const ID_COLUMN_NAMES = ["connector_id", "connector_key"] as const;
 export interface ConnectorIdRenameResult {
   changedRows: number;
   supersededRows: Readonly<Record<string, number>>;
+  /** Old binding tuples retained under a distinct key, without changing instance ids. */
+  disambiguatedRows: Readonly<Record<string, number>>;
 }
 
-const NO_RENAME: ConnectorIdRenameResult = Object.freeze({ changedRows: 0, supersededRows: Object.freeze({}) });
+const NO_RENAME: ConnectorIdRenameResult = Object.freeze({
+  changedRows: 0,
+  supersededRows: Object.freeze({}),
+  disambiguatedRows: Object.freeze({}),
+});
 
 /** One log line for a run that changed rows; null when it changed nothing. */
 export function describeConnectorIdRename(result: ConnectorIdRenameResult): string | null {
@@ -46,9 +52,13 @@ export function describeConnectorIdRename(result: ConnectorIdRenameResult): stri
   const superseded = Object.entries(result.supersededRows)
     .map(([table, rows]) => `${table}: ${rows}`)
     .join(", ");
-  return superseded
+  const disambiguated = Object.entries(result.disambiguatedRows)
+    .map(([table, rows]) => `${table}: ${rows}`)
+    .join(", ");
+  const summary = superseded
     ? `Renamed connector ids: ${result.changedRows} rows changed; old-id rows replaced by current-id rows with the same key were deleted (${superseded})`
     : `Renamed connector ids: ${result.changedRows} rows changed`;
+  return disambiguated ? `${summary}; binding collisions disambiguated (${disambiguated})` : summary;
 }
 
 interface IdColumn {
@@ -83,6 +93,36 @@ function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: st
   const sameKey = c.otherKeyColumns.map((k) => `n.${quote(k)} = ${t}.${quote(k)}`).join(" AND ") || "1 = 1";
   return `DELETE FROM ${t} WHERE ${col} = ${placeholders.old}
             AND EXISTS (SELECT 1 FROM ${t} n WHERE n.${col} = ${placeholders.new} AND ${sameKey})`;
+}
+
+/**
+ * Keep the current binding as the enrollment target. Preserve the old instance
+ * and all references to it, moving only its binding into a historical namespace.
+ * Source pushes resolve by source_instance_id, not by these binding names.
+ * A pre-existing suffix collision still aborts atomically rather than losing data.
+ */
+function disambiguateBindingSql(c: IdColumn, placeholders: { old: string; new: string }): string | null {
+  if (c.column !== "connector_id") return null;
+  const binding =
+    c.table === "connector_instances"
+      ? "source_binding_key"
+      : c.table === "device_source_instances"
+        ? "local_binding_id"
+        : null;
+  if (!binding) return null;
+  const scope = c.table === "connector_instances" ? ["owner_subject_id", "source_kind"] : ["device_id"];
+  const t = quote(c.table);
+  const sameKey = [...scope, binding].map((k) => `n.${quote(k)} = ${t}.${quote(k)}`).join(" AND ");
+  return `UPDATE ${t} SET ${quote(binding)} = ${quote(binding)} || '#renamed-from:' || connector_id
+    WHERE connector_id = ${placeholders.old}
+      AND EXISTS (SELECT 1 FROM ${t} n WHERE n.connector_id = ${placeholders.new} AND ${sameKey})`;
+}
+
+function migrationTableError(table: string, cause: unknown): Error {
+  return new Error(
+    `Migration ${CONNECTOR_ID_RENAME_MIGRATION_ID} failed in table ${table}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    { cause }
+  );
 }
 
 const renameEntries = (): [string, string][] => RENAMES.map(([oldId, newId]) => [oldId, newId]);
@@ -181,7 +221,8 @@ function sqliteIdColumns(raw: SqliteLike): IdColumn[] {
  * and the old row is deleted last. A row keyed by the old id that a
  * row keyed by the current id already covers is deleted (the current row
  * wins; see {@link dropSupersededRowsSql}); any other unique-key collision
- * aborts the migration with the database's error rather than merging data.
+ * aborts with the migration id and table rather than merging data. Binding
+ * collisions on the two instance tables preserve both rows under distinct keys.
  */
 export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRenameResult {
   const columns = sqliteIdColumns(raw);
@@ -198,12 +239,21 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
   const run = raw.transaction((): ConnectorIdRenameResult => {
     let changed = 0;
     const superseded: Record<string, number> = {};
+    const disambiguated: Record<string, number> = {};
     const supersededParents = new Set<string>();
     for (const [oldId, newId] of renameEntries()) {
       if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
         supersededParents.add(oldId);
       }
       for (const c of columns.filter((x) => x.table !== "connectors")) {
+        const disambiguate = disambiguateBindingSql(c, { new: "?", old: "?" });
+        if (disambiguate) {
+          try {
+            countSuperseded(disambiguated, c.table, sqliteChanges(raw.prepare(disambiguate).run(oldId, newId)));
+          } catch (err) {
+            throw migrationTableError(c.table, err);
+          }
+        }
         const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
         if (drop) {
           countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
@@ -212,11 +262,17 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
       const rename = renameCaseSql(c.column, () => "?");
-      changed += sqliteChanges(
-        raw
-          .prepare(`UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})`)
-          .run(...rename.params, ...olds)
-      );
+      try {
+        changed += sqliteChanges(
+          raw
+            .prepare(
+              `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})`
+            )
+            .run(...rename.params, ...olds)
+        );
+      } catch (err) {
+        throw migrationTableError(c.table, err);
+      }
     }
     // Old parents go last, once no child names them. One the current row
     // already covered is a superseded row, like the children above.
@@ -229,7 +285,11 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     for (const [oldId, newId] of renameEntries()) {
       changed += sqliteChanges(raw.prepare(renamePlaceholderLabelSql(() => "?")).run(newId, oldId, newId));
     }
-    return { changedRows: changed + sumSuperseded(superseded), supersededRows: superseded };
+    return {
+      changedRows: changed + sumSuperseded(superseded),
+      supersededRows: superseded,
+      disambiguatedRows: disambiguated,
+    };
   });
   return run.immediate();
 }
@@ -353,12 +413,21 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
   try {
     let changed = 0;
     const superseded: Record<string, number> = {};
+    const disambiguated: Record<string, number> = {};
     const supersededParents = new Set<string>();
     for (const [oldId, newId] of renameEntries()) {
       if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
         supersededParents.add(oldId);
       }
       for (const c of columns.filter((x) => x.table !== "connectors")) {
+        const disambiguate = disambiguateBindingSql(c, { new: "$2", old: "$1" });
+        if (disambiguate) {
+          try {
+            countSuperseded(disambiguated, c.table, (await client.query(disambiguate, [oldId, newId])).rowCount ?? 0);
+          } catch (err) {
+            throw migrationTableError(c.table, err);
+          }
+        }
         const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
         if (drop) {
           countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);
@@ -367,12 +436,16 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
       const rename = renameCaseSql(c.column, (n) => `$${n}`);
-      const result = await client.query(
-        `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql}
+      try {
+        const result = await client.query(
+          `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql}
           WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, rename.params.length)})`,
-        [...rename.params, ...olds]
-      );
-      changed += result.rowCount ?? 0;
+          [...rename.params, ...olds]
+        );
+        changed += result.rowCount ?? 0;
+      } catch (err) {
+        throw migrationTableError(c.table, err);
+      }
     }
     // Old parents go last, once no child names them. One the current row
     // already covered is a superseded row, like the children above.
@@ -387,7 +460,11 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
       changed += labels.rowCount ?? 0;
     }
     await client.query("COMMIT");
-    return { changedRows: changed + sumSuperseded(superseded), supersededRows: superseded };
+    return {
+      changedRows: changed + sumSuperseded(superseded),
+      supersededRows: superseded,
+      disambiguatedRows: disambiguated,
+    };
   } catch (err) {
     try {
       await client.query("ROLLBACK");

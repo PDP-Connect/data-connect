@@ -2394,6 +2394,7 @@ test("ingest-batches refuses an old connector id as an unknown connector", async
       authHeaders(device.device_token)
     );
     assertOldConnectorIdRefused(retired);
+    assert.match(errorMessage(retired), /npm i -g @pdpp\/local-collector@latest/);
 
     const current = await postJson(
       `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
