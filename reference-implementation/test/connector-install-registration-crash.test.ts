@@ -530,6 +530,53 @@ test("a retry after the publish crash stages a fresh copy before it replaces the
   });
 });
 
+test("an update retried after the publish crash activates the published root and leaves the previous install untouched", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    const env = { PDPP_DATA_DIR: dataDir };
+    await runCrashChild(CHILD, { args: [dbPath, dataDir, "seed"], env });
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "update"],
+      env,
+    });
+    await initDb(dbPath);
+    const previousRoot = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const orphanRoot = rootOf(dataDir, UPDATE_DIGEST);
+    const files = ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"];
+    const previousBytes = files.map((file) => readFileSync(join(previousRoot, file)));
+    assert.equal((await activeRecord())?.digest, GMAIL_INSTALL_DIGEST, "the previous install is still active");
+    assert.ok(existsSync(orphanRoot), "the child published the update root before crashing");
+    // The rename publishes only a staged copy that already verified, and a
+    // retained root is reused without a redownload by design, so the retry
+    // activates these bytes instead of staging again.
+    const expected = join(dir, "expected-update");
+    writeArtifact(expected, updatedGmail);
+
+    const store = createConnectorInstallStore();
+    const installed = await installService(dataDir, {
+      digest: UPDATE_DIGEST,
+      installArtifact: () => {
+        throw new Error("the published update root is reused without a redownload");
+      },
+      manifest: updatedGmail,
+      store,
+    }).install("gmail", UPDATE_DIGEST);
+    assert.equal(installed.root, orphanRoot);
+    for (const file of files) {
+      assert.deepEqual(readFileSync(join(orphanRoot, file)), readFileSync(join(expected, file)));
+    }
+    assert.deepEqual(
+      files.map((file) => readFileSync(join(previousRoot, file))),
+      previousBytes
+    );
+    assert.deepEqual(await agreement(), {
+      activeDigest: UPDATE_DIGEST,
+      activeVersion: UPDATE_VERSION,
+      agree: true,
+      registeredVersion: UPDATE_VERSION,
+    });
+  });
+});
+
 test("a refused retry after the publish crash leaves the orphan root and both pointers unchanged", async () => {
   await withSandbox(async ({ dataDir, dbPath }) => {
     await killChildAt(CHILD, "connector-install:after-publish", {
