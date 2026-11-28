@@ -43,8 +43,8 @@ test("runtime checkpoint fixtures are template-eligible, not cold-required", () 
   }
 });
 
-test("all 43 cold-required entries remain cold, including helper-owned bootstrap and durable startup retry", () => {
-  assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length, 43);
+test("all 44 cold-required entries remain cold, including helper-owned bootstrap and durable startup retry", () => {
+  assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length, 44);
   assert.ok(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.includes("test/startup-backfill-durable-retry.test.ts"));
   for (const file of POSTGRES_TEMPLATE_COLD_REQUIRED_FILES) {
     assert.equal(isPostgresTemplateEligibleFilePath(file), false, file);
