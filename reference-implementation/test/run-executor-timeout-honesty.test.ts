@@ -383,7 +383,7 @@ function makeHarness(
   rsUrl: string,
   maxRunWallClockMs: number,
   watchdogTimers?: WatchdogTimers,
-  overrides?: Pick<RunExecutorDeps, "schedulerStore" | "runConnectorImpl">
+  overrides?: Pick<RunExecutorDeps, "onRunComplete" | "persistLastRunTime" | "schedulerStore" | "runConnectorImpl">
 ): ReturnType<typeof createRunExecutor>["launchRun"] {
   const deps: RunExecutorDeps = {
     admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId }) => ({
@@ -612,6 +612,46 @@ test(
     assert.deepEqual(record.knownGaps, []);
   })
 );
+
+for (const persistFailure of ["sync throw", "async rejection"] as const) {
+  test(
+    `run history ${persistFailure} does not prevent terminal bookkeeping`,
+    withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
+      const runtime = freshRuntime();
+      const completed: string[] = [];
+      const stamps: Array<{ connectorId: string; connectorInstanceId: string; at: number }> = [];
+      let appendAttempts = 0;
+      const error = new Error("synthetic run history write failure");
+      const launchRun = makeHarness(runtime, rsUrl, 60_000, undefined, {
+        onRunComplete: (record) => { completed.push(record.runId); },
+        persistLastRunTime: (connectorId, connectorInstanceId, at) => {
+          stamps.push({ connectorId, connectorInstanceId, at });
+        },
+        schedulerStore: {
+          appendRunHistory: () => {
+            appendAttempts += 1;
+            if (persistFailure === "sync throw") throw error;
+            return Promise.reject(error);
+          },
+          deleteActiveRun: async () => {},
+          upsertActiveRun: async () => true,
+        },
+      });
+
+      const record = await launchRun(schedule(writeConnector(tmpDir, 1, false), ownerToken), false, SCHEDULED_POLICY);
+
+      assert.equal(record.status, "succeeded");
+      assert.equal(record.recordsEmitted, 1);
+      assert.equal(appendAttempts, 1);
+      assert.equal(runtime.history.filter((entry) => entry.runId === record.runId).length, 1);
+      assert.equal(stamps.length, 1);
+      assert.equal(stamps[0]?.connectorId, record.connectorId);
+      assert.equal(stamps[0]?.connectorInstanceId, record.connectorInstanceId);
+      assert.ok(stamps[0] && Number.isFinite(stamps[0].at) && stamps[0].at > 0);
+      assert.deepEqual(completed, [record.runId]);
+    })
+  );
+}
 
 test(
   "a connector that declares a local-only phase boundary is not truncated by maxRunWallClockMs, even though it runs well past that budget",

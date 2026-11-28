@@ -829,7 +829,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     if (!schedulerStore) {
       return;
     }
-    await Promise.resolve(schedulerStore.appendRunHistory(toStoredRunRecord(record))).catch((err: unknown) => {
+    await Promise.resolve().then(() => schedulerStore.appendRunHistory(toStoredRunRecord(record))).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[scheduler] failed to persist run history for ${connectorId}: ${message}`);
       createRunLogger(baseLogger, {
