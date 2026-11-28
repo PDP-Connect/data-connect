@@ -12,6 +12,7 @@ const { readFileSync, writeFileSync } = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { createPersonalServerServeOptions } = require('./listener-options.cjs');
+const { waitForTunnelReady } = require('./tunnel-ready.cjs');
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
@@ -52,21 +53,9 @@ async function fixTunnelProxyName(tunnelManager, storageRoot) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  // Wait for connection (up to 15s)
-  const url = await new Promise((resolve) => {
-    let resolved = false;
-    const onData = (data) => {
-      const text = data.toString();
-      if (text.includes('start proxy success') || text.includes('login to server success')) {
-        if (!resolved) { resolved = true; resolve(publicUrl); }
-      }
-    };
-    frpc.stdout?.on('data', onData);
-    frpc.stderr?.on('data', onData);
-    frpc.on('error', () => { if (!resolved) { resolved = true; resolve(null); } });
-    frpc.on('exit', (code) => { if (!resolved && code !== 0) { resolved = true; resolve(null); } });
-    setTimeout(() => { if (!resolved) { resolved = true; resolve(publicUrl); } }, 15000);
-  });
+  // Announce the URL only once frpc reports the proxy is up; null means the
+  // caller announces no URL.
+  const url = await waitForTunnelReady(frpc, publicUrl);
 
   // Ensure frpc is killed on process exit
   const killFrpc = () => { try { frpc.kill(); } catch {} };
