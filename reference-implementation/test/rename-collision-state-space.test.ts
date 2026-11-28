@@ -11,16 +11,18 @@ import { bootstrapPostgresSchema, closePostgresStorage, getPostgresPool, initPos
 import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
 import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
-import { bindingScenarios, collisionTables, key, observationScenarios, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
+import { assertLegacyLocalDevice, bindingScenarios, collisionTables, key, legacyConnectors, observationScenarios, seedLegacyLocalDevice, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
 
 // Fixed seed, bounded product: independent old/new/both masks for each table,
 // with device pointers constrained to existing instances (or tombstoned sources).
 let randomState = 0x7701128;
 const next = () => (randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0);
-const tombstoneShapes = (["zero", "shared", "per-device"] as const).flatMap(tombstones => [1, 2].flatMap(devices => [false, true].map(occupied => ({ name: `tombstones-${tombstones}-devices-${devices}-occupied-${occupied}`, tombstones, devices, occupied, masks: null }))));
+// Tombstones under either spelling, next to a live connection under the other.
+const tombstoneShapes = (["old", "current"] as const).flatMap(spelling => (["zero", "shared", "per-device"] as const).flatMap(tombstones => [1, 2].flatMap(devices => [false, true].map(occupied => ({ name: `tombstones-${spelling === "current" ? "current-" : ""}${tombstones}-devices-${devices}-occupied-${occupied}`, spelling, tombstones, devices, occupied, masks: null })))));
 const shapes = [
   ...["claude_code", "claude-code"].flatMap(connector => ["shared", "distinct-old", "distinct-current", "suffix", "deleted", "deleted-orphan"].map(codeBinding => ({ name: `code-${connector}-${codeBinding}`, connector, codeBinding, masks: null }))),
   ...tombstoneShapes,
+  ...legacyConnectors.map(legacy => ({ name: `legacy-local-device-${legacy}`, legacy, masks: null })),
   ...[...bindingScenarios, ...collisionTables, ...observationScenarios].map(name => ({ name, masks: null as number[] | null })),
   ...Array.from({ length: 12 }, (_, i) => ({ name: `seed-7701128-${i}`, masks: Array.from({ length: 10 }, () => next() % 3 + 1) })),
 ];
@@ -35,8 +37,10 @@ async function seed(query: Query, shape: typeof shapes[number], postgres: boolea
     }
     const binding = shape.codeBinding === "suffix" ? "binding-a#renamed-from:claude_code" : shape.codeBinding === "distinct-current" ? "binding-b" : "binding-a";
     await query(`INSERT INTO device_enrollment_codes (enrollment_code_id, code_hash, owner_subject_id, connector_id, local_binding_id, created_at, expires_at) VALUES ('pending-code', 'fixture-code', 'owner_local', '${shape.connector}', '${binding}', '2026-11-14T00:00:00.000Z', '2999-01-01T00:00:00.000Z')`);
+  } else if ("legacy" in shape) {
+    await seedLegacyLocalDevice(query, shape.legacy, postgres);
   } else if ("tombstones" in shape) {
-    await seedTombstoneShape(query, shape.tombstones, shape.devices, shape.occupied, postgres);
+    await seedTombstoneShape(query, shape.tombstones, shape.devices, shape.occupied, postgres, shape.spelling);
   } else if (!shape.masks) {
     if ((collisionTables as readonly string[]).includes(shape.name)) {
       await seedCollision(query, shape.name);
@@ -145,6 +149,7 @@ test("bounded rename state space: two boots, binding invariants and backend pari
       closeDb(); db = initDb(path);
       assert.deepEqual(await all(), first, `${shape.name}: second SQLite boot is a no-op`);
       if ("codeBinding" in shape) await consumePendingCode(query, shape, false);
+      if ("legacy" in shape) await assertLegacyLocalDevice(query, shape.legacy);
     } catch (error) { failures.push(`SQLite ${shape.name}: ${error instanceof Error ? error.message : error}`); }
     finally { closeDb(); rmSync(dir, { recursive: true, force: true }); }
   }
@@ -156,6 +161,8 @@ test("bounded rename state space: two boots, binding invariants and backend pari
     const pool = getPostgresPool();
     const query: Query = async sql => (await pool.query(sql)).rows;
     for (const complete of [false, true]) for (const shape of shapes) {
+      // A completed canonicalization receipt means the sweep already consumed legacy ids.
+      if (complete && "legacy" in shape) continue;
       try {
         await query("TRUNCATE device_enrollment_codes, device_ingest_credentials, records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");
         await seed(query, shape, true);
@@ -173,9 +180,10 @@ test("bounded rename state space: two boots, binding invariants and backend pari
         await bootstrapPostgresSchema();
         assert.deepEqual(await all(), first, "second Postgres boot is a no-op");
         if ("codeBinding" in shape) await consumePendingCode(query, shape, true);
+        if ("legacy" in shape) await assertLegacyLocalDevice(query, shape.legacy);
       } catch (error) { failures.push(`Postgres ${shape.name}, receipt complete=${complete}: ${error instanceof Error ? error.message : error}`); }
     }
   });
-  t.diagnostic(`${shapes.length * 2} Postgres shapes ran (pending/complete receipts)`);
+  t.diagnostic(`${shapes.length * 2 - legacyConnectors.length} Postgres shapes ran (pending/complete receipts)`);
   assert.deepEqual(failures, []);
 });

@@ -46,7 +46,7 @@ export async function assertCollision(query: Query, table: string): Promise<void
   }
 }
 
-export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix", "deleted-null-pointer", "owned-binding-json", "orphan", "occupied-instance-suffix", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance", "deleted-shared-two-devices", "deleted-occupied-tombstone-suffix"] as const;
+export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix", "deleted-null-pointer", "owned-binding-json", "orphan", "occupied-instance-suffix", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance", "deleted-shared-two-devices", "deleted-occupied-tombstone-suffix", "deleted-current-cross-device"] as const;
 export async function seedBindingScenario(query: Query, scenario: string, postgres = false): Promise<void> {
   if (scenario === "deleted-shared-two-devices" || scenario === "deleted-occupied-tombstone-suffix") {
     await seedTombstoneShape(query, "shared", scenario === "deleted-shared-two-devices" ? 2 : 1, scenario === "deleted-occupied-tombstone-suffix", postgres);
@@ -75,6 +75,13 @@ export async function seedBindingScenario(query: Query, scenario: string, postgr
     await query(`INSERT INTO connector_instance_tombstones VALUES ('inst_old', 'owner_local', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
   }
   if (scenario === "tombstone-without-source") await query("DELETE FROM device_source_instances WHERE source_instance_id = 'src_old'");
+  // The owner deleted the current-spelling duplicate; the old connection lives on.
+  if (scenario === "deleted-current-cross-device") {
+    await query("UPDATE device_source_instances SET connector_instance_id = NULL WHERE source_instance_id = 'src_new'");
+    await query("DELETE FROM records WHERE connector_instance_id = 'inst_new'");
+    await query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_new'");
+    await query(`INSERT INTO connector_instance_tombstones VALUES ('inst_new', 'owner_local', 'claude-code', 'local_device', '${key("binding-a")}', '${now}')`);
+  }
   if (scenario === "owned-binding-json") {
     await query(`UPDATE connector_instances SET source_binding_json = '{"kind":"local_device","local_binding_name":"binding-a"}'`);
     for (const id of ["old", "new"]) await query(`INSERT INTO connector_state (connector_id, connector_instance_id, stream, state_json, updated_at) VALUES ('${id === "old" ? "claude_code" : "claude-code"}', 'inst_${id}', 'sessions', '{}', '${now}')`);
@@ -106,6 +113,14 @@ export async function assertBindingScenario(query: Query, scenario: string): Pro
     assert.equal((await query("SELECT * FROM connector_instance_tombstones"))[0]!.source_binding_key, key("binding-a#renamed-from:claude_code"));
     return;
   }
+  if (scenario === "deleted-current-cross-device") {
+    assert.deepEqual(rows.map(row => [row.connector_instance_id, row.local_binding_id]), [[null, "binding-a"], ["inst_old", "binding-a#renamed-from:claude_code"]], "deleted source stays unlinked; the live old binding moves aside");
+    const instances = await query("SELECT * FROM connector_instances");
+    assert.deepEqual(instances.map(row => [row.connector_instance_id, row.source_binding_key]), [["inst_old", key("binding-a#renamed-from:claude_code")]]);
+    assert.deepEqual((await query("SELECT * FROM connector_instance_tombstones")).map(row => [row.connector_instance_id, row.connector_id, row.source_binding_key]), [["inst_new", "claude-code", key("binding-a")]]);
+    assert.deepEqual((await query("SELECT connector_instance_id FROM records")).map(row => row.connector_instance_id), ["inst_old"]);
+    return;
+  }
   if (scenario === "orphan") {
     const instance = (await query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_old'"))[0]!;
     const binding = typeof instance.source_binding_json === "string" ? JSON.parse(instance.source_binding_json) : instance.source_binding_json as Record<string, unknown>;
@@ -133,27 +148,50 @@ export async function assertBindingScenario(query: Query, scenario: string): Pro
 
 // A tombstone is owner/binding scoped, not device scoped. Distinct per-device
 // tombstones therefore require distinct owners; shared exercises one owner's devices.
-export async function seedTombstoneShape(query: Query, tombstones: "zero" | "shared" | "per-device", devices: number, occupied: boolean, postgres: boolean) {
+// `spelling` picks which connector id the owner deleted; the other spelling stays live.
+export async function seedTombstoneShape(query: Query, tombstones: "zero" | "shared" | "per-device", devices: number, occupied: boolean, postgres: boolean, spelling: "old" | "current" = "old") {
+  const [gone, deleted, live] = spelling === "old" ? ["old", "claude_code", "claude-code"] : ["new", "claude-code", "claude_code"];
   await seedBindingScenario(query, "null-pointer", postgres);
   await query("UPDATE device_source_instances SET device_id = 'd2' WHERE source_instance_id = 'src_new'");
   if (tombstones !== "zero") {
-    await query("DELETE FROM records WHERE connector_instance_id = 'inst_old'");
-    await query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_old'");
-    await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_old', 'owner_local', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
+    await query(`UPDATE device_source_instances SET connector_instance_id = NULL WHERE source_instance_id = 'src_${gone}'`);
+    await query(`DELETE FROM records WHERE connector_instance_id = 'inst_${gone}'`);
+    await query(`DELETE FROM connector_instances WHERE connector_instance_id = 'inst_${gone}'`);
+    await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_${gone}', 'owner_local', '${deleted}', 'local_device', '${key("binding-a")}', '${now}')`);
   }
   if (devices === 2) {
     const owner = tombstones === "shared" ? "owner_local" : "owner_second";
     await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('d3', '${owner}', 'd3', '${now}', '${now}')`);
-    await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at) VALUES ('src_second', 'd3', 'claude_code', NULL, 'binding-a', '${now}', '${now}')`);
+    await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at) VALUES ('src_second', 'd3', '${deleted}', NULL, 'binding-a', '${now}', '${now}')`);
     if (tombstones === "per-device") {
-      await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_second', '${owner}', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
+      await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_second', '${owner}', '${deleted}', 'local_device', '${key("binding-a")}', '${now}')`);
     }
     if (tombstones !== "shared") {
-      await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second', '${owner}', 'claude-code', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
-      if (tombstones === "zero") await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second_old', '${owner}', 'claude_code', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+      await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second', '${owner}', '${live}', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+      if (tombstones === "zero") await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second_${gone}', '${owner}', '${deleted}', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+      // Nothing was deleted: a NULL pointer only recovers under the retired spelling.
+      if (tombstones === "zero" && spelling === "current") await query("UPDATE device_source_instances SET connector_instance_id = 'inst_second_new' WHERE source_instance_id = 'src_second'");
     }
   }
-  if (occupied) await query(`INSERT INTO connector_instance_tombstones VALUES ('occupied_tombstone', 'owner_local', 'claude_code', 'local_device', '${key("binding-a#renamed-from:claude_code")}', '${now}')`);
+  if (occupied) await query(`INSERT INTO connector_instance_tombstones VALUES ('occupied_tombstone', 'owner_local', '${deleted}', 'local_device', '${key("binding-a#renamed-from:claude_code")}', '${now}')`);
+}
+
+// Rows from before connection ids exist only under local-device:<connector>:<source>;
+// the boot sweep recovers them into the instance they name. codex is the unrenamed control.
+export const legacyConnectors = ["claude_code", "codex"] as const;
+const legacyId = (connector: string) => `local-device:${connector}:src_old`;
+export async function seedLegacyLocalDevice(query: Query, connector: string, postgres: boolean): Promise<void> {
+  await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('d1', 'owner_local', 'd1', '${now}', '${now}')`);
+  for (const id of [connector, legacyId(connector)]) await query(`INSERT INTO connectors (connector_id, manifest, created_at) VALUES ('${id}', '{}', '${now}')`);
+  await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at) VALUES ('src_old', 'd1', '${connector}', NULL, 'binding-a', '${now}', '${now}')`);
+  await query(`INSERT INTO records (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at${postgres ? ", primary_key_text" : ""})
+    VALUES ('${legacyId(connector)}', 'legacy_inst', 'sessions', 'record', '{}', '${now}'${postgres ? ", 'record'" : ""})`);
+}
+export async function assertLegacyLocalDevice(query: Query, connector: string): Promise<void> {
+  const current = connector === "claude_code" ? "claude-code" : connector;
+  assert.deepEqual((await query("SELECT connector_id, connector_instance_id FROM device_source_instances")).map(row => ({ ...row })), [{ connector_id: current, connector_instance_id: "legacy_inst" }], "source recovers its legacy instance");
+  assert.deepEqual((await query("SELECT connector_id, connector_instance_id FROM records")).map(row => ({ ...row })), [{ connector_id: current, connector_instance_id: "legacy_inst" }], "legacy record joins that instance");
+  assert.deepEqual((await query("SELECT connector_instance_id, connector_id FROM connector_instances")).map(row => ({ ...row })), [{ connector_instance_id: "legacy_inst", connector_id: current }]);
 }
 
 export const observationScenarios = ["observation-replay", "observation-conflict"] as const;

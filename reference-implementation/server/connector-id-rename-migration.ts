@@ -214,7 +214,9 @@ function collisionWrites(
       (source) =>
         source.connector_instance_id === instance.connector_instance_id && source.connector_id === oldId,
     );
-    const bindingCollision = (instance.source_kind === "local_device" && currentCodeHolds(instance.owner_subject_id, instance.source_binding_key)) || current("connector_instances").some((n) =>
+    // A current-spelling tombstone holds the key too: the owner deleted that
+    // binding, so the live old connection must not take it over.
+    const bindingCollision = (instance.source_kind === "local_device" && currentCodeHolds(instance.owner_subject_id, instance.source_binding_key)) || [...current("connector_instances"), ...current("connector_instance_tombstones")].some((n) =>
       equal(n, instance, ["owner_subject_id", "source_kind", "source_binding_key"]),
     );
     const deviceCollision = associated.some((source) =>
@@ -346,26 +348,40 @@ function migrationTableError(table: string, cause: unknown): Error {
 
 const renameEntries = (): [string, string][] => RENAMES.map(([oldId, newId]) => [oldId, newId]);
 
+/**
+ * Rows written before connection ids exist under `local-device:<connector>:<source>`.
+ * The local-device sweep that recovers them runs after this rename and builds that
+ * id from the source's current connector id, so those ids are renamed with their source.
+ */
+function legacyLocalDeviceEntries(sources: readonly Row[]): [string, string][] {
+  const legacyId = (connectorId: string, source: Row) =>
+    `local-device:${encodeURIComponent(connectorId)}:${encodeURIComponent(String(source.source_instance_id))}`;
+  return renameEntries().flatMap(([oldId, newId]) =>
+    sources.filter((source) => source.connector_id === oldId).map((source): [string, string] => [legacyId(oldId, source), legacyId(newId, source)]),
+  );
+}
+
+const sqlLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+
 /** `CASE <col> WHEN old THEN new ... END` over every renamed id, so each table is updated in one scan. */
-function renameCaseSql(column: string, placeholder: (n: number) => string): { params: string[]; sql: string } {
-  const entries = renameEntries();
+function renameCaseSql(column: string, placeholder: (n: number) => string, entries: readonly [string, string][]): { params: string[]; sql: string } {
   const params = entries.flatMap(([oldId, newId]) => [oldId, newId]);
   const whens = entries.map((_, i) => `WHEN ${placeholder(2 * i + 1)} THEN ${placeholder(2 * i + 2)}`).join(" ");
   return { params, sql: `CASE ${quote(column)} ${whens} ELSE ${quote(column)} END` };
 }
 
 /** Conflicting observations keep their original connector/instance/run provenance. */
-function observationRenameGuard(c: IdColumn): string {
+function observationRenameGuard(c: IdColumn, entries: readonly [string, string][]): string {
   if (c.table !== "connector_observation_runs") return "";
   return ` AND NOT EXISTS (SELECT 1 FROM connector_observation_runs n
-    WHERE n.connector_id = CASE connector_observation_runs.connector_id ${renameEntries().map(([oldId, newId]) => `WHEN '${oldId}' THEN '${newId}'`).join(" ")} END
+    WHERE n.connector_id = CASE connector_observation_runs.connector_id ${entries.map(([oldId, newId]) => `WHEN ${sqlLiteral(oldId)} THEN ${sqlLiteral(newId)}`).join(" ")} END
       AND n.connector_instance_id = connector_observation_runs.connector_instance_id
       AND n.run_id = connector_observation_runs.run_id)`;
 }
 
 /** Placeholders for the old ids, numbered after `offset` earlier parameters. */
-function renamedInList(placeholder: (n: number) => string, offset = 0): string {
-  return renameEntries()
+function renamedInList(placeholder: (n: number) => string, entries: readonly [string, string][], offset = 0): string {
+  return entries
     .map((_, i) => placeholder(offset + i + 1))
     .join(", ");
 }
@@ -455,7 +471,7 @@ function sqliteIdColumns(raw: SqliteLike): IdColumn[] {
 export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRenameResult {
   const columns = sqliteIdColumns(raw);
   const olds = renameEntries().map(([oldId]) => oldId);
-  const marks = renamedInList(() => "?");
+  const marks = renamedInList(() => "?", renameEntries());
   const anyStored = columns.some(
     (c) =>
       raw.prepare(`SELECT 1 FROM ${quote(c.table)} WHERE ${quote(c.column)} IN (${marks}) LIMIT 1`).get(...olds) !==
@@ -469,6 +485,9 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     const superseded: Record<string, number> = {};
     const disambiguated: Record<string, number> = {};
     const supersededParents = new Set<string>();
+    const legacy = legacyLocalDeviceEntries(raw.prepare("SELECT * FROM device_source_instances").all());
+    const entries = [...renameEntries(), ...legacy];
+    const allOlds = entries.map(([oldId]) => oldId);
     for (const [oldId, newId] of renameEntries()) {
       if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
         supersededParents.add(oldId);
@@ -491,15 +510,23 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
         }
       }
     }
+    // Legacy ids hold no bindings, so they need only the parent row and key cleanup.
+    for (const [oldId, newId] of legacy) {
+      if (adoptParentSqlite(raw, oldId, newId) === "superseded") supersededParents.add(oldId);
+      for (const c of columns.filter((x) => x.table !== "connectors")) {
+        const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
+        if (drop) countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
+      }
+    }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
-      const rename = renameCaseSql(c.column, () => "?");
+      const rename = renameCaseSql(c.column, () => "?", entries);
       try {
         changed += sqliteChanges(
           raw
             .prepare(
-              `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})${observationRenameGuard(c)}`
+              `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${renamedInList(() => "?", entries)})${observationRenameGuard(c, entries)}`
             )
-            .run(...rename.params, ...olds)
+            .run(...rename.params, ...allOlds)
         );
       } catch (err) {
         throw migrationTableError(c.table, err);
@@ -507,7 +534,7 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     }
     // Old parents go last, once no child names them. One the current row
     // already covered is a superseded row, like the children above.
-    const oldParents = partitionOldParents(olds, supersededParents);
+    const oldParents = partitionOldParents(allOlds, supersededParents);
     countSuperseded(superseded, "connectors", deleteConnectorsSqlite(raw, oldParents.superseded));
     changed += deleteConnectorsSqlite(raw, oldParents.copied);
     // A connection created without a name is labelled with its connector id.
@@ -628,7 +655,7 @@ async function postgresIdColumns(client: PoolClient): Promise<IdColumn[]> {
 export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Promise<ConnectorIdRenameResult> {
   const columns = await postgresIdColumns(client);
   const olds = renameEntries().map(([oldId]) => oldId);
-  const marks = renamedInList((n) => `$${n}`);
+  const marks = renamedInList((n) => `$${n}`, renameEntries());
   let anyStored = false;
   for (const c of columns) {
     const hit = await client.query(`SELECT 1 FROM ${quote(c.table)} WHERE ${quote(c.column)} IN (${marks}) LIMIT 1`, olds);
@@ -646,6 +673,9 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     const superseded: Record<string, number> = {};
     const disambiguated: Record<string, number> = {};
     const supersededParents = new Set<string>();
+    const legacy = legacyLocalDeviceEntries((await client.query("SELECT * FROM device_source_instances")).rows);
+    const entries = [...renameEntries(), ...legacy];
+    const allOlds = entries.map(([oldId]) => oldId);
     for (const [oldId, newId] of renameEntries()) {
       if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
         supersededParents.add(oldId);
@@ -670,13 +700,21 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
         }
       }
     }
+    // Legacy ids hold no bindings, so they need only the parent row and key cleanup.
+    for (const [oldId, newId] of legacy) {
+      if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") supersededParents.add(oldId);
+      for (const c of columns.filter((x) => x.table !== "connectors")) {
+        const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
+        if (drop) countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);
+      }
+    }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
-      const rename = renameCaseSql(c.column, (n) => `$${n}`);
+      const rename = renameCaseSql(c.column, (n) => `$${n}`, entries);
       try {
         const result = await client.query(
           `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql}
-          WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, rename.params.length)})${observationRenameGuard(c)}`,
-          [...rename.params, ...olds]
+          WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, entries, rename.params.length)})${observationRenameGuard(c, entries)}`,
+          [...rename.params, ...allOlds]
         );
         changed += result.rowCount ?? 0;
       } catch (err) {
@@ -685,7 +723,7 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     }
     // Old parents go last, once no child names them. One the current row
     // already covered is a superseded row, like the children above.
-    const oldParents = partitionOldParents(olds, supersededParents);
+    const oldParents = partitionOldParents(allOlds, supersededParents);
     countSuperseded(superseded, "connectors", await deleteConnectorsPostgres(client, oldParents.superseded));
     changed += await deleteConnectorsPostgres(client, oldParents.copied);
     // A connection created without a name is labelled with its connector id.
