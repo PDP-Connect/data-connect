@@ -9,6 +9,9 @@
  * skipped, when unset.
  */
 
+import { collisionTables, seedCollision, assertCollision, bindingScenarios, seedBindingScenario, assertBindingScenario, key } from "./helpers/rename-collision-fixtures.ts";
+import { createPostgresAcquisitionBatchStore } from "../server/stores/acquisition-batch-store.ts";
+import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -78,6 +81,58 @@ async function rearm(pool: Pool): Promise<void> {
 }
 
 if (POSTGRES_URL) {
+  for (const scenario of [...collisionTables, ...bindingScenarios]) {
+    test(`startup collision: ${scenario}`, async () => {
+      await withTempDb(POSTGRES_URL, async (url) => {
+        await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+        const pool = getPostgresPool();
+        const query = async (sql: string) => (await pool.query(sql)).rows;
+        if ((collisionTables as readonly string[]).includes(scenario)) await seedCollision(query, scenario);
+        else await seedBindingScenario(query, scenario, true);
+        await rearm(pool);
+        let snapshot: string | undefined;
+        for (let boot = 0; boot < 2; boot++) {
+          await bootstrapPostgresSchema();
+          if ((collisionTables as readonly string[]).includes(scenario)) await assertCollision(query, scenario);
+          else await assertBindingScenario(query, scenario);
+          if (scenario === "acquisition_batches") assert.equal((await createPostgresAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest"))?.batchId, "batch_new");
+          const state = JSON.stringify(await query(`SELECT * FROM ${scenario.includes("-") ? "device_source_instances" : scenario}`));
+          if (snapshot) assert.equal(state, snapshot);
+          snapshot = state;
+        }
+      });
+    });
+  }
+  test("binding recovery also survives a pending canonicalization sweep", async () => {
+    await withTempDb(POSTGRES_URL, async url => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      const query = async (sql: string) => (await pool.query(sql)).rows;
+      await seedBindingScenario(query, "null-pointer", true);
+      await rearm(pool);
+      await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID]);
+      await bootstrapPostgresSchema();
+      await assertBindingScenario(query, "null-pointer");
+      await bootstrapPostgresSchema();
+      await assertBindingScenario(query, "null-pointer");
+    });
+  });
+
+  test("unexpected unique collisions roll back and block the receipt", async () => {
+    await withTempDb(POSTGRES_URL, async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      await pool.query("CREATE TABLE unexpected_bindings (id TEXT PRIMARY KEY, connector_id TEXT UNIQUE)");
+      await pool.query("INSERT INTO unexpected_bindings VALUES ($1, $2), ($3, $4)", ["old", "claude_code", "new", "claude-code"]);
+      await seedConnector(pool, "claude_code");
+      await rearm(pool);
+      await assert.rejects(bootstrapPostgresSchema(), /renamed_connector_ids_v2.*unexpected_bindings/);
+      assert.equal(await receiptStatus(pool), "blocked");
+      assert.deepEqual(await ids(pool, "unexpected_bindings"), ["claude-code", "claude_code"]);
+      assert.deepEqual(await ids(pool, "connectors"), ["claude_code"]);
+    });
+  });
+
   test("boot renames retired ids across tables, parents first, and records a complete receipt", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });
@@ -174,7 +229,7 @@ if (POSTGRES_URL) {
         ["new", "claude-code"],
       ] as const) {
         await seedConnector(pool, connector);
-        await seedInstance(pool, `inst_${id}`, connector, "binding-a");
+        await seedInstance(pool, `inst_${id}`, connector, key("binding-a"));
         await pool.query(
           `INSERT INTO records
           (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, primary_key_text)
@@ -213,7 +268,7 @@ if (POSTGRES_URL) {
               "SELECT source_binding_key FROM connector_instances WHERE connector_instance_id = 'inst_old'"
             )
           ).rows[0].source_binding_key,
-          "binding-a#renamed-from:claude_code"
+          key("binding-a#renamed-from:claude_code")
         );
         assert.equal(
           (

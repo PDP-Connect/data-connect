@@ -13,6 +13,7 @@
  */
 
 import type { PoolClient } from "pg";
+import { makeConnectorInstanceSourceBindingKey } from "./connector-instance-utils.ts";
 
 const RENAMES: readonly (readonly [oldId: string, newId: string])[] = Object.freeze([
   ["apple_photos", "apple-photos"],
@@ -29,12 +30,12 @@ const ID_COLUMN_NAMES = ["connector_id", "connector_key"] as const;
 /**
  * What a rename run did. `supersededRows` counts, per table, the rows under an
  * old id that were deleted because a row under the current id has the same
- * remaining primary key (see {@link dropSupersededRowsSql}).
+ * remaining primary key or marker key (see {@link dropSupersededRowsSql}).
  */
 export interface ConnectorIdRenameResult {
   changedRows: number;
   supersededRows: Readonly<Record<string, number>>;
-  /** Old binding tuples retained under a distinct key, without changing instance ids. */
+  /** Old unique tuples retained under distinct keys, without changing instance ids. */
   disambiguatedRows: Readonly<Record<string, number>>;
 }
 
@@ -79,13 +80,14 @@ const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""
  * the current ids, so the current-id row is normally the later write, but a
  * restored or imported store can break that. The tables this applies to
  * hold connector metadata and bookkeeping, not owner records
- * (records are keyed by instance, stream and record key). A test in
+ * (records are keyed by instance, stream and record key). Observation history
+ * is excluded: an unresolved primary-key collision must roll back, never delete it. A test in
  * retired-connector-id-migration.test.ts lists them, so a new table keyed by
  * connector id fails it until its precedence is decided here. Each deletion
  * is counted in {@link ConnectorIdRenameResult.supersededRows} and logged.
  */
 function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: string }): string | null {
-  if (c.otherKeyColumns === null) {
+  if (c.otherKeyColumns === null || c.table === "connector_observation_runs") {
     return null;
   }
   const t = quote(c.table);
@@ -95,27 +97,177 @@ function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: st
             AND EXISTS (SELECT 1 FROM ${t} n WHERE n.${col} = ${placeholders.new} AND ${sameKey})`;
 }
 
-/**
- * Keep the current binding as the enrollment target. Preserve the old instance
- * and all references to it, moving only its binding into a historical namespace.
- * Source pushes resolve by source_instance_id, not by these binding names.
- * A pre-existing suffix collision still aborts atomically rather than losing data.
- */
-function disambiguateBindingSql(c: IdColumn, placeholders: { old: string; new: string }): string | null {
-  if (c.column !== "connector_id") return null;
-  const binding =
-    c.table === "connector_instances"
-      ? "source_binding_key"
-      : c.table === "device_source_instances"
-        ? "local_binding_id"
-        : null;
-  if (!binding) return null;
-  const scope = c.table === "connector_instances" ? ["owner_subject_id", "source_kind"] : ["device_id"];
-  const t = quote(c.table);
-  const sameKey = [...scope, binding].map((k) => `n.${quote(k)} = ${t}.${quote(k)}`).join(" AND ");
-  return `UPDATE ${t} SET ${quote(binding)} = ${quote(binding)} || '#renamed-from:' || connector_id
-    WHERE connector_id = ${placeholders.old}
-      AND EXISTS (SELECT 1 FROM ${t} n WHERE n.connector_id = ${placeholders.new} AND ${sameKey})`;
+/** Non-primary UNIQUE keys whose collision policy is explicit below. */
+export const HANDLED_CONNECTOR_UNIQUE_KEYS = [
+  "acquisition_batches:artifact_sha256,connector_id,owner_subject_id",
+  "browser_surface_leases:,connector_id,profile_key",
+  "connector_instance_tombstones:connector_id,owner_subject_id,source_binding_key,source_kind",
+  "connector_instances:connector_id,owner_subject_id,source_binding_key,source_kind",
+  "connector_observation_runs:connector_id,recorded_seq",
+  "device_source_instances:connector_id,device_id,local_binding_id",
+] as const;
+
+const COLLISION_TABLES = [
+  "connector_instances",
+  "device_source_instances",
+  "connector_instance_tombstones",
+  "connector_observation_runs",
+  "acquisition_batches",
+  "browser_surface_leases",
+] as const;
+type Row = Record<string, unknown>;
+interface CollisionWrite {
+  table: string;
+  sql: string;
+  params: unknown[];
+  superseded?: boolean;
+}
+
+/** Plan before changing keys, so NULL pointers can still resolve by the original binding. */
+function collisionWrites(
+  data: Record<string, Row[]>,
+  oldId: string,
+  newId: string,
+  postgres: boolean,
+): CollisionWrite[] {
+  const writes: CollisionWrite[] = [];
+  const rows = (table: string) => data[table] ?? [];
+  const old = (table: string) => rows(table).filter((row) => row.connector_id === oldId);
+  const current = (table: string) => rows(table).filter((row) => row.connector_id === newId);
+  const equal = (a: Row, b: Row, cols: string[]) => cols.every((col) => a[col] === b[col]);
+  const update = (table: string, idColumn: string, row: Row, values: Row) => {
+    const cols = Object.keys(values);
+    writes.push({
+      table,
+      sql: `UPDATE ${quote(table)} SET ${cols.map((col) => `${quote(col)} = ?`).join(", ")} WHERE ${quote(idColumn)} = ?`,
+      params: [...Object.values(values), row[idColumn]],
+    });
+    Object.assign(row, values);
+  };
+  const free = (base: string, occupied: (candidate: string) => boolean) => {
+    let candidate = `${base}#renamed-from:${oldId}`;
+    for (let n = 2; occupied(candidate); n++) candidate = `${base}#renamed-from:${oldId}:${n}`;
+    return candidate;
+  };
+  const sources = rows("device_source_instances");
+  const instances = rows("connector_instances");
+  const owner = (source: Row) =>
+    data.device_exporters?.find((device) => device.device_id === source.device_id)?.owner_subject_id;
+  const sourceKey = (name: unknown) =>
+    makeConnectorInstanceSourceBindingKey({ kind: "local_device", local_binding_name: name });
+  // Recover an absent pointer while the old connector and binding still identify its instance.
+  for (const source of old("device_source_instances")) {
+    if (source.connector_instance_id) continue;
+    const instance = old("connector_instances").find(
+      (instance) =>
+        instance.owner_subject_id === owner(source) &&
+        instance.source_kind === "local_device" &&
+        instance.source_binding_key === sourceKey(source.local_binding_id),
+    );
+    if (instance)
+      update("device_source_instances", "source_instance_id", source, {
+        connector_instance_id: instance.connector_instance_id,
+      });
+  }
+  for (const instance of old("connector_instances")) {
+    const associated = sources.filter(
+      (source) =>
+        source.connector_instance_id === instance.connector_instance_id && source.connector_id === oldId,
+    );
+    const bindingCollision = current("connector_instances").some((n) =>
+      equal(n, instance, ["owner_subject_id", "source_kind", "source_binding_key"]),
+    );
+    const deviceCollision = associated.some((source) =>
+      current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])),
+    );
+    if (!bindingCollision && !deviceCollision) continue;
+    const base = String(associated[0]?.local_binding_id ?? instance.source_binding_key);
+    const local = instance.source_kind === "local_device" && associated.length > 0;
+    const name = free(
+      base,
+      (candidate) =>
+        instances.some(
+          (n) =>
+            n !== instance &&
+            n.owner_subject_id === instance.owner_subject_id &&
+            n.source_kind === instance.source_kind &&
+            n.source_binding_key === (local ? sourceKey(candidate) : candidate),
+        ) ||
+        associated.some((source) =>
+          sources.some(
+            (n) => n !== source && n.device_id === source.device_id && n.local_binding_id === candidate,
+          ),
+        ),
+    );
+    // The name suffix lives in local_binding_id; the instance stores its canonical hash.
+    // Set both here, since Postgres may have already completed its canonicalization receipt.
+    update("connector_instances", "connector_instance_id", instance, {
+      source_binding_key: local ? sourceKey(name) : name,
+    });
+    for (const source of associated)
+      update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
+  }
+  for (const source of old("device_source_instances")) {
+    if (!current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])))
+      continue;
+    const name = free(String(source.local_binding_id), (candidate) =>
+      sources.some((n) => n.device_id === source.device_id && n.local_binding_id === candidate),
+    );
+    update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
+  }
+  for (const table of ["connector_instance_tombstones", "browser_surface_leases"]) {
+    for (const row of old(table)) {
+      const pending = (r: Row) =>
+        ["waiting_for_browser_surface", "starting_surface"].includes(String(r.status));
+      const collision = current(table).some((n) =>
+        table === "connector_instance_tombstones"
+          ? equal(n, row, ["owner_subject_id", "source_kind", "source_binding_key"])
+          : pending(row) &&
+            pending(n) &&
+            n.profile_key === row.profile_key &&
+            (n.account_key ?? "") === (row.account_key ?? "") &&
+            (!postgres || (n.surface_subject_id ?? "") === (row.surface_subject_id ?? "")),
+      );
+      if (!collision) continue;
+      const id = table === "connector_instance_tombstones" ? "connector_instance_id" : "lease_id";
+      // Tombstones block the same owner/binding under either spelling; pending leases are ephemeral.
+      writes.push({
+        table,
+        sql: `DELETE FROM ${quote(table)} WHERE ${quote(id)} = ?`,
+        params: [row[id]],
+        superseded: true,
+      });
+    }
+  }
+  const runs = old("connector_observation_runs").sort(
+    (a, b) => Number(a.recorded_seq) - Number(b.recorded_seq),
+  );
+  const newRuns = current("connector_observation_runs");
+  if (runs.some((row) => newRuns.some((n) => n.recorded_seq === row.recorded_seq))) {
+    const min = Math.min(...rows("connector_observation_runs").map((row) => Number(row.recorded_seq)));
+    // Sequences have no external references. Keep each history's order, with retired history
+    // before current history: timestamps cannot establish a shared store write order.
+    for (let i = 0; i < runs.length; i++) {
+      const row = runs[i]!;
+      writes.push({
+        table: "connector_observation_runs",
+        sql: "UPDATE connector_observation_runs SET recorded_seq = ? WHERE connector_id = ? AND connector_instance_id = ? AND run_id = ?",
+        params: [min - runs.length + i, oldId, row.connector_instance_id, row.run_id],
+      });
+    }
+  }
+  for (const row of old("acquisition_batches")) {
+    const winner = current("acquisition_batches").find(
+      (n) =>
+        row.artifact_sha256 != null &&
+        row.superseded_by_batch_id == null &&
+        n.superseded_by_batch_id == null &&
+        equal(n, row, ["owner_subject_id", "artifact_sha256"]),
+    );
+    // Preserve digests, receipts and batch-id references; only the live dedup target changes.
+    if (winner) update("acquisition_batches", "batch_id", row, { superseded_by_batch_id: winner.batch_id });
+  }
+  return writes;
 }
 
 function migrationTableError(table: string, cause: unknown): Error {
@@ -220,9 +372,9 @@ function sqliteIdColumns(raw: SqliteLike): IdColumn[] {
  * key's `connectors` row is created first, every referencing row is moved,
  * and the old row is deleted last. A row keyed by the old id that a
  * row keyed by the current id already covers is deleted (the current row
- * wins; see {@link dropSupersededRowsSql}); any other unique-key collision
- * aborts with the migration id and table rather than merging data. Binding
- * collisions on the two instance tables preserve both rows under distinct keys.
+ * wins; see {@link dropSupersededRowsSql}). Known unique-key collisions retain
+ * history under distinct keys or drop superseded markers. Any unhandled constraint
+ * aborts with the migration id and table rather than deleting owner data.
  */
 export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRenameResult {
   const columns = sqliteIdColumns(raw);
@@ -245,15 +397,18 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
       if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
         supersededParents.add(oldId);
       }
-      for (const c of columns.filter((x) => x.table !== "connectors")) {
-        const disambiguate = disambiguateBindingSql(c, { new: "?", old: "?" });
-        if (disambiguate) {
-          try {
-            countSuperseded(disambiguated, c.table, sqliteChanges(raw.prepare(disambiguate).run(oldId, newId)));
-          } catch (err) {
-            throw migrationTableError(c.table, err);
-          }
+      const data: Record<string, Row[]> = {};
+      for (const table of [...COLLISION_TABLES, "device_exporters"]) {
+        if (columns.some(c => c.table === table) || table === "device_exporters") {
+          data[table] = raw.prepare(`SELECT * FROM ${quote(table)}`).all();
         }
+      }
+      for (const write of collisionWrites(data, oldId, newId, false)) {
+        try {
+          countSuperseded(write.superseded ? superseded : disambiguated, write.table, sqliteChanges(raw.prepare(write.sql).run(...write.params)));
+        } catch (err) { throw migrationTableError(write.table, err); }
+      }
+      for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
         if (drop) {
           countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
@@ -419,15 +574,20 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
       if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
         supersededParents.add(oldId);
       }
-      for (const c of columns.filter((x) => x.table !== "connectors")) {
-        const disambiguate = disambiguateBindingSql(c, { new: "$2", old: "$1" });
-        if (disambiguate) {
-          try {
-            countSuperseded(disambiguated, c.table, (await client.query(disambiguate, [oldId, newId])).rowCount ?? 0);
-          } catch (err) {
-            throw migrationTableError(c.table, err);
-          }
+      const data: Record<string, Row[]> = {};
+      for (const table of [...COLLISION_TABLES, "device_exporters"]) {
+        if (columns.some(c => c.table === table) || table === "device_exporters") {
+          data[table] = (await client.query(`SELECT * FROM ${quote(table)}`)).rows;
         }
+      }
+      for (const write of collisionWrites(data, oldId, newId, true)) {
+        try {
+          let param = 0;
+          const sql = write.sql.replaceAll("?", () => `$${++param}`);
+          countSuperseded(write.superseded ? superseded : disambiguated, write.table, (await client.query(sql, write.params)).rowCount ?? 0);
+        } catch (err) { throw migrationTableError(write.table, err); }
+      }
+      for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
         if (drop) {
           countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);

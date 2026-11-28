@@ -6842,6 +6842,14 @@ function buildSqliteSchemaInTransaction(raw: SqliteDatabase, opts: InitDbOptions
   migrateLexicalSearchInstanceColumns(raw, opts);
   // Rename ids that older collectors spelled with underscores before any
   // migration below derives identity from a connector id.
+  addColumnIfMissing(raw, "acquisition_batches", "superseded_by_batch_id", "TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL");
+  const batchIndex = raw.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_acquisition_batches_owner_connector_artifact'").get<{ sql: string }>();
+  if (!batchIndex?.sql.includes("superseded_by_batch_id")) {
+    raw.exec(`DROP INDEX IF EXISTS idx_acquisition_batches_owner_connector_artifact;
+      CREATE UNIQUE INDEX idx_acquisition_batches_owner_connector_artifact
+      ON acquisition_batches(owner_subject_id, connector_id, artifact_sha256)
+      WHERE artifact_sha256 IS NOT NULL AND superseded_by_batch_id IS NULL`);
+  }
   const connectorIdRename = migrateRenamedConnectorIdsSqlite(raw);
   const connectorIdRenameSummary = describeConnectorIdRename(connectorIdRename);
   if (connectorIdRenameSummary) {

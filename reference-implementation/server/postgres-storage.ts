@@ -4059,6 +4059,14 @@ async function bootstrapPostgresSchemaOnce({
     // A migration that reads a missing ledger table would have to guess its
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
+    await client.query(`ALTER TABLE acquisition_batches ADD COLUMN IF NOT EXISTS superseded_by_batch_id TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL`);
+    const batchIndex = await client.query<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_pg_acquisition_batches_owner_connector_artifact'");
+    if (!batchIndex.rows[0]?.indexdef.includes("superseded_by_batch_id")) {
+      await client.query(`DROP INDEX IF EXISTS idx_pg_acquisition_batches_owner_connector_artifact;
+        CREATE UNIQUE INDEX idx_pg_acquisition_batches_owner_connector_artifact
+        ON acquisition_batches(owner_subject_id, connector_id, artifact_sha256)
+        WHERE artifact_sha256 IS NOT NULL AND superseded_by_batch_id IS NULL`);
+    }
     await migratePostgresRenamedConnectorIds(client, { log });
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresRunHistoryDeviceRunProvenance(client, { log });
