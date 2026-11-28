@@ -316,10 +316,13 @@ function collisionWrites(
       superseded: true,
     });
   }
-  if (runs.some((row) => newRuns.some((n) => n.recorded_seq === row.recorded_seq))) {
-    const min = Math.min(...rows("connector_observation_runs").map((row) => Number(row.recorded_seq)));
+  const currentMin = Math.min(...newRuns.map((row) => Number(row.recorded_seq)));
+  // Already-older history stays stable on subsequent boots, including retained conflicts.
+  if (runs.some((row) => Number(row.recorded_seq) >= currentMin)) {
+    const min = Math.min(...[...runs, ...newRuns].map((row) => Number(row.recorded_seq)));
     // Sequences have no external references. Keep each history's order, with retired history
     // before current history: timestamps cannot establish a shared store write order.
+    // Starting below both histories also leaves the whole target range free during updates.
     for (let i = 0; i < runs.length; i++) {
       const row = runs[i]!;
       writes.push({

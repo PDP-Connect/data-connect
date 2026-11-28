@@ -126,8 +126,8 @@ interface NextSequenceRow {
   next_seq: number | string;
 }
 
-// nextSequence stays exact-id: its UNIQUE key includes connector_id. Reads and
-// retention merge spellings, with connector_id breaking any sequence ties.
+// Sequence allocation, reads and retention share the group order across spellings,
+// with connector_id breaking any sequence ties.
 // Static SQL per backend. Both statements bind every value; the only literal
 // is the fixed record version, which is a column constant.
 const SQLITE_SQL = {
@@ -141,7 +141,7 @@ const SQLITE_SQL = {
   listOneInstance:
     "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) AND connector_instance_id = ? ORDER BY recorded_seq DESC, connector_id ASC LIMIT ?",
   nextSequence:
-    "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id = ?",
+    "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?))",
   prune:
     "DELETE FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) AND (connector_id, recorded_seq) NOT IN (SELECT connector_id, recorded_seq FROM connector_observation_runs WHERE connector_id IN (SELECT value FROM json_each(?)) ORDER BY recorded_seq DESC, connector_id ASC LIMIT ?)",
 } as const;
@@ -157,7 +157,7 @@ const POSTGRES_SQL = {
   listOneInstance:
     "SELECT connector_id, connector_instance_id, run_id, recorded_at, payload_json FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) AND connector_instance_id = $2 ORDER BY recorded_seq DESC, connector_id ASC LIMIT $3",
   nextSequence:
-    "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id = $1",
+    "SELECT COALESCE(MAX(recorded_seq), 0) + 1 AS next_seq FROM connector_observation_runs WHERE connector_id = ANY($1::text[])",
   prune:
     "DELETE FROM connector_observation_runs WHERE connector_id = ANY($1::text[]) AND (connector_id, recorded_seq) NOT IN (SELECT connector_id, recorded_seq FROM connector_observation_runs WHERE connector_id = ANY($2::text[]) ORDER BY recorded_seq DESC, connector_id ASC LIMIT $3)",
 } as const;
@@ -392,7 +392,7 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
             return;
           }
           const [sequence] = [
-            ...iterateDynamicSqlAcknowledged<NextSequenceRow>(SQLITE_SQL.nextSequence, [key.connectorId]),
+            ...iterateDynamicSqlAcknowledged<NextSequenceRow>(SQLITE_SQL.nextSequence, [JSON.stringify(connectorObservationSpellings(key.connectorId))]),
           ];
           // REVIEWED-DYNAMIC: fixed static statements; every value is bound.
           execDynamicSqlAcknowledged(SQLITE_SQL.insert, [
@@ -468,7 +468,7 @@ function createPostgresConnectorObservationRunStore(writeTimeoutMs: number): Con
           assertSamePayload(current.payload_json, payload);
           return;
         }
-        const sequence = await client.query<NextSequenceRow>(POSTGRES_SQL.nextSequence, [key.connectorId]);
+        const sequence = await client.query<NextSequenceRow>(POSTGRES_SQL.nextSequence, [connectorObservationSpellings(key.connectorId)]);
         await client.query(POSTGRES_SQL.insert, [
           key.connectorId,
           key.connectorInstanceId,

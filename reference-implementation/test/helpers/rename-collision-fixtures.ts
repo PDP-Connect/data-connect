@@ -187,7 +187,7 @@ export async function seedLegacyLocalDevice(query: Query, connector: string, pos
   if (connector === "claude_code") {
     await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('legacy_inst', 'owner_local', '${connector}', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
     for (const [id, spelling] of [["old", connector], ["new", "claude-code"]] as const) {
-      await query(`INSERT INTO connector_observation_runs VALUES ('${legacyId(spelling)}', 'legacy_inst', 'run_${id}', 1, 1, '${now}', '{}')`);
+      await query(`INSERT INTO connector_observation_runs VALUES ('${legacyId(spelling)}', 'legacy_inst', 'run_${id}', ${id === "old" ? 101 : 1}, 1, '${now}', '{}')`);
     }
   }
   await query(`INSERT INTO records (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at${postgres ? ", primary_key_text" : ""})
@@ -205,13 +205,28 @@ export async function assertLegacyLocalDevice(query: Query, connector: string): 
   }
 }
 
-export const observationScenarios = ["observation-replay", "observation-conflict"] as const;
+export const observationScenarios = ["observation-replay", "observation-conflict", "observation-high-retired"] as const;
 export async function seedObservationScenario(query: Query, scenario: string): Promise<void> {
   await seedCollision(query, "connector_observation_runs");
+  if (scenario === "observation-high-retired") {
+    await query("DELETE FROM connector_observation_runs");
+    for (let i = 1; i <= 8; i++) {
+      await query(`INSERT INTO connector_observation_runs VALUES ('claude_code', 'inst_old', 'shared-${i}', ${100 + i}, 1, '${now}', '{"retired":true}')`);
+      await query(`INSERT INTO connector_observation_runs VALUES ('claude-code', 'inst_old', 'shared-${i}', ${i}, 1, '${now}', '{"current":true}')`);
+    }
+    return;
+  }
   await query("UPDATE connector_observation_runs SET connector_instance_id = 'inst_old', run_id = 'same-run'");
   if (scenario === "observation-conflict") await query("UPDATE connector_observation_runs SET payload_json = '{\"different\":true}' WHERE connector_id = 'claude_code'");
 }
 export async function assertObservationScenario(query: Query, scenario: string): Promise<void> {
+  if (scenario === "observation-high-retired") {
+    const rows = await query("SELECT * FROM connector_observation_runs ORDER BY recorded_seq");
+    assert.deepEqual(rows.map(row => Number(row.recorded_seq)), Array.from({ length: 16 }, (_, i) => i - 7));
+    assert.deepEqual(rows.map(row => row.connector_id), [...Array(8).fill("claude_code"), ...Array(8).fill("claude-code")]);
+    assert.deepEqual(rows.slice(0, 8).map(row => row.run_id), Array.from({ length: 8 }, (_, i) => `shared-${i + 1}`));
+    return;
+  }
   const rows = await query("SELECT * FROM connector_observation_runs ORDER BY connector_id");
   assert.equal(rows.length, scenario === "observation-replay" ? 1 : 2);
   if (scenario === "observation-conflict") {
