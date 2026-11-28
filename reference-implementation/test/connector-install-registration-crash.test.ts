@@ -26,7 +26,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -98,6 +98,7 @@ function installService(
   dataDir: string,
   options: {
     readonly digest?: string;
+    readonly installArtifact?: (root: string) => void;
     readonly installTimeoutMs?: number;
     readonly manifest?: Record<string, unknown>;
     readonly store?: ConnectorInstallStore;
@@ -118,9 +119,11 @@ function installService(
       },
     ],
     dataDir,
-    installArtifact: (root) => {
-      writeArtifact(root, manifest);
-    },
+    installArtifact:
+      options.installArtifact ??
+      ((root) => {
+        writeArtifact(root, manifest);
+      }),
     ...(options.installTimeoutMs === undefined ? {} : { installTimeoutMs: options.installTimeoutMs }),
     registerManifest: installedConnectorManifestRegistration.registerManifest,
     store: options.store ?? createConnectorInstallStore(),
@@ -460,6 +463,149 @@ test("killed between the pointer write and the registry commit: startup reconcil
     const summary = await startupReconcile(dir);
     assert.equal(summary.registered, 1, "the missing manifest of a listed install is registered");
     assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a first install retries after a crash between publishing and activating", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const store = createConnectorInstallStore();
+    assert.ok(existsSync(root), "the child published the digest root before crashing");
+    assert.equal((await store.listActive()).length, 0);
+    assert.equal(await registeredVersion(), null);
+
+    const stagedFixture = join(dir, "expected-artifact");
+    writeArtifact(stagedFixture, installedGmail);
+    const installed = await installService(dataDir, { store }).install("gmail", GMAIL_INSTALL_DIGEST);
+    assert.equal(installed.root, root);
+    assert.deepEqual((await store.listActive()).map(record => record.digest), [GMAIL_INSTALL_DIGEST]);
+    for (const file of ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"]) {
+      assert.deepEqual(readFileSync(join(root, file)), readFileSync(join(stagedFixture, file)));
+    }
+    assert.equal(await registeredVersion(), installedGmail.version);
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a retry after the publish crash stages a fresh copy before it replaces the orphan root", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const file = "profile/collection-profile.json";
+    const orphanFile = join(root, file);
+    const expected = join(dir, "expected-artifact");
+    writeArtifact(expected, installedGmail);
+    const expectedBytes = readFileSync(join(expected, file));
+    // Different bytes in the orphan: adopting it instead of staging would leave them in place.
+    const orphanText = `${readFileSync(orphanFile, "utf8")}\n `;
+    writeFileSync(orphanFile, orphanText);
+
+    const store = createConnectorInstallStore();
+    const staged: string[] = [];
+    const service = installService(dataDir, {
+      installArtifact: (stage) => {
+        staged.push(stage);
+        assert.notEqual(stage, root);
+        assert.equal(readFileSync(orphanFile, "utf8"), orphanText, "the orphan is untouched while the fresh copy stages");
+        writeArtifact(stage, installedGmail);
+      },
+      store,
+    });
+    const installed = await service.install("gmail", GMAIL_INSTALL_DIGEST);
+    assert.equal(staged.length, 1);
+    assert.equal(installed.root, root);
+    assert.deepEqual(readFileSync(orphanFile), expectedBytes);
+    assert.deepEqual((await store.listActive()).map((record) => record.digest), [GMAIL_INSTALL_DIGEST]);
+    assert.equal(await registeredVersion(), installedGmail.version);
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("an update retried after the publish crash activates the published root and leaves the previous install untouched", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    const env = { PDPP_DATA_DIR: dataDir };
+    await runCrashChild(CHILD, { args: [dbPath, dataDir, "seed"], env });
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "update"],
+      env,
+    });
+    await initDb(dbPath);
+    const previousRoot = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const orphanRoot = rootOf(dataDir, UPDATE_DIGEST);
+    const files = ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"];
+    const previousBytes = files.map((file) => readFileSync(join(previousRoot, file)));
+    assert.equal((await activeRecord())?.digest, GMAIL_INSTALL_DIGEST, "the previous install is still active");
+    assert.ok(existsSync(orphanRoot), "the child published the update root before crashing");
+    // The rename publishes only a staged copy that already verified, and a
+    // retained root is reused without a redownload by design, so the retry
+    // activates these bytes instead of staging again.
+    const expected = join(dir, "expected-update");
+    writeArtifact(expected, updatedGmail);
+
+    const store = createConnectorInstallStore();
+    const installed = await installService(dataDir, {
+      digest: UPDATE_DIGEST,
+      installArtifact: () => {
+        throw new Error("the published update root is reused without a redownload");
+      },
+      manifest: updatedGmail,
+      store,
+    }).install("gmail", UPDATE_DIGEST);
+    assert.equal(installed.root, orphanRoot);
+    for (const file of files) {
+      assert.deepEqual(readFileSync(join(orphanRoot, file)), readFileSync(join(expected, file)));
+    }
+    assert.deepEqual(
+      files.map((file) => readFileSync(join(previousRoot, file))),
+      previousBytes
+    );
+    assert.deepEqual(await agreement(), {
+      activeDigest: UPDATE_DIGEST,
+      activeVersion: UPDATE_VERSION,
+      agree: true,
+      registeredVersion: UPDATE_VERSION,
+    });
+  });
+});
+
+test("a refused retry after the publish crash leaves the orphan root and both pointers unchanged", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env: { PDPP_DATA_DIR: dataDir },
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    const files = ["profile/collection-profile.json", "dist/collection-profile.mjs", "provenance.json"];
+    const bytesBefore = files.map((file) => readFileSync(join(root, file)));
+    const store = createConnectorInstallStore();
+    const before = await agreement();
+    let installs = 0;
+    const service = installService(dataDir, {
+      installArtifact: (stage) => {
+        installs++;
+        assert.notEqual(stage, root);
+        throw new Error("test fixture install refused");
+      },
+      store,
+    });
+    await assert.rejects(service.install("gmail", GMAIL_INSTALL_DIGEST), /test fixture install refused/);
+    assert.equal(installs, 1);
+    assert.deepEqual(
+      files.map((file) => readFileSync(join(root, file))),
+      bytesBefore,
+    );
+    assert.deepEqual(await store.listActive(), []);
+    assert.deepEqual(await agreement(), before);
   });
 });
 

@@ -932,6 +932,7 @@ async function installStagedEntry(options: {
   readonly dataDir: string;
   readonly entry: ConnectorCatalogEntry;
   readonly existing: ConnectorInstallRecord | null;
+  readonly replaceOrphan: boolean;
   readonly installArtifact: InstallArtifact;
   readonly registerManifest: RegisterInstalledManifest;
   readonly root: string;
@@ -949,8 +950,24 @@ async function installStagedEntry(options: {
       : options.entry;
     assertCatalogEntry(verifiedEntry, options.connectorId, options.entry.digest);
     const record = readVerifiedRecord(staged, verifiedEntry, installed.sourceDeclarationSha256);
+    if (options.replaceOrphan) {
+      // A previous process published but never activated this digest. Keep its
+      // bytes until a fresh staged replacement has independently been verified.
+      const root = resolve(options.root);
+      const active = await options.store.listActive();
+      options.signal.throwIfAborted();
+      if (active.some(record => resolve(record.root) === root)) {
+        throw new Error("Connector digest root is referenced by an active install.");
+      }
+      assertNoSymlinkComponents(options.root);
+      removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
+      if (existsSync(options.root)) {
+        throw new Error("Connector digest root could not be replaced safely.");
+      }
+    }
     renameSync(staged, options.root);
     published = true;
+    crashPoint("connector-install:after-publish");
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
@@ -1082,7 +1099,8 @@ export function createConnectorInstallService(options: {
   ): Promise<ConnectorInstallRecord> => {
       const root = join(dataDir, "connectors", connectorId, entry.digest);
       const existing = await store.getActive(connectorId);
-      if (existsSync(root)) {
+      const rootExists = existsSync(root);
+      if (rootExists) {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
           const inspected = await inspectActiveConnector(store, connectorId);
           if (inspected.status === "active") {
@@ -1112,25 +1130,6 @@ export function createConnectorInstallService(options: {
             store,
             signal
           );
-        } else {
-          // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
-          try {
-            readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
-            }
-          }
-          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
-          if (existsSync(root)) {
-            throw new Error("Connector digest root already exists without a matching active record.");
-          }
         }
       }
       assertNoSymlinkComponents(dataDir);
@@ -1146,6 +1145,7 @@ export function createConnectorInstallService(options: {
         dataDir,
         entry,
         existing,
+        replaceOrphan: rootExists && existing === null,
         installArtifact: options.installArtifact ?? installPinnedArtifact,
         registerManifest: options.registerManifest,
         root,
