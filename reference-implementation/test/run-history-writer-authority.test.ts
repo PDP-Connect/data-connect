@@ -33,6 +33,7 @@ interface RunHistoryTestRow {
   readonly connector_id: string;
   readonly connector_instance_id: string;
   readonly facts_json: string | null;
+  readonly failure_reason: string | null;
   readonly run_id: string;
   readonly scheduler_managed: 0 | 1;
   readonly started_at: string;
@@ -209,6 +210,9 @@ test("a runtime-authored terminal failure stores its failure_message as the conn
     const row = readRunHistoryRow(runId);
     assert.equal(row?.status, "failed");
     assert.equal(row?.terminal_reason, "connector_protocol_violation");
+    // The product read model surfaces `failure_reason`; it must carry the
+    // runtime's terminal explanation, not stay null.
+    assert.equal(row?.failure_reason, failureMessage);
     assert.ok(row?.connector_error_json, "a terminal failure must not be stored with an empty error");
     assert.deepEqual(JSON.parse(row?.connector_error_json ?? "null"), {
       code: null,
@@ -218,6 +222,267 @@ test("a runtime-authored terminal failure stores its failure_message as the conn
     });
   } finally {
     closeDb();
+  }
+});
+
+// failure_message/failure_origin are failure semantics. A succeeded terminal
+// event that carries them (a stale or misrouted payload) must not leave a
+// failure reason or runtime error on a succeeded row, whether the row was
+// finalized from running or inserted by the missing-start fallback.
+const RUNTIME_FAILURE_DATA = {
+  failure_message: "stale runtime failure",
+  failure_origin: "runtime",
+  reason: "connector_protocol_violation",
+  runtime_failure: { code: "runtime_code", retryable: true },
+};
+
+function runtimeFailurePayload(runId: string, connectorInstanceId: string, eventType: "run.completed" | "run.failed") {
+  const status = eventType === "run.completed" ? "succeeded" : "failed";
+  const base = terminalEvent(runId, connectorInstanceId, eventType, status);
+  return { ...base, data: { ...base.data, ...RUNTIME_FAILURE_DATA } };
+}
+
+// run.progress_reported and run.batch_ingested merge into a running row only.
+// The status='running' fence must make them no-ops once the terminal event has
+// finalized the row, so a late in-flight event never rewrites final facts.
+function inFlightEvent(
+  runId: string,
+  connectorInstanceId: string,
+  eventType: "run.batch_ingested" | "run.progress_reported",
+  suffix: string,
+  data: Record<string, unknown>
+) {
+  return {
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: {
+      connection_id: connectorInstanceId,
+      connector_instance_id: connectorInstanceId,
+      source: { id: CONNECTOR_ID, kind: "connector" },
+      ...data,
+    },
+    event_id: `evt_${runId}_${suffix}`,
+    event_type: eventType,
+    object_id: runId,
+    object_type: "run",
+    run_id: runId,
+    status: eventType === "run.batch_ingested" ? "succeeded" : "in_progress",
+  };
+}
+
+interface MergeFenceRow {
+  readonly facts: Record<string, unknown>;
+  readonly recordsEmitted: number;
+  readonly status: string;
+}
+
+async function assertInFlightMergeFence(readRow: (runId: string) => Promise<MergeFenceRow | undefined>) {
+  const runId = "run_merge_fence";
+  const cin = "cin_merge_fence";
+  await emitSpineEvent(startedEvent(runId, cin));
+  await emitSpineEvent(
+    inFlightEvent(runId, cin, "run.progress_reported", "p1", { collection_rate: { per_minute: 4 } })
+  );
+  await emitSpineEvent(inFlightEvent(runId, cin, "run.batch_ingested", "b1", { records_emitted: 5 }));
+  const running = await readRow(runId);
+  assert.equal(running?.status, "running");
+  assert.equal(running?.recordsEmitted, 5, "a batch merges records_emitted while running");
+  assert.deepEqual(running?.facts, { collection_rate: { per_minute: 4 }, records_emitted: 5 });
+
+  await emitSpineEvent({
+    ...terminalEvent(runId, cin, "run.completed", "succeeded"),
+    data: {
+      connection_id: cin,
+      connector_instance_id: cin,
+      records_emitted: 7,
+      source: { id: CONNECTOR_ID, kind: "connector" },
+    },
+  });
+  const finalized = await readRow(runId);
+  assert.equal(finalized?.status, "succeeded");
+  assert.equal(finalized?.recordsEmitted, 7);
+  assert.deepEqual(finalized?.facts, { records_emitted: 7 });
+
+  await emitSpineEvent(
+    inFlightEvent(runId, cin, "run.progress_reported", "p2", { collection_rate: { per_minute: 9 } })
+  );
+  await emitSpineEvent(inFlightEvent(runId, cin, "run.batch_ingested", "b2", { records_emitted: 99 }));
+  assert.deepEqual(await readRow(runId), finalized, "late progress and batch events do not change a finalized row");
+}
+
+// A non-finite terminal records_emitted is stored as 0, the same as an absent
+// one, on both the running-row finalize and the missing-start insert.
+async function assertNonFiniteTerminalRecordsEmitted(readRow: (runId: string) => Promise<MergeFenceRow | undefined>) {
+  const cases = [
+    { recordsEmitted: Number.NaN, runId: "run_nan_running", started: true },
+    { recordsEmitted: Number.POSITIVE_INFINITY, runId: "run_inf_running", started: true },
+    { recordsEmitted: Number.NaN, runId: "run_nan_insert", started: false },
+    { recordsEmitted: Number.POSITIVE_INFINITY, runId: "run_inf_insert", started: false },
+  ];
+  for (const testCase of cases) {
+    const cin = `cin_${testCase.runId}`;
+    if (testCase.started) {
+      // biome-ignore lint/performance/noAwaitInLoops: each case proves one write path in order.
+      await emitSpineEvent(startedEvent(testCase.runId, cin));
+    }
+    const base = terminalEvent(testCase.runId, cin, "run.failed", "failed");
+    await emitSpineEvent({ ...base, data: { ...base.data, records_emitted: testCase.recordsEmitted } });
+    const row = await readRow(testCase.runId);
+    assert.equal(row?.status, "failed", testCase.runId);
+    assert.equal(row?.recordsEmitted, 0, testCase.runId);
+  }
+}
+
+function readSqliteMergeFenceRow(runId: string): Promise<MergeFenceRow | undefined> {
+  const row = getDb()
+    .prepare("SELECT status, records_emitted, facts_json FROM run_history WHERE run_id = ?")
+    .get(runId) as { facts_json: string | null; records_emitted: number; status: string } | undefined;
+  return Promise.resolve(
+    row && {
+      facts: JSON.parse(row.facts_json ?? "{}") as Record<string, unknown>,
+      recordsEmitted: row.records_emitted,
+      status: row.status,
+    }
+  );
+}
+
+interface PostgresMergeFenceRow {
+  readonly facts_json: Record<string, unknown> | null;
+  readonly records_emitted: number | string;
+  readonly status: string;
+}
+
+async function readPostgresMergeFenceRow(runId: string): Promise<MergeFenceRow | undefined> {
+  const row = (
+    await postgresQuery<PostgresMergeFenceRow>(
+      "SELECT status, records_emitted, facts_json FROM run_history WHERE run_id = $1",
+      [runId]
+    )
+  ).rows[0];
+  return row && { facts: row.facts_json ?? {}, recordsEmitted: Number(row.records_emitted), status: row.status };
+}
+
+async function withPostgresRunHistory(body: () => Promise<void>) {
+  assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
+  await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+  try {
+    await body();
+  } finally {
+    await postgresQuery("DELETE FROM spine_events WHERE actor_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await postgresQuery("DELETE FROM run_history WHERE connector_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await closePostgresStorage();
+  }
+}
+
+test("SQLite: progress and batch events merge while running and are fenced off after finalize", async () => {
+  initDb(makeTemporaryDbPath("pdpp-run-history-writer-merge-fence-"));
+  try {
+    await assertInFlightMergeFence(readSqliteMergeFenceRow);
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: progress and batch events merge while running and are fenced off after finalize", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgresRunHistory(() => assertInFlightMergeFence(readPostgresMergeFenceRow));
+});
+
+test("SQLite: a NaN or Infinity terminal records_emitted is stored as 0", async () => {
+  initDb(makeTemporaryDbPath("pdpp-run-history-writer-nonfinite-records-"));
+  try {
+    await assertNonFiniteTerminalRecordsEmitted(readSqliteMergeFenceRow);
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a NaN or Infinity terminal records_emitted is stored as 0", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgresRunHistory(() => assertNonFiniteTerminalRecordsEmitted(readPostgresMergeFenceRow));
+});
+
+test("SQLite: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", async () => {
+  const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-succeeded-gate-");
+  initDb(dbPath);
+  try {
+    await emitSpineEvent(startedEvent("run_ok_running", "cin_ok_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_ok_running", "cin_ok_running", "run.completed"));
+    await emitSpineEvent(runtimeFailurePayload("run_ok_insert", "cin_ok_insert", "run.completed"));
+    for (const runId of ["run_ok_running", "run_ok_insert"]) {
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "succeeded", runId);
+      assert.equal(row?.failure_reason, null, runId);
+      assert.equal(row?.connector_error_json, null, runId);
+    }
+
+    // The identical payload as run.failed keeps the exact reason and error.
+    await emitSpineEvent(startedEvent("run_bad_running", "cin_bad_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_bad_running", "cin_bad_running", "run.failed"));
+    await emitSpineEvent(runtimeFailurePayload("run_bad_insert", "cin_bad_insert", "run.failed"));
+    for (const runId of ["run_bad_running", "run_bad_insert"]) {
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "failed", runId);
+      assert.equal(row?.failure_reason, "stale runtime failure", runId);
+      assert.equal(row?.terminal_reason, "connector_protocol_violation", runId);
+      assert.deepEqual(
+        JSON.parse(row?.connector_error_json ?? "null"),
+        { code: "runtime_code", message: "stale runtime failure", origin: "runtime", retryable: true },
+        runId
+      );
+    }
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
+  await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+  try {
+    await emitSpineEvent(startedEvent("run_pg_ok_running", "cin_pg_ok_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_ok_running", "cin_pg_ok_running", "run.completed"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_ok_insert", "cin_pg_ok_insert", "run.completed"));
+    await emitSpineEvent(startedEvent("run_pg_bad_running", "cin_pg_bad_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_bad_running", "cin_pg_bad_running", "run.failed"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_bad_insert", "cin_pg_bad_insert", "run.failed"));
+    const read = async (runId: string) =>
+      (
+        await postgresQuery<{ connector_error_json: unknown; failure_reason: string | null; status: string }>(
+          "SELECT status, failure_reason, connector_error_json FROM run_history WHERE run_id = $1",
+          [runId]
+        )
+      ).rows[0];
+    const okIds = ["run_pg_ok_running", "run_pg_ok_insert"];
+    const okRows = await Promise.all(okIds.map(read));
+    for (const [i, runId] of okIds.entries()) {
+      const row = okRows[i];
+      assert.equal(row?.status, "succeeded", runId);
+      assert.equal(row?.failure_reason, null, runId);
+      assert.equal(row?.connector_error_json, null, runId);
+    }
+    const badIds = ["run_pg_bad_running", "run_pg_bad_insert"];
+    const badRows = await Promise.all(badIds.map(read));
+    for (const [i, runId] of badIds.entries()) {
+      const row = badRows[i];
+      assert.equal(row?.status, "failed", runId);
+      assert.equal(row?.failure_reason, "stale runtime failure", runId);
+      assert.deepEqual(
+        typeof row?.connector_error_json === "string"
+          ? JSON.parse(row.connector_error_json)
+          : row?.connector_error_json,
+        { code: "runtime_code", message: "stale runtime failure", origin: "runtime", retryable: true },
+        runId
+      );
+    }
+  } finally {
+    await postgresQuery("DELETE FROM spine_events WHERE actor_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await postgresQuery("DELETE FROM run_history WHERE connector_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await closePostgresStorage();
   }
 });
 
@@ -460,6 +725,67 @@ test("scheduler.appendRunHistory upserts scheduler-only enrichment onto the spin
     closeDb();
   }
 });
+
+for (const order of ["scheduler first", "runtime first"] as const) {
+  test("scheduler failure classification wins when " + order, async () => {
+    const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-failure-order-");
+    initDb(dbPath);
+    try {
+      const runId = "run_failure_order";
+      const connectorInstanceId = "cin_failure_order";
+      const failureReason = "The scheduler timed out while waiting for completion.";
+      const connectorError = { code: "scheduler_timeout", message: failureReason, retryable: true };
+      const runtimeMessage = "The runtime reported a different terminal failure.";
+      const store = createSqliteSchedulerStore();
+      await emitSpineEvent(startedEvent(runId, connectorInstanceId, "scheduled"));
+
+      const schedulerFailed = () => {
+        const entry = {
+          attempt: 2,
+          checkpointSummary: { streams: 0 },
+          completedAt: "2026-04-29T04:00:00.000Z",
+          connectorError,
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId,
+          failureReason,
+          knownGaps: [],
+          recordsEmitted: 0,
+          runId,
+          source: { id: CONNECTOR_ID, kind: "connector" as const },
+          startedAt: "2026-04-29T03:59:00.000Z",
+          status: "failed" as const,
+        };
+        return store.appendRunHistory(entry);
+      };
+      const runtimeFailed = () => {
+        const event = terminalEvent(runId, connectorInstanceId, "run.failed", "failed");
+        return emitSpineEvent({
+          ...event,
+          data: { ...event.data, failure_origin: "runtime", failure_message: runtimeMessage },
+        });
+      };
+
+      if (order === "scheduler first") {
+        await schedulerFailed();
+        assert.equal(readRunHistoryRow(runId)?.failure_reason, failureReason);
+        await runtimeFailed();
+      } else {
+        await runtimeFailed();
+        assert.equal(readRunHistoryRow(runId)?.failure_reason, runtimeMessage);
+        await schedulerFailed();
+      }
+
+      assert.equal(countRunHistoryRows(runId), 1);
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "failed");
+      assert.equal(row?.scheduler_managed, 1);
+      assert.equal(row?.failure_reason, failureReason);
+      assert.deepEqual(JSON.parse(row?.connector_error_json ?? "null"), connectorError);
+    } finally {
+      closeDb();
+    }
+  });
+}
 
 test("listRunHistory (scheduler cadence hydration) stays scoped to scheduler_managed rows", async () => {
   const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-scoped-list-");
