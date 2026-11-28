@@ -44,8 +44,9 @@ export interface RecordsCountMeta {
 
 /**
  * One time bucket from the `group_by_time` aggregate. `key` is the ISO
- * bucket-start (`YYYY-MM-DD` for day/week/month, `…THH:MM` for hour) or null.
- * `count` is the TRUE total over the filtered, grant-scoped corpus.
+ * bucket-start (`YYYY-MM-DD` for day/week/month, `…THH:MM:SS±HH:MM` with the
+ * bucket's UTC offset for hour) or null. `count` is the TRUE total over the
+ * filtered, grant-scoped corpus.
  */
 export interface AggregateTimeBucket {
   count: number;

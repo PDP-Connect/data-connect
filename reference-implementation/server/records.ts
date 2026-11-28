@@ -3139,10 +3139,13 @@ function coerceStrictOrNull<T>(parsed: T | null, strict: boolean, message: strin
 // using `Intl.DateTimeFormat` so day/week/month/quarter/year boundaries
 // respect the zone and DST without a SQL round trip. Bucket keys are ISO
 // strings: a date (`YYYY-MM-DD`) for day/week/month/quarter/year, and a
-// minute/hour timestamp (`YYYY-MM-DDTHH:MM:00Z`-style, zone-qualified) for the
-// sub-day units. See openspec/changes/add-aggregate-time-buckets-and-distinct.
+// minute/hour timestamp with seconds and the bucket's UTC offset
+// (`YYYY-MM-DDTHH:MM:00-05:00`) for the sub-day units. The offset keeps the
+// repeated wall-clock hour of a DST fall-back in two distinct buckets (the same
+// disambiguation as Elasticsearch `key_as_string` and Postgres `timestamptz`).
+// See openspec/changes/add-aggregate-time-buckets-and-distinct.
 
-function resolveAggregateTimeZone(rawZone: unknown): string {
+export function resolveAggregateTimeZone(rawZone: unknown): string {
   if (!rawZone) {
     return "UTC";
   }
@@ -3214,24 +3217,53 @@ function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
+// UTC offset (`+HH:MM` / `-HH:MM`) of `timeZone` at the instant `epochMs`,
+// derived from the zone's wall-clock parts so it needs no extra Intl surface.
+function zonedOffsetSuffix(epochMs: number, timeZone: string, parts = zonedParts(epochMs, timeZone)): string {
+  const { year, month, day, hour, minute, second } = parts;
+  const wallAsUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  const offsetMinutes = Math.round((wallAsUtcMs - Math.floor(epochMs / 1000) * 1000) / 60_000);
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const abs = Math.abs(offsetMinutes);
+  return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
 /**
  * Calendar-truncate the instant `value` to the start of its `granularity`
  * bucket in `timeZone`, returning a stable ISO key string. Returns `null`
  * when the value is null or unparseable so the caller can route it to the
  * single null bucket.
  */
-function bucketStartForGranularity(value: unknown, granularity: string, timeZone: string): string | null {
+export function bucketStartForGranularity(value: unknown, granularity: string, timeZone: string): string | null {
   const epochMs = parseDateValue(value);
   if (epochMs === null) {
     return null;
   }
-  const { year, month, day, hour, minute } = zonedParts(epochMs, timeZone);
+  const local = zonedParts(epochMs, timeZone);
+  const { year, month, day, hour, minute, second } = local;
+  const offsetSuffix = () => zonedOffsetSuffix(epochMs, timeZone, local);
 
   switch (granularity) {
     case "minute":
-      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}`;
-    case "hour":
-      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:00`;
+      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:00${offsetSuffix()}`;
+    case "hour": {
+      const suffix = offsetSuffix();
+      const wholeSecond = Math.floor(epochMs / 1000);
+      let start = wholeSecond - minute * 60 - second;
+      if (zonedOffsetSuffix(start * 1000, timeZone) !== suffix) {
+        // A partial-hour transition can make HH:00 with this offset imaginary.
+        // Find where this offset actually starts between HH:00 and the record.
+        let end = wholeSecond;
+        while (end - start > 1) {
+          const middle = start + Math.floor((end - start) / 2);
+          if (zonedOffsetSuffix(middle * 1000, timeZone) === suffix) end = middle;
+          else start = middle;
+        }
+        const boundary = zonedParts(end * 1000, timeZone);
+        return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(boundary.minute)}:${pad2(boundary.second)}${suffix}`;
+      }
+      return `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:00:00${suffix}`;
+    }
     case "day":
       return `${year}-${pad2(month)}-${pad2(day)}`;
     case "week": {
@@ -7817,6 +7849,13 @@ function compareMergedBuckets(left: AggregateGroup, right: AggregateGroup, isSca
   }
   if (right.key === null) {
     return -1;
+  }
+  // Offset-qualified sub-day keys do not sort chronologically as strings (after a
+  // fall-back east of UTC the later hour carries the smaller offset), so order
+  // time buckets by instant; date-only keys parse as UTC midnight and keep order.
+  const timeCmp = Date.parse(String(left.key)) - Date.parse(String(right.key));
+  if (timeCmp !== 0 && !Number.isNaN(timeCmp)) {
+    return timeCmp;
   }
   return JSON.stringify(left.key).localeCompare(JSON.stringify(right.key));
 }
