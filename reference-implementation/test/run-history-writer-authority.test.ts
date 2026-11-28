@@ -242,6 +242,168 @@ function runtimeFailurePayload(runId: string, connectorInstanceId: string, event
   return { ...base, data: { ...base.data, ...RUNTIME_FAILURE_DATA } };
 }
 
+// run.progress_reported and run.batch_ingested merge into a running row only.
+// The status='running' fence must make them no-ops once the terminal event has
+// finalized the row, so a late in-flight event never rewrites final facts.
+function inFlightEvent(
+  runId: string,
+  connectorInstanceId: string,
+  eventType: "run.batch_ingested" | "run.progress_reported",
+  suffix: string,
+  data: Record<string, unknown>
+) {
+  return {
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: {
+      connection_id: connectorInstanceId,
+      connector_instance_id: connectorInstanceId,
+      source: { id: CONNECTOR_ID, kind: "connector" },
+      ...data,
+    },
+    event_id: `evt_${runId}_${suffix}`,
+    event_type: eventType,
+    object_id: runId,
+    object_type: "run",
+    run_id: runId,
+    status: eventType === "run.batch_ingested" ? "succeeded" : "in_progress",
+  };
+}
+
+interface MergeFenceRow {
+  readonly facts: Record<string, unknown>;
+  readonly recordsEmitted: number;
+  readonly status: string;
+}
+
+async function assertInFlightMergeFence(readRow: (runId: string) => Promise<MergeFenceRow | undefined>) {
+  const runId = "run_merge_fence";
+  const cin = "cin_merge_fence";
+  await emitSpineEvent(startedEvent(runId, cin));
+  await emitSpineEvent(
+    inFlightEvent(runId, cin, "run.progress_reported", "p1", { collection_rate: { per_minute: 4 } })
+  );
+  await emitSpineEvent(inFlightEvent(runId, cin, "run.batch_ingested", "b1", { records_emitted: 5 }));
+  const running = await readRow(runId);
+  assert.equal(running?.status, "running");
+  assert.equal(running?.recordsEmitted, 5, "a batch merges records_emitted while running");
+  assert.deepEqual(running?.facts, { collection_rate: { per_minute: 4 }, records_emitted: 5 });
+
+  await emitSpineEvent({
+    ...terminalEvent(runId, cin, "run.completed", "succeeded"),
+    data: {
+      connection_id: cin,
+      connector_instance_id: cin,
+      records_emitted: 7,
+      source: { id: CONNECTOR_ID, kind: "connector" },
+    },
+  });
+  const finalized = await readRow(runId);
+  assert.equal(finalized?.status, "succeeded");
+  assert.equal(finalized?.recordsEmitted, 7);
+  assert.deepEqual(finalized?.facts, { records_emitted: 7 });
+
+  await emitSpineEvent(
+    inFlightEvent(runId, cin, "run.progress_reported", "p2", { collection_rate: { per_minute: 9 } })
+  );
+  await emitSpineEvent(inFlightEvent(runId, cin, "run.batch_ingested", "b2", { records_emitted: 99 }));
+  assert.deepEqual(await readRow(runId), finalized, "late progress and batch events do not change a finalized row");
+}
+
+// A non-finite terminal records_emitted is stored as 0, the same as an absent
+// one, on both the running-row finalize and the missing-start insert.
+async function assertNonFiniteTerminalRecordsEmitted(readRow: (runId: string) => Promise<MergeFenceRow | undefined>) {
+  const cases = [
+    { recordsEmitted: Number.NaN, runId: "run_nan_running", started: true },
+    { recordsEmitted: Number.POSITIVE_INFINITY, runId: "run_inf_running", started: true },
+    { recordsEmitted: Number.NaN, runId: "run_nan_insert", started: false },
+    { recordsEmitted: Number.POSITIVE_INFINITY, runId: "run_inf_insert", started: false },
+  ];
+  for (const testCase of cases) {
+    const cin = `cin_${testCase.runId}`;
+    if (testCase.started) {
+      // biome-ignore lint/performance/noAwaitInLoops: each case proves one write path in order.
+      await emitSpineEvent(startedEvent(testCase.runId, cin));
+    }
+    const base = terminalEvent(testCase.runId, cin, "run.failed", "failed");
+    await emitSpineEvent({ ...base, data: { ...base.data, records_emitted: testCase.recordsEmitted } });
+    const row = await readRow(testCase.runId);
+    assert.equal(row?.status, "failed", testCase.runId);
+    assert.equal(row?.recordsEmitted, 0, testCase.runId);
+  }
+}
+
+function readSqliteMergeFenceRow(runId: string): Promise<MergeFenceRow | undefined> {
+  const row = getDb()
+    .prepare("SELECT status, records_emitted, facts_json FROM run_history WHERE run_id = ?")
+    .get(runId) as { facts_json: string | null; records_emitted: number; status: string } | undefined;
+  return Promise.resolve(
+    row && {
+      facts: JSON.parse(row.facts_json ?? "{}") as Record<string, unknown>,
+      recordsEmitted: row.records_emitted,
+      status: row.status,
+    }
+  );
+}
+
+interface PostgresMergeFenceRow {
+  readonly facts_json: Record<string, unknown> | null;
+  readonly records_emitted: number | string;
+  readonly status: string;
+}
+
+async function readPostgresMergeFenceRow(runId: string): Promise<MergeFenceRow | undefined> {
+  const row = (
+    await postgresQuery<PostgresMergeFenceRow>(
+      "SELECT status, records_emitted, facts_json FROM run_history WHERE run_id = $1",
+      [runId]
+    )
+  ).rows[0];
+  return row && { facts: row.facts_json ?? {}, recordsEmitted: Number(row.records_emitted), status: row.status };
+}
+
+async function withPostgresRunHistory(body: () => Promise<void>) {
+  assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
+  await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+  try {
+    await body();
+  } finally {
+    await postgresQuery("DELETE FROM spine_events WHERE actor_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await postgresQuery("DELETE FROM run_history WHERE connector_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await closePostgresStorage();
+  }
+}
+
+test("SQLite: progress and batch events merge while running and are fenced off after finalize", async () => {
+  initDb(makeTemporaryDbPath("pdpp-run-history-writer-merge-fence-"));
+  try {
+    await assertInFlightMergeFence(readSqliteMergeFenceRow);
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: progress and batch events merge while running and are fenced off after finalize", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgresRunHistory(() => assertInFlightMergeFence(readPostgresMergeFenceRow));
+});
+
+test("SQLite: a NaN or Infinity terminal records_emitted is stored as 0", async () => {
+  initDb(makeTemporaryDbPath("pdpp-run-history-writer-nonfinite-records-"));
+  try {
+    await assertNonFiniteTerminalRecordsEmitted(readSqliteMergeFenceRow);
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a NaN or Infinity terminal records_emitted is stored as 0", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgresRunHistory(() => assertNonFiniteTerminalRecordsEmitted(readPostgresMergeFenceRow));
+});
+
 test("SQLite: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", async () => {
   const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-succeeded-gate-");
   initDb(dbPath);

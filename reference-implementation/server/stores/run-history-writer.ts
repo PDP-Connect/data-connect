@@ -261,6 +261,13 @@ function batchFactsMergeJson(data: Record<string, unknown>): string | null {
     : null;
 }
 
+// The terminal write stores a number in a NOT NULL integer column. A NaN or
+// Infinity count is not a count, so it is stored as 0 like an absent one,
+// with the same finiteness guard the batch merge uses.
+function terminalRecordsEmitted(data: Record<string, unknown>): number {
+  return typeof data.records_emitted === "number" && Number.isFinite(data.records_emitted) ? data.records_emitted : 0;
+}
+
 type SqliteRunHistoryExecute = (
   query: Parameters<typeof exec>[0],
   params: Parameters<typeof exec>[1]
@@ -341,7 +348,7 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
   const terminalReason = typeof event.data.reason === "string" ? event.data.reason : null;
   const failureReason = isSucceeded ? null : failureReasonFromTerminalData(event.data);
   const factsJson = factsJsonFromTerminalData(event.data);
-  const recordsEmitted = typeof event.data.records_emitted === "number" ? event.data.records_emitted : 0;
+  const recordsEmitted = terminalRecordsEmitted(event.data);
 
   const finalizeResult = execute(referenceQueries.controllerFinalizeRunHistory, [
     terminalStatus,
@@ -449,7 +456,7 @@ export async function writePostgresRunHistoryForSpineEvent(
   const terminalReason = typeof event.data.reason === "string" ? event.data.reason : null;
   const failureReason = isSucceeded ? null : failureReasonFromTerminalData(event.data);
   const factsJson = factsJsonFromTerminalData(event.data);
-  const recordsEmitted = typeof event.data.records_emitted === "number" ? event.data.records_emitted : 0;
+  const recordsEmitted = terminalRecordsEmitted(event.data);
 
   const finalizeResult = await client.query(
     `UPDATE run_history
