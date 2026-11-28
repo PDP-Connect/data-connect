@@ -76,7 +76,7 @@ test("bucketKeyForDisplayAt week snaps to Monday (UTC)", () => {
 
 test("bucketKeyForDisplayAt month/hour keys", () => {
   assert.equal(bucketKeyForDisplayAt("2026-05-03T10:00:00Z", "month"), "2026-05-01");
-  assert.equal(bucketKeyForDisplayAt("2026-05-03T10:45:00Z", "hour"), "2026-05-03T10:00");
+  assert.equal(bucketKeyForDisplayAt("2026-05-03T10:45:00Z", "hour"), "2026-05-03T10:00:00+00:00");
 });
 
 // ── bucket-count honesty (design §9: true totals, NOT loaded-only) ──────────
@@ -155,6 +155,68 @@ test("deriveBucketSeries drops the null bucket from the axis (no axis position) 
   );
   // The null bucket's 9 is NOT folded into the May 1 bar.
   assert.equal(series.total, 1);
+});
+
+// ── hour buckets use the server's offset-bearing keys ───────────────────────
+
+function hourSource(groups: Array<{ key: string | null; count: number }>): AggregateSource {
+  return { granularity: "hour", groups, ok: true };
+}
+
+test("deriveBucketSeries keeps both America/New_York fall-back hours and zero-fills hour gaps", () => {
+  const series = deriveBucketSeries(
+    [
+      hourSource([
+        { count: 2, key: "2024-11-03T00:00:00-04:00" },
+        { count: 3, key: "2024-11-03T01:00:00-04:00" },
+        { count: 4, key: "2024-11-03T01:00:00-05:00" },
+        { count: 1, key: "2024-11-03T04:00:00-05:00" },
+      ]),
+    ],
+    "hour"
+  );
+  assert.deepEqual(
+    series.buckets.map((b) => [new Date(b.startMs).toISOString(), b.count]),
+    [
+      ["2024-11-03T04:00:00.000Z", 2],
+      ["2024-11-03T05:00:00.000Z", 3],
+      ["2024-11-03T06:00:00.000Z", 4],
+      ["2024-11-03T07:00:00.000Z", 0],
+      ["2024-11-03T08:00:00.000Z", 0],
+      ["2024-11-03T09:00:00.000Z", 1],
+    ]
+  );
+  const byKey = new Map(series.buckets.map((b) => [b.key, b.count]));
+  assert.equal(byKey.get("2024-11-03T01:00:00-04:00"), 3);
+  assert.equal(byKey.get("2024-11-03T01:00:00-05:00"), 4);
+  for (const b of series.buckets) {
+    assert.equal(Date.parse(b.key), b.startMs, `key ${b.key} names its start instant`);
+    assert.equal(b.endMs - b.startMs, 3_600_000);
+  }
+  assert.equal(series.total, 10);
+});
+
+test("deriveBucketSeries unions hour counts by instant, not by key string", () => {
+  const series = deriveBucketSeries(
+    [
+      hourSource([{ count: 5, key: "2026-05-03T10:00:00+00:00" }]),
+      hourSource([
+        { count: 2, key: "2026-05-03T06:00:00-04:00" },
+        { count: 1, key: "2026-05-03T13:00:00+00:00" },
+      ]),
+    ],
+    "hour"
+  );
+  assert.deepEqual(
+    series.buckets.map((b) => [new Date(b.startMs).toISOString(), b.count]),
+    [
+      ["2026-05-03T10:00:00.000Z", 7],
+      ["2026-05-03T11:00:00.000Z", 0],
+      ["2026-05-03T12:00:00.000Z", 0],
+      ["2026-05-03T13:00:00.000Z", 1],
+    ]
+  );
+  assert.equal(series.total, 8);
 });
 
 // ── partial source (design §2 / §4.1) ───────────────────────────────────────

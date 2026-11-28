@@ -147,7 +147,10 @@ export function bucketKeyForDisplayAt(
   return bucketKeyForMs(ms, granularity);
 }
 
-/** The bucket KEY for a UTC instant (ms) at `granularity`. */
+/**
+ * The bucket KEY for a UTC instant (ms) at `granularity`. Hour keys use the
+ * server's UTC form (`…THH:00:00+00:00`).
+ */
 export function bucketKeyForMs(ms: number, granularity: BucketGranularity): string {
   const d = new Date(ms);
   const y = d.getUTCFullYear();
@@ -155,7 +158,7 @@ export function bucketKeyForMs(ms: number, granularity: BucketGranularity): stri
   const day = d.getUTCDate();
   switch (granularity) {
     case "hour":
-      return `${iso10(ms)}T${pad2(d.getUTCHours())}:00`;
+      return `${iso10(ms)}T${pad2(d.getUTCHours())}:00:00+00:00`;
     case "day":
       return iso10(ms);
     case "week": {
@@ -184,7 +187,8 @@ export function bucketKeyForMs(ms: number, granularity: BucketGranularity): stri
 /** Inclusive [startMs, endMs) UTC bounds of the bucket whose start key is `key`. */
 export function bucketBounds(key: string, granularity: BucketGranularity): { startMs: number; endMs: number } {
   if (granularity === "hour") {
-    const startMs = Date.parse(`${key}:00Z`);
+    // Hour keys carry their own offset (`…THH:MM:SS±HH:MM`), so they parse as-is.
+    const startMs = Date.parse(key);
     return { endMs: startMs + 3_600_000, startMs };
   }
   const startMs = Date.parse(`${key}T00:00:00Z`);
@@ -206,12 +210,6 @@ export function bucketBounds(key: string, granularity: BucketGranularity): { sta
     default:
       return { endMs: startMs + MS_PER_DAY, startMs };
   }
-}
-
-/** The key of the bucket immediately AFTER `key` (used to zero-fill the gaps). */
-function nextBucketKey(key: string, granularity: BucketGranularity): string {
-  const { endMs } = bucketBounds(key, granularity);
-  return bucketKeyForMs(endMs, granularity);
 }
 
 function iso10(ms: number): string {
@@ -241,22 +239,27 @@ function pad2(n: number): string {
  * on a time axis), but it is NOT silently absorbed into a neighbour.
  */
 export function deriveBucketSeries(sources: readonly AggregateSource[], granularity: BucketGranularity): BucketSeries {
-  const { counts, partial } = accumulateSourceCounts(sources, granularity);
-  const { buckets, total } = zeroFillBuckets(counts, granularity);
+  const { present, partial } = accumulateSourceCounts(sources, granularity);
+  const { buckets, total } = zeroFillBuckets(present, granularity);
   return { buckets, granularity, partial, total };
 }
 
 /**
- * Fan the per-stream aggregate group lists into ONE keyed count map (the union
- * total per bucket). A not-ok source contributes nothing (we never fabricate); a
+ * Fan the per-stream aggregate group lists into ONE count map keyed by bucket
+ * start instant (the union total per bucket). Keying by instant, not by key
+ * string, keeps a repeated DST fall-back hour (`01:00:00-04:00` and
+ * `01:00:00-05:00`) as two buckets and lets equal instants written with
+ * different offsets union. The first server key seen for an instant is kept.
+ * A not-ok source contributes nothing (we never fabricate); a
  * granularity-mismatched source is skipped (cannot union honestly). Either makes
- * the series `partial`. The null bucket is excluded (no axis position).
+ * the series `partial`. The null or unparseable bucket is excluded (no axis
+ * position).
  */
 function accumulateSourceCounts(
   sources: readonly AggregateSource[],
   granularity: BucketGranularity
-): { counts: Map<string, number>; partial: boolean } {
-  const counts = new Map<string, number>();
+): { present: Map<number, Bucket>; partial: boolean } {
+  const present = new Map<number, Bucket>();
   let partial = false;
   for (const source of sources) {
     if (!source.ok || source.granularity !== granularity) {
@@ -264,43 +267,64 @@ function accumulateSourceCounts(
       continue;
     }
     for (const group of source.groups) {
-      if (group.key !== null) {
-        counts.set(group.key, (counts.get(group.key) ?? 0) + group.count);
+      if (group.key === null) {
+        continue;
+      }
+      const { startMs, endMs } = bucketBounds(group.key, granularity);
+      if (Number.isNaN(startMs)) {
+        continue;
+      }
+      const existing = present.get(startMs);
+      if (existing) {
+        existing.count += group.count;
+      } else {
+        present.set(startMs, { count: group.count, endMs, key: group.key, startMs });
       }
     }
   }
-  return { counts, partial };
+  return { present, partial };
 }
 
 /**
  * Materialize a contiguous, zero-filled bucket series from earliest to latest
- * present key (empty buckets present with count 0 — never omitted; design §4.2).
+ * present bucket (empty buckets present with count 0 — never omitted; design
+ * §4.2). Gaps are filled by instant from each present bucket's end, so filling
+ * never needs to rebuild the server's offset-bearing key.
  */
 function zeroFillBuckets(
-  counts: ReadonlyMap<string, number>,
+  present: ReadonlyMap<number, Bucket>,
   granularity: BucketGranularity
 ): { buckets: Bucket[]; total: number } {
-  const presentKeys = [...counts.keys()].sort();
+  const starts = [...present.keys()].sort((a, b) => a - b);
   const buckets: Bucket[] = [];
   let total = 0;
-  if (presentKeys.length === 0) {
-    return { buckets, total };
-  }
-  const lastKey = presentKeys.at(-1) as string;
-  let key = presentKeys[0] as string;
-  // Guard against an unbounded loop on a malformed key.
+  // Guard against an unbounded series.
   const guardMax = 10_000;
-  for (let guard = 0; guard < guardMax; guard += 1) {
-    const { startMs, endMs } = bucketBounds(key, granularity);
-    const count = counts.get(key) ?? 0;
-    total += count;
-    buckets.push({ count, endMs, key, startMs });
-    if (key === lastKey) {
+  for (let i = 0; i < starts.length && buckets.length < guardMax; i += 1) {
+    const bucket = present.get(starts[i] as number) as Bucket;
+    buckets.push(bucket);
+    total += bucket.count;
+    const nextStart = starts[i + 1];
+    if (nextStart === undefined) {
       break;
     }
-    key = nextBucketKey(key, granularity);
+    let gap = emptyBucketAt(bucket.endMs, granularity);
+    while (gap.endMs <= nextStart && buckets.length < guardMax) {
+      buckets.push(gap);
+      gap = emptyBucketAt(gap.endMs, granularity);
+    }
   }
   return { buckets, total };
+}
+
+/** An empty bucket that starts at the instant `startMs`. */
+function emptyBucketAt(startMs: number, granularity: BucketGranularity): Bucket {
+  const key =
+    granularity === "hour"
+      ? `${new Date(startMs).toISOString().slice(0, 19)}+00:00`
+      : bucketKeyForMs(startMs, granularity);
+  const { endMs } = bucketBounds(key, granularity);
+  return { count: 0, endMs, key, startMs };
 }
 
 // ── Brush ↔ canonical (since, until) round-trip (design §4.4) ────────────────
