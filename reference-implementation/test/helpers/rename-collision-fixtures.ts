@@ -46,8 +46,12 @@ export async function assertCollision(query: Query, table: string): Promise<void
   }
 }
 
-export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix", "deleted-null-pointer", "owned-binding-json", "orphan", "occupied-instance-suffix", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance"] as const;
+export const bindingScenarios = ["cross-device", "null-pointer", "occupied-suffix", "deleted-null-pointer", "owned-binding-json", "orphan", "occupied-instance-suffix", "tombstone-without-source", "deleted-cross-device", "deleted-occupied-instance", "deleted-shared-two-devices", "deleted-occupied-tombstone-suffix"] as const;
 export async function seedBindingScenario(query: Query, scenario: string, postgres = false): Promise<void> {
+  if (scenario === "deleted-shared-two-devices" || scenario === "deleted-occupied-tombstone-suffix") {
+    await seedTombstoneShape(query, "shared", scenario === "deleted-shared-two-devices" ? 2 : 1, scenario === "deleted-occupied-tombstone-suffix", postgres);
+    return;
+  }
   for (const device of ["d1", "d2"]) {
     await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('${device}', 'owner_local', '${device}', '${now}', '${now}')`);
   }
@@ -87,6 +91,15 @@ export async function seedBindingScenario(query: Query, scenario: string, postgr
 }
 
 export async function assertBindingScenario(query: Query, scenario: string): Promise<void> {
+  if (scenario === "deleted-shared-two-devices" || scenario === "deleted-occupied-tombstone-suffix") {
+    const sources = await query("SELECT * FROM device_source_instances WHERE connector_instance_id IS NULL ORDER BY source_instance_id");
+    assert.equal(sources.length, scenario === "deleted-shared-two-devices" ? 2 : 1);
+    assert.ok(sources.every(row => row.local_binding_id === `binding-a#renamed-from:claude_code${scenario === "deleted-occupied-tombstone-suffix" ? ":2" : ""}`));
+    assert.equal((await query("SELECT * FROM connector_instances")).length, 1);
+    const tombstones = await query("SELECT * FROM connector_instance_tombstones");
+    assert.ok(sources.every(source => tombstones.some(row => row.source_binding_key === key(String(source.local_binding_id)))));
+    return;
+  }
   const rows = await query("SELECT * FROM device_source_instances WHERE source_instance_id IN ('src_old', 'src_new') ORDER BY source_instance_id");
   if (scenario === "tombstone-without-source") {
     assert.equal((await query("SELECT * FROM connector_instances")).length, 1);
@@ -116,6 +129,31 @@ export async function assertBindingScenario(query: Query, scenario: string): Pro
   assert.equal(instances.find(row => row.connector_instance_id === "inst_old")?.source_binding_key, key(oldName));
   assert.notEqual(key(oldName), key("binding-a"));
   assert.deepEqual((await query("SELECT connector_instance_id FROM records ORDER BY connector_instance_id")).map(row => row.connector_instance_id), ["inst_new", "inst_old"]);
+}
+
+// A tombstone is owner/binding scoped, not device scoped. Distinct per-device
+// tombstones therefore require distinct owners; shared exercises one owner's devices.
+export async function seedTombstoneShape(query: Query, tombstones: "zero" | "shared" | "per-device", devices: number, occupied: boolean, postgres: boolean) {
+  await seedBindingScenario(query, "null-pointer", postgres);
+  await query("UPDATE device_source_instances SET device_id = 'd2' WHERE source_instance_id = 'src_new'");
+  if (tombstones !== "zero") {
+    await query("DELETE FROM records WHERE connector_instance_id = 'inst_old'");
+    await query("DELETE FROM connector_instances WHERE connector_instance_id = 'inst_old'");
+    await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_old', 'owner_local', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
+  }
+  if (devices === 2) {
+    const owner = tombstones === "shared" ? "owner_local" : "owner_second";
+    await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('d3', '${owner}', 'd3', '${now}', '${now}')`);
+    await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at) VALUES ('src_second', 'd3', 'claude_code', NULL, 'binding-a', '${now}', '${now}')`);
+    if (tombstones === "per-device") {
+      await query(`INSERT INTO connector_instance_tombstones VALUES ('deleted_second', '${owner}', 'claude_code', 'local_device', '${key("binding-a")}', '${now}')`);
+    }
+    if (tombstones !== "shared") {
+      await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second', '${owner}', 'claude-code', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+      if (tombstones === "zero") await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('inst_second_old', '${owner}', 'claude_code', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+    }
+  }
+  if (occupied) await query(`INSERT INTO connector_instance_tombstones VALUES ('occupied_tombstone', 'owner_local', 'claude_code', 'local_device', '${key("binding-a#renamed-from:claude_code")}', '${now}')`);
 }
 
 export const observationScenarios = ["observation-replay", "observation-conflict"] as const;

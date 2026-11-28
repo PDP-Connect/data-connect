@@ -98,7 +98,7 @@ if (POSTGRES_URL) {
           else if ((observationScenarios as readonly string[]).includes(scenario)) await assertObservationScenario(query, scenario);
           else await assertBindingScenario(query, scenario);
           if (scenario === "acquisition_batches") assert.equal((await createPostgresAcquisitionBatchStore().findByArtifactHash("owner_local", "claude-code", "same-digest"))?.batchId, "batch_new");
-          const state = JSON.stringify(await query(`SELECT * FROM ${(collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"}`));
+          const state = JSON.stringify(await query(`SELECT * FROM ${(observationScenarios as readonly string[]).includes(scenario) ? "connector_observation_runs" : (collisionTables as readonly string[]).includes(scenario) ? scenario : "device_source_instances"} ORDER BY 1, 2, 3`));
           if (snapshot) assert.equal(state, snapshot);
           snapshot = state;
         }

@@ -159,11 +159,26 @@ function collisionWrites(
     typeof instance.source_binding_json === "string"
       ? JSON.parse(instance.source_binding_json)
       : (instance.source_binding_json as Row);
+  const originalTombstones = old("connector_instance_tombstones").map(row => ({ ...row }));
+  // Reserve original and planned bindings together, including deleted bindings.
+  // Device bindings use the same owner/hash namespace as local-device instances.
+  const occupancyKey = (subject: unknown, kind: unknown, key: unknown) => JSON.stringify([subject, kind, key]);
+  const occupied = new Set([
+    ...instances, ...rows("connector_instance_tombstones"),
+    ...sources.map(source => ({ owner_subject_id: owner(source), source_kind: "local_device", source_binding_key: sourceKey(source.local_binding_id) })),
+  ].map(row => occupancyKey(row.owner_subject_id, row.source_kind, row.source_binding_key)));
+  const reserveName = (base: string, subject: unknown, kind: unknown) => {
+    const key = (candidate: string) => occupancyKey(subject, kind, kind === "local_device" ? sourceKey(candidate) : candidate);
+    const name = free(base, candidate => occupied.has(key(candidate)));
+    occupied.add(key(name));
+    return name;
+  };
   const moveTombstones = (subject: unknown, from: unknown, to: string) => {
-    for (const tombstone of old("connector_instance_tombstones")) {
+    for (const tombstone of originalTombstones) {
       if (tombstone.owner_subject_id === subject && tombstone.source_kind === "local_device" &&
           tombstone.source_binding_key === from) {
-        update("connector_instance_tombstones", "connector_instance_id", tombstone, { source_binding_key: to });
+        const row = rows("connector_instance_tombstones").find(row => row.connector_instance_id === tombstone.connector_instance_id)!;
+        update("connector_instance_tombstones", "connector_instance_id", row, { source_binding_key: to });
       }
     }
   };
@@ -196,22 +211,7 @@ function collisionWrites(
     const local = instance.source_kind === "local_device";
     const binding = bindingJson(instance);
     const base = String(associated[0]?.local_binding_id ?? binding?.local_binding_name ?? instance.source_binding_key);
-    const name = free(
-      base,
-      (candidate) =>
-        instances.some(
-          (n) =>
-            n !== instance &&
-            n.owner_subject_id === instance.owner_subject_id &&
-            n.source_kind === instance.source_kind &&
-            n.source_binding_key === (local ? sourceKey(candidate) : candidate),
-        ) ||
-        associated.some((source) =>
-          sources.some(
-            (n) => n !== source && n.device_id === source.device_id && n.local_binding_id === candidate,
-          ),
-        ),
-    );
+    const name = reserveName(base, instance.owner_subject_id, instance.source_kind);
     // The name suffix lives in local_binding_id; the instance stores its canonical hash.
     // Set both here, since Postgres may have already completed its canonicalization receipt.
     if (local) moveTombstones(instance.owner_subject_id, instance.source_binding_key, sourceKey(name));
@@ -223,17 +223,16 @@ function collisionWrites(
       update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
   }
   for (const source of old("device_source_instances")) {
-    const deletedBindingCollision = !source.connector_instance_id &&
-      old("connector_instance_tombstones").some(n => n.owner_subject_id === owner(source) && n.source_binding_key === sourceKey(source.local_binding_id)) &&
+    const tombstoned = !source.connector_instance_id && originalTombstones.some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id));
+    const deletedBindingCollision = tombstoned &&
       current("connector_instances").some(n => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(source.local_binding_id));
     if (!deletedBindingCollision && !current("device_source_instances").some((n) => equal(n, source, ["device_id", "local_binding_id"])))
       continue;
-    const name = free(String(source.local_binding_id), (candidate) =>
-      sources.some((n) => n.device_id === source.device_id && n.local_binding_id === candidate) ||
-      instances.some((n) => n.owner_subject_id === owner(source) && n.source_kind === "local_device" && n.source_binding_key === sourceKey(candidate)),
-    );
+    const name = reserveName(String(source.local_binding_id), owner(source), "local_device");
+    const associated = tombstoned ? old("device_source_instances").filter(n => !n.connector_instance_id && owner(n) === owner(source) && n.local_binding_id === source.local_binding_id) : [source];
     moveTombstones(owner(source), sourceKey(source.local_binding_id), sourceKey(name));
-    update("device_source_instances", "source_instance_id", source, { local_binding_id: name });
+    for (const deleted of associated)
+      update("device_source_instances", "source_instance_id", deleted, { local_binding_id: name });
   }
   // An owner deletion can outlive its source row. Keep that historical marker
   // distinct from a live current binding even when there is no source to remap.
@@ -243,9 +242,7 @@ function collisionWrites(
     if (!live || live.source_kind !== "local_device") continue;
     const binding = bindingJson(live);
     if (typeof binding?.local_binding_name !== "string") continue;
-    const name = free(binding.local_binding_name, candidate =>
-      [...instances, ...rows("connector_instance_tombstones")].some(n =>
-        n.owner_subject_id === tombstone.owner_subject_id && n.source_kind === "local_device" && n.source_binding_key === sourceKey(candidate)));
+    const name = reserveName(binding.local_binding_name, tombstone.owner_subject_id, "local_device");
     update("connector_instance_tombstones", "connector_instance_id", tombstone, { source_binding_key: sourceKey(name) });
   }
   for (const table of ["connector_instance_tombstones", "browser_surface_leases"]) {

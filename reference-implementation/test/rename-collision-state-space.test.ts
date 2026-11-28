@@ -10,20 +10,24 @@ import { bootstrapPostgresSchema, closePostgresStorage, getPostgresPool, initPos
 import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
 import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
-import { bindingScenarios, collisionTables, key, observationScenarios, seedBindingScenario, seedCollision, seedObservationScenario, type Query } from "./helpers/rename-collision-fixtures.ts";
+import { bindingScenarios, collisionTables, key, observationScenarios, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
 
 // Fixed seed, bounded product: independent old/new/both masks for each table,
 // with device pointers constrained to existing instances (or tombstoned sources).
 let randomState = 0x7701128;
 const next = () => (randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0);
+const tombstoneShapes = (["zero", "shared", "per-device"] as const).flatMap(tombstones => [1, 2].flatMap(devices => [false, true].map(occupied => ({ name: `tombstones-${tombstones}-devices-${devices}-occupied-${occupied}`, tombstones, devices, occupied, masks: null }))));
 const shapes = [
+  ...tombstoneShapes,
   ...[...bindingScenarios, ...collisionTables, ...observationScenarios].map(name => ({ name, masks: null as number[] | null })),
   ...Array.from({ length: 12 }, (_, i) => ({ name: `seed-7701128-${i}`, masks: Array.from({ length: 10 }, () => next() % 3 + 1) })),
 ];
 const json = (value: unknown): Record<string, unknown> => typeof value === "string" ? JSON.parse(value) : value as Record<string, unknown>;
 
 async function seed(query: Query, shape: typeof shapes[number], postgres: boolean) {
-  if (!shape.masks) {
+  if ("tombstones" in shape) {
+    await seedTombstoneShape(query, shape.tombstones, shape.devices, shape.occupied, postgres);
+  } else if (!shape.masks) {
     if ((collisionTables as readonly string[]).includes(shape.name)) {
       await seedCollision(query, shape.name);
       for (const id of ["old", "new"]) await query(`UPDATE connector_instances SET source_binding_json = '{"kind":"local_device","local_binding_name":"${id}"}' WHERE connector_instance_id = 'inst_${id}'`);
@@ -60,14 +64,26 @@ async function seed(query: Query, shape: typeof shapes[number], postgres: boolea
   // Seed the complete JSON produced by the real device binding writer.
   await query("UPDATE device_source_instances SET display_name = 'device'");
   const sources = await query("SELECT * FROM device_source_instances");
+  const instances = await query("SELECT * FROM connector_instances");
+  const devices = await query("SELECT * FROM device_exporters");
   for (const source of sources) {
-    const id = source.connector_instance_id ?? (source.source_instance_id === "src_old" ? "inst_old" : "inst_new");
+    const id = source.connector_instance_id ?? instances.find(instance => instance.connector_id === source.connector_id && instance.owner_subject_id === devices.find(device => device.device_id === source.device_id)?.owner_subject_id && instance.source_binding_key === key(String(source.local_binding_id)))?.connector_instance_id;
+    if (!id) continue;
     await query(`UPDATE connector_instances SET source_binding_json = '${JSON.stringify({ device_id: source.device_id, kind: "local_device", local_binding_name: source.local_binding_id, source_instance_id: source.source_instance_id })}' WHERE connector_instance_id = '${id}'`);
   }
 }
 
 async function records(query: Query) {
   return query("SELECT connector_instance_id, stream, record_key, record_json FROM records ORDER BY connector_instance_id, stream, record_key");
+}
+async function deletedSources(query: Query) {
+  const tombstones = await query("SELECT * FROM connector_instance_tombstones");
+  const devices = await query("SELECT * FROM device_exporters");
+  return (await query("SELECT * FROM device_source_instances")).filter(source => !source.connector_instance_id && tombstones.some(row => row.connector_id === source.connector_id && row.owner_subject_id === devices.find(device => device.device_id === source.device_id)?.owner_subject_id && row.source_binding_key === key(String(source.local_binding_id)))).map(source => source.source_instance_id);
+}
+async function assertDeletedSources(query: Query, deleted: unknown[]) {
+  const sources = await query("SELECT * FROM device_source_instances");
+  for (const id of deleted) assert.equal(sources.find(source => source.source_instance_id === id)?.connector_instance_id, null, `deleted source ${id} stays unlinked`);
 }
 async function state(query: Query) {
   const instances = await query("SELECT * FROM connector_instances ORDER BY connector_instance_id");
@@ -77,7 +93,7 @@ async function state(query: Query) {
   for (const instance of instances) {
     const binding = json(instance.source_binding_json);
     assert.equal(instance.source_binding_key, key(String(binding.local_binding_name)), "binding JSON and hash agree");
-    const target = instances.filter(row => row.connector_id === instance.connector_id && row.source_binding_key === key(String(binding.local_binding_name)));
+    const target = instances.filter(row => row.owner_subject_id === instance.owner_subject_id && row.connector_id === instance.connector_id && row.source_binding_key === key(String(binding.local_binding_name)));
     assert.deepEqual(target.map(row => row.connector_instance_id), [instance.connector_instance_id], "selected-connection enrollment resolves to itself");
   }
   for (const source of sources) {
@@ -88,7 +104,7 @@ async function state(query: Query) {
       assert.ok(tombstones.some(row => row.source_binding_key === key(String(source.local_binding_id))), "unlinked source remains tombstoned");
     }
   }
-  for (const tombstone of tombstones) assert.ok(!instances.some(row => row.connector_id === tombstone.connector_id && row.source_binding_key === tombstone.source_binding_key), "deleted binding gains no live instance");
+  for (const tombstone of tombstones) assert.ok(!instances.some(row => row.owner_subject_id === tombstone.owner_subject_id && row.connector_id === tombstone.connector_id && row.source_binding_key === tombstone.source_binding_key), "deleted binding gains no live instance");
   if (instances.some(row => row.connector_instance_id === "inst_new" && row.source_binding_key === key("binding-a"))) {
     assert.equal(instances.find(row => row.source_binding_key === key("binding-a"))?.connector_instance_id, "inst_new", "fresh bare-name enrollment keeps current connection");
   }
@@ -108,8 +124,10 @@ test("bounded rename state space: two boots, binding invariants and backend pari
     try {
       await seed(query, shape, false);
       const original = await records(query);
+      const deleted = await deletedSources(query);
       closeDb();
       db = initDb(path);
+      await assertDeletedSources(query, deleted);
       assert.deepEqual(await records(query), original, `${shape.name}: records unchanged`);
       expected.set(shape.name, await state(query));
       const all = async () => Promise.all([state(query), records(query), ...collisionTables.map(table => query(`SELECT * FROM ${table} ORDER BY 1, 2, 3`))]);
@@ -131,9 +149,11 @@ test("bounded rename state space: two boots, binding invariants and backend pari
         await query("TRUNCATE records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");
         await seed(query, shape, true);
         const original = await records(query);
+        const deleted = await deletedSources(query);
         await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [CONNECTOR_ID_RENAME_MIGRATION_ID]);
         if (!complete) await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID]);
         await bootstrapPostgresSchema();
+        await assertDeletedSources(query, deleted);
         assert.deepEqual(await records(query), original);
         const identityRows = (value: unknown) => JSON.parse(JSON.stringify(value, (k, v) => k === "source_revision" || k === "updated_at" ? undefined : v));
         assert.deepEqual(identityRows(await state(query)), identityRows(expected.get(shape.name)), "SQLite/Postgres identity and binding parity (driver revision counters and sweep timestamps excluded)");
