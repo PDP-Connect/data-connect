@@ -8,10 +8,10 @@ import test from "node:test";
 import { consumePendingCode } from "./helpers/rename-enrollment-fixture.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { bootstrapPostgresSchema, closePostgresStorage, getPostgresPool, initPostgresStorage } from "../server/postgres-storage.ts";
-import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
+import { CONNECTOR_ID_RENAME_MIGRATION_ID, migrateRenamedConnectorIdsSqlite, migrateRenamedConnectorIdsPostgres } from "../server/connector-id-rename-migration.ts";
 import { LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID } from "../server/postgres-migration-ledger.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
-import { assertLegacyLocalDevice, bindingScenarios, collisionTables, key, legacyConnectors, observationScenarios, seedLegacyLocalDevice, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
+import { assertCollision, assertObservationScenario, assertLegacyLocalDevice, bindingScenarios, collisionTables, key, legacyConnectors, observationScenarios, seedLegacyLocalDevice, seedBindingScenario, seedCollision, seedObservationScenario, seedTombstoneShape, type Query } from "./helpers/rename-collision-fixtures.ts";
 
 // Fixed seed, bounded product: independent old/new/both masks for each table,
 // with device pointers constrained to existing instances (or tombstoned sources).
@@ -27,6 +27,72 @@ const shapes = [
   ...Array.from({ length: 12 }, (_, i) => ({ name: `seed-7701128-${i}`, masks: Array.from({ length: 10 }, () => next() % 3 + 1) })),
 ];
 const json = (value: unknown): Record<string, unknown> => typeof value === "string" ? JSON.parse(value) : value as Record<string, unknown>;
+
+// Exercise every planned UNIQUE-key policy under synthetic ids as well as bare ids.
+const syntheticShapes = [...collisionTables, ...observationScenarios, "bindings"];
+const syntheticId = (connector: string) => `local-device:${connector}:rename_trigger`;
+async function seedSynthetic(query: Query, shape: string, postgres: boolean) {
+  const syntheticQuery: Query = sql => query(sql.replaceAll("'claude_code'", `'${syntheticId("claude_code")}'`).replaceAll("'claude-code'", `'${syntheticId("claude-code")}'`));
+  if (shape === "bindings") {
+    await seedBindingScenario(syntheticQuery, "null-pointer", postgres);
+    for (const [id, connector] of [["old", "claude_code"], ["new", "claude-code"]]) {
+      await syntheticQuery(`INSERT INTO device_enrollment_codes (enrollment_code_id, code_hash, owner_subject_id, connector_id, local_binding_id, created_at, expires_at) VALUES ('code_${id}', 'hash_${id}', 'owner_local', '${connector}', 'binding-a', '2026-11-14', '2999-01-01')`);
+    }
+  } else if ((observationScenarios as readonly string[]).includes(shape)) await seedObservationScenario(syntheticQuery, shape);
+  else await seedCollision(syntheticQuery, shape);
+  await query("INSERT INTO connectors (connector_id, manifest, created_at) VALUES ('claude_code', '{}', '2026-11-14')");
+  if (shape !== "bindings") await query("INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('d1', 'owner_local', 'device', '2026-11-14', '2026-11-14')");
+  // The bare source makes this pair discoverable; its own binding is unrelated.
+  await query("INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, local_binding_id, created_at, updated_at) VALUES ('rename_trigger', 'd1', 'claude_code', 'trigger', '2026-11-14', '2026-11-14')");
+}
+async function assertSynthetic(query: Query, shape: string) {
+  const normalized: Query = async sql => (await query(sql)).map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === "string" ? v.replaceAll(syntheticId("claude-code"), "claude-code").replaceAll(syntheticId("claude_code"), "claude_code") : v])));
+  if (shape === "bindings") {
+    const name = `binding-a#renamed-from:${syntheticId("claude_code")}`;
+    assert.equal((await query("SELECT * FROM connector_instances WHERE connector_instance_id = 'inst_old'"))[0]?.source_binding_key, key(name));
+    assert.equal((await query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_old'"))[0]?.local_binding_id, name);
+    assert.equal((await query("SELECT * FROM device_enrollment_codes WHERE enrollment_code_id = 'code_old'"))[0]?.local_binding_id, name);
+    assert.equal((await query("SELECT * FROM device_source_instances WHERE source_instance_id = 'src_old'"))[0]?.connector_instance_id, "inst_old");
+    assert.equal((await query("SELECT * FROM records")).length, 2);
+  } else if ((observationScenarios as readonly string[]).includes(shape)) await assertObservationScenario(normalized, shape);
+  else await assertCollision(normalized, shape);
+}
+
+test("synthetic rename pairs reuse every unique-key collision policy", async t => {
+  const failures: string[] = [];
+  for (const shape of syntheticShapes) {
+    const db = initDb(":memory:");
+    const query: Query = async sql => /^SELECT/.test(sql) ? db.prepare(sql).all() as Record<string, unknown>[] : (db.exec(sql), []);
+    try {
+      await seedSynthetic(query, shape, false);
+      migrateRenamedConnectorIdsSqlite(db);
+      await assertSynthetic(query, shape);
+      assert.equal(migrateRenamedConnectorIdsSqlite(db).changedRows, 0);
+    } catch (error) { failures.push(`SQLite synthetic ${shape}: ${error instanceof Error ? error.message : error}`); }
+    finally { closeDb(); }
+  }
+  t.diagnostic(`${syntheticShapes.length} SQLite synthetic shapes ran`);
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  if (url) await withTemporaryPostgresDatabase({ connectionString: url, databaseName: `rename_synthetic_${process.pid}`, closeConnections: closePostgresStorage }, async databaseUrl => {
+    await initPostgresStorage({ backend: "postgres", databaseUrl });
+    const pool = getPostgresPool();
+    const client = await pool.connect();
+    const query: Query = async sql => (await client.query(sql)).rows;
+    try {
+      for (const shape of syntheticShapes) {
+        try {
+          await query("TRUNCATE device_enrollment_codes, device_ingest_credentials, records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");
+          await seedSynthetic(query, shape, true);
+          await migrateRenamedConnectorIdsPostgres(client);
+          await assertSynthetic(query, shape);
+          assert.equal((await migrateRenamedConnectorIdsPostgres(client)).changedRows, 0);
+        } catch (error) { failures.push(`Postgres synthetic ${shape}: ${error instanceof Error ? error.message : error}`); }
+      }
+    } finally { client.release(); }
+  });
+  t.diagnostic(url ? `${syntheticShapes.length} Postgres synthetic shapes ran` : "Postgres synthetic shapes skipped: PDPP_TEST_POSTGRES_URL unset");
+  assert.deepEqual(failures, []);
+});
 
 async function seed(query: Query, shape: typeof shapes[number], postgres: boolean) {
   if ("codeBinding" in shape) {
@@ -161,7 +227,7 @@ test("bounded rename state space: two boots, binding invariants and backend pari
     const pool = getPostgresPool();
     const query: Query = async sql => (await pool.query(sql)).rows;
     for (const complete of [false, true]) for (const shape of shapes) {
-      // A completed canonicalization receipt means the sweep already consumed legacy ids.
+      // Receipt v1 recovered synthetic rows before completion; supported writers now use bare connector keys.
       if (complete && "legacy" in shape) continue;
       try {
         await query("TRUNCATE device_enrollment_codes, device_ingest_credentials, records, connector_state, record_acquisition_provenance, record_changes, connectors, device_exporters, connector_instances, connector_instance_tombstones, connector_observation_runs, acquisition_batches, browser_surface_leases CASCADE");

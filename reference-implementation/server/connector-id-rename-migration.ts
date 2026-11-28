@@ -488,7 +488,7 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
     const legacy = legacyLocalDeviceEntries(raw.prepare("SELECT * FROM device_source_instances").all());
     const entries = [...renameEntries(), ...legacy];
     const allOlds = entries.map(([oldId]) => oldId);
-    for (const [oldId, newId] of renameEntries()) {
+    for (const [oldId, newId] of entries) {
       if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
         supersededParents.add(oldId);
       }
@@ -508,14 +508,6 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
         if (drop) {
           countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
         }
-      }
-    }
-    // Legacy ids hold no bindings, so they need only the parent row and key cleanup.
-    for (const [oldId, newId] of legacy) {
-      if (adoptParentSqlite(raw, oldId, newId) === "superseded") supersededParents.add(oldId);
-      for (const c of columns.filter((x) => x.table !== "connectors")) {
-        const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
-        if (drop) countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
       }
     }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
@@ -676,7 +668,7 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     const legacy = legacyLocalDeviceEntries((await client.query("SELECT * FROM device_source_instances")).rows);
     const entries = [...renameEntries(), ...legacy];
     const allOlds = entries.map(([oldId]) => oldId);
-    for (const [oldId, newId] of renameEntries()) {
+    for (const [oldId, newId] of entries) {
       if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
         supersededParents.add(oldId);
       }
@@ -698,14 +690,6 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
         if (drop) {
           countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);
         }
-      }
-    }
-    // Legacy ids hold no bindings, so they need only the parent row and key cleanup.
-    for (const [oldId, newId] of legacy) {
-      if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") supersededParents.add(oldId);
-      for (const c of columns.filter((x) => x.table !== "connectors")) {
-        const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
-        if (drop) countSuperseded(superseded, c.table, (await client.query(drop, [oldId, newId])).rowCount ?? 0);
       }
     }
     for (const c of columns.filter((x) => x.table !== "connectors")) {

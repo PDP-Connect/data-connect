@@ -184,6 +184,12 @@ export async function seedLegacyLocalDevice(query: Query, connector: string, pos
   await query(`INSERT INTO device_exporters (device_id, owner_subject_id, display_name, created_at, updated_at) VALUES ('d1', 'owner_local', 'd1', '${now}', '${now}')`);
   for (const id of [connector, legacyId(connector)]) await query(`INSERT INTO connectors (connector_id, manifest, created_at) VALUES ('${id}', '{}', '${now}')`);
   await query(`INSERT INTO device_source_instances (source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, created_at, updated_at) VALUES ('src_old', 'd1', '${connector}', NULL, 'binding-a', '${now}', '${now}')`);
+  if (connector === "claude_code") {
+    await query(`INSERT INTO connector_instances (connector_instance_id, owner_subject_id, connector_id, display_name, source_kind, source_binding_key, source_binding_json, created_at, updated_at) VALUES ('legacy_inst', 'owner_local', '${connector}', 'device', 'local_device', '${key("binding-a")}', '{"kind":"local_device","local_binding_name":"binding-a"}', '${now}', '${now}')`);
+    for (const [id, spelling] of [["old", connector], ["new", "claude-code"]] as const) {
+      await query(`INSERT INTO connector_observation_runs VALUES ('${legacyId(spelling)}', 'legacy_inst', 'run_${id}', 1, 1, '${now}', '{}')`);
+    }
+  }
   await query(`INSERT INTO records (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at${postgres ? ", primary_key_text" : ""})
     VALUES ('${legacyId(connector)}', 'legacy_inst', 'sessions', 'record', '{}', '${now}'${postgres ? ", 'record'" : ""})`);
 }
@@ -192,6 +198,11 @@ export async function assertLegacyLocalDevice(query: Query, connector: string): 
   assert.deepEqual((await query("SELECT connector_id, connector_instance_id FROM device_source_instances")).map(row => ({ ...row })), [{ connector_id: current, connector_instance_id: "legacy_inst" }], "source recovers its legacy instance");
   assert.deepEqual((await query("SELECT connector_id, connector_instance_id FROM records")).map(row => ({ ...row })), [{ connector_id: current, connector_instance_id: "legacy_inst" }], "legacy record joins that instance");
   assert.deepEqual((await query("SELECT connector_instance_id, connector_id FROM connector_instances")).map(row => ({ ...row })), [{ connector_instance_id: "legacy_inst", connector_id: current }]);
+  if (connector === "claude_code") {
+    const runs = await query("SELECT connector_id, run_id, recorded_seq FROM connector_observation_runs ORDER BY recorded_seq");
+    assert.deepEqual(runs.map(row => [row.connector_id, row.run_id]), [[legacyId(current), "run_old"], [legacyId(current), "run_new"]]);
+    assert.ok(Number(runs[0]!.recorded_seq) < Number(runs[1]!.recorded_seq));
+  }
 }
 
 export const observationScenarios = ["observation-replay", "observation-conflict"] as const;
