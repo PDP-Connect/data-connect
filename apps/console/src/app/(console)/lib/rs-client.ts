@@ -375,9 +375,10 @@ export async function queryRecords(
 
 /**
  * One time bucket from the `group_by_time` aggregate (the server's `groups[]`).
- * `key` is the ISO bucket-start (`YYYY-MM-DD` for day/week/month, `…THH:MM` for
- * hour) or null (the null/unparseable bucket). `count` is the TRUE total over
- * the filtered, grant-scoped corpus — not a loaded page.
+ * `key` is the ISO bucket-start (`YYYY-MM-DD` for day/week/month/quarter/year,
+ * `…THH:MM:SS±HH:MM` with the bucket's UTC offset for minute/hour) or null (the
+ * null/unparseable bucket). `count` is the TRUE total over the filtered,
+ * grant-scoped corpus — not a loaded page.
  */
 export interface AggregateTimeBucket {
   count: number;
